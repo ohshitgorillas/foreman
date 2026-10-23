@@ -17,17 +17,19 @@ The unit of a run becomes the group. Every brief a role receives is either a ste
 
 The core modules and homes of `docs/superpowers/specs/harness-core-design.md:16-174` stand except where this file changes them. Only changed and new modules are listed.
 
-`foreman/errors.py`: adds the owner-ruling failure and the stop for reviewer findings. Replaces nothing.
+`foreman/errors.py`: adds the stop for Void's ruling and the stop for reviewer findings; `Escalated` goes to Void. Replaces nothing.
 
 ```python
-class RulingNeeded(ForemanError): exit_code = 6    # an agent refused or overloaded, a step check missed, red output or an upheld finding named no group path, or nothing changed
+class Escalated(ForemanError): exit_code = 5       # red twice; Void, the dispatcher, acts
+class RulingNeeded(ForemanError): exit_code = 6    # an agent refused or overloaded, a step check missed, red output or an upheld finding named no group path, or nothing changed; Void, the dispatcher, rules
 class FindingsToRule(ForemanError): exit_code = 7  # reviewers filed findings; Void, the dispatcher, upholds or declines each
 ```
 
-`foreman/events.py`: adds kept text, the done set, the dispatcher signal and the two stream writes. Replaces `foreman/cli.py:28-32`, `foreman/cli.py:100`, `foreman/cli.py:105`, `foreman/cli.py:112`.
+`foreman/events.py`: adds kept text, the done set, the dispatcher signals and the two stream writes; `milestone_done` is the one owner signal. Replaces `foreman/events.py:9`, `foreman/cli.py:28-32`, `foreman/cli.py:57-59`, `foreman/cli.py:100`, `foreman/cli.py:105`, `foreman/cli.py:112`, `foreman/cli.py:115-116`.
 
 ```python
-DISPATCHER_SIGNALS = ("findings",)   # beside OWNER_SIGNALS (foreman/events.py:9), which keeps its three
+OWNER_SIGNALS = ("milestone_done",)
+DISPATCHER_SIGNALS = ("findings", "ruling_needed", "red_twice")
 
 class EventLog:
     def keep(self, name: str, text: str) -> Path: ...   # writes state_dir/<name>.txt, emits "kept", returns the path
@@ -145,11 +147,11 @@ def run_section(cfg: Config, groups: list[Group], log: EventLog, backend: Backen
     # runs each ready group (next_ready over log.done()) until none is ready; notifies milestone_done when every group is done
 ```
 
-`run_group`, in order; every agent output and check output goes to `log.keep`, and every raise names the kept file and the worktree in its signal:
+`run_group`, in order; every agent output and check output goes to `log.keep`; every `RulingNeeded` raise follows `log.notify_dispatcher("ruling_needed", group.id, ...)`, and every signal names the kept file and the worktree:
 
 1. `git.make_worktree(cfg, group.id)`.
 2. Each step: `start(step.brief, wt, step.role)`, `wait`. `reports.read`: `rejected` or `overloaded` raises `RulingNeeded`. `verify.check_step`: red raises `RulingNeeded`.
-3. `verify.verify`. Red: `reports.route(reports.lines(result), wt, group)`; unowned lines, or no owned line, raise `RulingNeeded`; otherwise each owning step in group order gets `start(brief.finding(lines), wt, step.role)`, read as in 2; `verify.verify` again; red notifies `red_twice` and raises `Escalated`.
+3. `verify.verify`. Red: `reports.route(reports.lines(result), wt, group)`; unowned lines, or no owned line, raise `RulingNeeded`; otherwise each owning step in group order gets `start(brief.finding(lines), wt, step.role)`, read as in 2; `verify.verify` again; red calls `log.notify_dispatcher("red_twice", group.id, ...)` and raises `Escalated`.
 4. Each `cfg.reviewers` entry whose paths hold a changed path: `start(brief.review(reviewer, group), wt, reviewer.role)`, read as in 2, its output kept as `<group id>-review-<reviewer role>`. Any finding from any reviewer: `log.notify_dispatcher("findings", group.id, ...)` naming each kept review and the worktree, then raise `FindingsToRule`.
 5. Commit the changed paths under the group's step paths as `Group <id>: steps <ids>` (none changed raises `RulingNeeded`), push, `git.remove_worktree`, emit `group_done`.
 
@@ -174,7 +176,8 @@ def entry() -> NoReturn: ...
 | Concern | Home | Forbidden elsewhere |
 |---|---|---|
 | Output, kept text, owner and dispatcher signals | `foreman/events.py` | `sys.stdout`, `sys.stderr`, `print`, files written or read under `state_dir` |
-| Owner-ruling failure | `RulingNeeded` in `foreman/errors.py` | any other exception or exit code for a refusal, a missed step check or an unowned line |
+| Owner signal | `log.notify_owner("milestone_done", ...)` in `loop.run_section` | any other owner signal; a stop reaching the owner except as Void forwards it |
+| Stops Void rules on | `RulingNeeded` and `Escalated` in `foreman/errors.py`, signalled by `notify_dispatcher("ruling_needed", ...)` and `notify_dispatcher("red_twice", ...)` | any other exception, exit code or signal for a refusal, an overload, a missed step check, an unowned line, nothing changed or red twice |
 | Reviewer findings stop | `FindingsToRule` in `foreman/errors.py`, signalled by `notify_dispatcher("findings", ...)` | reviewer findings in an owner signal; any other exception or exit code for them |
 | Upholding or declining reviewer findings | Void, the dispatcher, handing the upheld lines to `python -m foreman upheld` | Foreman upholding, declining or dispatching a reviewer finding Void has not upheld |
 | Reading agent, gate and upheld text | `foreman/reports.py` | matching `REJECTED`, `OVERLOADED`, `FINDINGS`, `path:line` or upheld lines anywhere else |
@@ -206,9 +209,3 @@ def entry() -> NoReturn: ...
 | 11 | `queues/m1.toml` | Void, the dispatcher |
 
 Step 11 rewrites the step file in the group format, each step's brief in its role's shape. The first real run is one Gauntlet group through `python -m foreman run`, by the owner.
-
-## Decisions for the owner
-
-1. **The other stops: a refusal or overload, a missed step check, an unowned line, nothing changed, and red twice.** None asks what the product does, and each goes to the owner as `ruling_needed` or `red_twice` (`foreman/events.py:9`). Recommend: each goes to Void as a dispatcher signal, `RulingNeeded` and `Escalated` signalled by `notify_dispatcher`, leaving `milestone_done` the one signal Foreman sends the owner; cost: Void decides every stop, and a product question reaches the owner only when Void forwards it. Alternative: they stay owner signals; cost: the owner acts on brief-shape and mechanical stops, at a rate unmeasured.
-2. **Review after an upheld round.** Recommend: once the round's check is green, the reviewers run again and new findings go back to Void, as `run_upheld` 3 holds; cost: one review and one Void ruling per round, the number of rounds unmeasured. Alternative: commit once the round's check is green; cost: the fix to an upheld finding lands unreviewed.
-3. **How Void hands back the upheld findings.** Recommend: one file of lines copied verbatim from the kept reviews, each line's reviewer found by `reports.upheld` matching it in that reviewer's kept findings; cost: an edited line fails as `ConfigError`. Alternative: one file per reviewer, named on the command line with its role; cost: Void names each role, and a line filed under the wrong role reaches the wrong round.
