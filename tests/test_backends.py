@@ -21,18 +21,15 @@ def test_start_runs_claude_in_worktree(fake_run, tmp_path: Path) -> None:
     assert b.wait(job).out == "out claude"
 
 
-def test_resume_reuses_session(fake_run, tmp_path: Path) -> None:
+def test_each_start_is_a_fresh_session(fake_run, tmp_path: Path) -> None:
     b = backends.ClaudeLocal()
-    job = b.start("first", tmp_path, "builder")
-    b.wait(job)
-    again = b.resume(job, "fix it")
+    first = b.start("one", tmp_path, "builder")
+    second = b.start("two", tmp_path, "gauntlet")
     calls, _ = fake_run
-    cmd, _ = calls[1]
-    assert cmd[cmd.index("--resume") + 1] == job.handle
-    assert cmd[cmd.index("--agent") + 1] == "builder"
-    assert cmd[-1] == "fix it"
-    assert again.handle == job.handle
-    assert b.wait(again).code == 0
+    assert first.handle != second.handle
+    assert "--resume" not in calls[1][0]
+    assert calls[1][0][calls[1][0].index("--agent") + 1] == "gauntlet"
+    assert not hasattr(b, "resume")
 
 
 def test_wait_without_start_raises(tmp_path: Path) -> None:

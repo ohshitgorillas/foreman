@@ -1,4 +1,4 @@
-"""Agent launch: the Backend interface and the local Claude Code adapter."""
+"""Agent launch: every dispatch is a fresh agent; the Backend interface and the local Claude Code adapter."""
 
 import uuid
 from dataclasses import dataclass
@@ -22,9 +22,8 @@ class Job:
 class Backend(Protocol):
     name: str
 
-    def start(self, brief: str, worktree: Path, agent: str) -> Job: ...
+    def start(self, brief: str, worktree: Path, role: str) -> Job: ...
     def wait(self, job: Job) -> Result: ...
-    def resume(self, job: Job, brief: str) -> Job: ...
 
 
 class ClaudeLocal:
@@ -42,7 +41,6 @@ class ClaudeLocal:
             args if args is not None else ["--permission-mode", "bypassPermissions"]
         )
         self._results: dict[str, Result] = {}
-        self._agents: dict[str, str] = {}
 
     def _launch(
         self, flags: list[str], brief: str, worktree: Path, handle: str
@@ -55,12 +53,9 @@ class ClaudeLocal:
         except Exception as e:
             raise BackendError(f"cannot start {self.command}: {e}") from e
 
-    def start(self, brief: str, worktree: Path, agent: str) -> Job:
+    def start(self, brief: str, worktree: Path, role: str) -> Job:
         handle = str(uuid.uuid4())
-        self._agents[handle] = agent
-        self._launch(
-            ["--agent", agent, "--session-id", handle], brief, worktree, handle
-        )
+        self._launch(["--agent", role, "--session-id", handle], brief, worktree, handle)
         return Job(self.name, worktree.name, worktree, handle)
 
     def wait(self, job: Job) -> Result:
@@ -68,13 +63,6 @@ class ClaudeLocal:
             return self._results.pop(job.handle)
         except KeyError:
             raise BackendError(f"no running job {job.handle}") from None
-
-    def resume(self, job: Job, brief: str) -> Job:
-        agent = self._agents[job.handle]
-        self._launch(
-            ["--agent", agent, "--resume", job.handle], brief, job.worktree, job.handle
-        )
-        return job
 
 
 def get(cfg: Config) -> Backend:
