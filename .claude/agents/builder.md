@@ -18,10 +18,10 @@ Read `docs/superpowers/specs/harness-core-design.md` (Modules, Homes, Order), `d
 
 ## Brief rule
 
-A legal brief names one Order step (1-8, design lines 183-190), its paths, which must lie within your writes (`foreman/`, `tests/`, `pyproject.toml`, `Makefile`, `foreman.example.toml`; design line 178), and its one done-check. Check the brief before any work:
+A legal brief names one Order step (1-8, design lines 183-190) and its paths, which must lie within your writes. The brief's path list is binding: the dispatcher may add files to a step's Order paths, up to five in all (`foreman/`, `tests/`, `pyproject.toml`, `Makefile`, `foreman.example.toml`; design line 178), and its one done-check. Check the brief before any work:
 
 - It fails the 7.1f test in `docs/research/dispatch-rules.md:2`: refuse as that rule says, first line `OVERLOADED: <test failed, with its numbers>`, with no edits.
-- It names a path outside your writes or outside its Order step: return `REFUSED: OUT OF SCOPE`, then each offending line quoted, and nothing else; write nothing.
+- It names a path outside your writes, or more than five paths: return `REFUSED: OUT OF SCOPE`, then each offending line quoted, and nothing else; write nothing.
 
 ## Steps
 
@@ -35,7 +35,7 @@ A legal brief names one Order step (1-8, design lines 183-190), its paths, which
 
 ## Rails
 
-- Write only the step's named paths within your writes. Never write `queues/`, `.claude/agents/` or any settings.
+- Write only the paths the brief names, within your writes. Never write `queues/`, `.claude/agents/` or any settings.
 - The Homes table's "Forbidden elsewhere" column binds every line you write.
 - One step per dispatch. Finding the step larger than briefed, stop at a safe point and report done and remaining as 7.1f says.
 
