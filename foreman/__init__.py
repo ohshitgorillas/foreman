@@ -1,0 +1,1 @@
+"""Foreman: the harness core."""
