@@ -18,7 +18,15 @@ RED_UNTIL_FIXED = [
 
 
 def _step(sid: str, paths: list[str], **kw: object) -> Step:
-    return Step(sid, "builder", f"brief {sid}", paths, kw.get("check", []), 0)  # type: ignore[arg-type]
+    return Step(
+        sid,
+        "builder",
+        f"brief {sid}",
+        paths,
+        kw.get("check", []),  # type: ignore[arg-type]
+        0,
+        kw.get("views", []),  # type: ignore[arg-type]
+    )
 
 
 def _group(*steps: Step, gid: str = "g1") -> Group:
@@ -242,3 +250,46 @@ def test_run_section_stop_propagates_without_owner_signal(
         loop.run_section(green_cfg, [g1], log, fake_backend(outputs=["OVERLOADED: x"]))
     assert "milestone_done" not in capsys.readouterr().err
     assert git.worktree(green_cfg, "g1").exists()
+
+
+VIEW_CMD = [
+    "sh",
+    "-c",
+    'test -f a.py && mkdir -p "$2" && touch "$2/a.pyi"',
+    "sh",
+]
+
+
+def _viewing(cfg: Config) -> Config:
+    return replace(cfg, view_cmd=VIEW_CMD)
+
+
+def test_views_made_after_earlier_step_and_cleared_on_land(
+    green_cfg, origin, log, fake_backend
+) -> None:
+    cfg = _viewing(green_cfg)
+    g = _group(_step("s1", ["a.py"]), _step("s2", ["b.py"], views=["a.py"]))
+    seen: list[bool] = []
+
+    class Spy(fake_backend):  # type: ignore[valid-type, misc]
+        def start(self, brief, worktree, agent):
+            seen.append((cfg.view_root / "g1" / "a.pyi").exists())
+            return super().start(brief, worktree, agent)
+
+    loop.run_group(cfg, g, log, Spy([{"a.py": "1"}, {"b.py": "2"}]))
+    assert seen == [False, True]
+    assert not (cfg.view_root / "g1").exists()
+    assert log.kept("g1-s2-views") == ""
+
+
+def test_failed_views_are_a_ruling_before_dispatch(
+    green_cfg, log, fake_backend, capsys
+) -> None:
+    cfg = _viewing(green_cfg)
+    g = _group(_step("s1", ["b.py"], views=["a.py"]))
+    backend = fake_backend()
+    with pytest.raises(RulingNeeded):
+        loop.run_group(cfg, g, log, backend)
+    assert backend.briefs == []
+    assert "[ruling_needed] g1:" in capsys.readouterr().err
+    assert (cfg.worktree_root / "g1").exists()

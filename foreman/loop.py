@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from foreman import backends, brief, git, reports, steps, verify
+from foreman import backends, brief, git, reports, steps, verify, views
 from foreman.backends import Backend
 from foreman.config import Config, Reviewer
 from foreman.errors import (
@@ -49,8 +49,15 @@ def _dispatch(
     return report
 
 
-def _steps(group: Group, wt: Path, log: EventLog, backend: Backend) -> None:
+def _steps(
+    cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend
+) -> None:
     for step in group.steps:
+        if step.views:
+            made = views.make(cfg, group.id, step, wt)
+            path = log.keep(f"{group.id}-{step.id}-views", _text(made.result))
+            if not made.green:
+                raise _rule(log, group, wt, str(path), f"step {step.id} views failed")
         _dispatch(
             group, wt, log, backend, f"{group.id}-{step.id}", step.brief, step.role
         )
@@ -121,6 +128,7 @@ def _land(cfg: Config, group: Group, wt: Path, log: EventLog) -> str:
     commit = git.commit_paths(wt, paths, f"Group {group.id}: steps {ids}")
     git.push(wt)
     git.remove_worktree(cfg, wt)
+    views.clear(cfg, group.id)
     log.emit("group_done", group.id, commit=commit)
     return commit
 
@@ -129,7 +137,7 @@ def run_group(cfg: Config, group: Group, log: EventLog, backend: Backend) -> str
     """Run a group to its commit; stops leave the worktree in place."""
     wt = git.make_worktree(cfg, group.id)
     log.emit("group_started", group.id)
-    _steps(group, wt, log, backend)
+    _steps(cfg, group, wt, log, backend)
     return _check_review_land(cfg, group, wt, log, backend)
 
 
