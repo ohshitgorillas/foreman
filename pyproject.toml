@@ -9,6 +9,7 @@ dev = ["pytest", "ruff"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.setuptools]
 packages = ["foreman"]
