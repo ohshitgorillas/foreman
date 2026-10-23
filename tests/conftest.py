@@ -10,6 +10,7 @@ from foreman import run
 from foreman.backends import Job
 from foreman.config import Config
 from foreman.run import Result, run_ok
+from foreman.steps import Group, Step
 
 
 def identify(repo: Path) -> None:
@@ -122,3 +123,27 @@ class FakeBackend:
 def fake_backend() -> type[FakeBackend]:
     """The FakeBackend class; call it with the files to write."""
     return FakeBackend
+
+
+def make_step(
+    sid: str = "s1", paths: list[str] | None = None, **fields: object
+) -> Step:
+    """A builder Step; fields override any of the defaults."""
+    base = Step(
+        sid, "builder", f"brief {sid}", ["a.py"] if paths is None else paths, [], 0, []
+    )
+    return replace(base, **fields)  # type: ignore[arg-type]
+
+
+def make_group(*steps: Step, gid: str = "g1", **fields: object) -> Group:
+    """A Group of steps; fields override design or after."""
+    return replace(Group(gid, list(steps), "design.md", []), **fields)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def origin(cfg: Config, tmp_path: Path) -> Path:
+    """A bare repository added as cfg.target_repo's origin remote."""
+    bare = tmp_path / "origin.git"
+    run_ok(["git", "init", "-q", "--bare", str(bare)], tmp_path)
+    run_ok(["git", "remote", "add", "origin", str(bare)], cfg.target_repo)
+    return bare

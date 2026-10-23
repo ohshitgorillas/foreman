@@ -4,7 +4,6 @@ import pytest
 
 from foreman import backends
 from foreman.cli import main
-from foreman.config import Config
 from foreman.run import run_ok
 
 GROUP_FILE = (
@@ -18,14 +17,6 @@ def steps_file(tmp_path: Path) -> Path:
     path = tmp_path / "m.toml"
     path.write_text(GROUP_FILE)
     return path
-
-
-@pytest.fixture
-def origin(green_cfg: Config, tmp_path: Path) -> Path:
-    bare = tmp_path / "origin.git"
-    run_ok(["git", "init", "-q", "--bare", str(bare)], tmp_path)
-    run_ok(["git", "remote", "add", "origin", str(bare)], green_cfg.target_repo)
-    return bare
 
 
 def test_missing_config_exits_2(tmp_path: Path) -> None:
