@@ -15,7 +15,7 @@ The core below gives each of these one home before any piece exists, so none is 
 
 ## Modules
 
-Python 3.12, standard library only. Package `foreman/`. TOML is read with `tomllib`.
+Python 3.12. Package `foreman/` uses the standard library only; TOML is read with `tomllib`. Tests run under pytest, a development-only dependency declared in `pyproject.toml`.
 
 Core (every piece builds on these):
 
@@ -89,7 +89,7 @@ def push(wt: Path) -> None: ...
 
 Pieces (each built on the core):
 
-`foreman/steps.py`: reads a milestone's step file, lints every step against the overload test, picks the next ready step. A step file is `queues/<milestone>.toml` in Foreman, one per milestone, holding one `[steps.<id>]` table per step whose keys are the other `Step` fields; Gauntlet's plan files are never parsed. Replaces the overload check each agent runs (`docs/research/dispatch-rules.md:2`) as the one dispatcher-side lint.
+`foreman/steps.py`: reads a milestone's step file, lints every step against the overload test, picks the next ready step. A step file is `queues/<milestone>.toml` in Foreman, one per milestone, written by Void, the dispatcher, from Gauntlet's plan, and holding one `[steps.<id>]` table per step whose keys are the other `Step` fields; `foreman/` never parses Gauntlet's plan files. Replaces the overload check each agent runs (`docs/research/dispatch-rules.md:2`) as the one dispatcher-side lint.
 
 ```python
 @dataclass(frozen=True)
@@ -153,7 +153,7 @@ def run_step(cfg: Config, step: Step, log: EventLog) -> str: ...   # returns com
 def main(argv: list[str] | None = None) -> int: ...
 ```
 
-Test helpers: `tests/conftest.py` holds `tmp_repo` (a throwaway git repository with one commit), `cfg` (a `Config` pointing at it) and `FakeBackend` (a `Backend` that writes given files into the worktree).
+Test helpers: `tests/conftest.py` holds the pytest fixtures `tmp_repo` (a throwaway git repository with one commit), `cfg` (a `Config` pointing at it) and `FakeBackend` (a `Backend` that writes given files into the worktree).
 
 ## Homes
 
@@ -165,7 +165,8 @@ Test helpers: `tests/conftest.py` holds `tmp_repo` (a throwaway git repository w
 | Output and owner signals | `foreman/events.py` | `print`, logging setup, any other file written as a log, any other way of reaching the owner |
 | Git, worktrees, cleanup | `foreman/git.py` | running `git` (it goes through `run.run` from here only); deleting worktrees; staging the whole index |
 | Step file and overload lint | `foreman/steps.py` | parsing step files; checking file counts or done-check counts |
-| Step lists | `queues/<milestone>.toml`, one per milestone | steps kept in any other file; reading Gauntlet's plan files |
+| Step lists | `queues/<milestone>.toml`, one per milestone, written by Void, the dispatcher, from Gauntlet's plan | steps kept in any other file; `foreman/` reading Gauntlet's plan files; any roster agent writing `queues/` |
+| Builder role | `.claude/agents/builder.md`, written by `role-author` | `builder`'s writes defined in any other file; any other agent writing `.claude/agents/builder.md` |
 | Backend choice | `Config.backend`, resolved by `backends.get` | budget ledgers, meter readings or routing rules in the first version |
 | Brief text and standing lines | `foreman/brief.py` | brief or resume text built anywhere else |
 | Agent launch | `foreman/backends.py` | starting an agent process outside a `Backend` |
@@ -174,10 +175,11 @@ Test helpers: `tests/conftest.py` holds `tmp_repo` (a throwaway git repository w
 
 ## Order
 
-`builder` is a roster agent whose writes are `foreman/`, `tests/`, `pyproject.toml`, `Makefile` and `foreman.example.toml`.
+`role-author` is a roster agent whose write in this design is `.claude/agents/builder.md`. `builder` is a roster agent whose writes are `foreman/`, `tests/`, `pyproject.toml`, `Makefile` and `foreman.example.toml`.
 
 | Step | Paths | Agent |
 |---|---|---|
+| 0 | `.claude/agents/builder.md` | `role-author` |
 | 1 | `pyproject.toml`, `Makefile`, `foreman/__init__.py`, `foreman/errors.py`, `foreman/config.py` | `builder` |
 | 2 | `foreman/run.py`, `foreman/events.py`, `tests/conftest.py`, `tests/test_run.py`, `tests/test_events.py` | `builder` |
 | 3 | `foreman/git.py`, `tests/test_git.py`, `tests/test_config.py` | `builder` |
@@ -187,10 +189,8 @@ Test helpers: `tests/conftest.py` holds `tmp_repo` (a throwaway git repository w
 | 7 | `foreman/verify.py`, `tests/test_verify.py` | `builder` |
 | 8 | `foreman/cli.py`, `foreman/__main__.py`, `tests/test_cli.py`, `foreman.example.toml` | `builder` |
 
-Steps 1-3 are the core; no piece starts before step 3 lands. Step 8's done-check is `make check`; the first real run is one Gauntlet step through `python -m foreman run`, by the owner.
+Step 0 is one dispatch that writes `builder`'s role with the writes above, and lands before step 1. Steps 1-3 are the core; no piece starts before step 3 lands. Step 8's done-check is `make check`. Before a milestone's first run, Void, the dispatcher, writes its `queues/<milestone>.toml` from Gauntlet's plan; the first real run is one Gauntlet step through `python -m foreman run`, by the owner.
 
 ## Decisions for the owner
 
-1. **Test runner.** Recommend: standard library only binds `foreman/`; tests run under pytest as a development-only dependency in `pyproject.toml`, with helpers as fixtures in `tests/conftest.py` as above; cost: one development dependency. Alternative: tests use `unittest`, with the helpers as plain functions and a base class in `tests/helpers.py`; cost: no fixtures, every test calls its helpers explicitly.
-2. **Builder role file.** Recommend: the owner writes `.claude/agents/builder.md` with the writes above before step 1; cost: one role file, the owner's time unmeasured. Alternative: a roster agent that owns role files writes it from this design; cost: one extra dispatch before step 1.
-3. **Who writes step lists.** Recommend: the owner copies each milestone's steps from Gauntlet's plan into `queues/<milestone>.toml` before its first run; cost: one hand copy per milestone, time unmeasured. Alternative: add `queues/` to `builder`'s writes and dispatch one step per milestone to write it; cost: one dispatch per milestone, and the builder reads Gauntlet's plan.
+1. **Where `role-author` is installed.** The tracked roster holds no `role-author` role, so step 0 has no agent to run it. Recommend: the owner installs `role-author` with writes limited to `.claude/agents/` before step 0; cost: one role file, the owner's time unmeasured. Alternative: step 0 goes to a `role-author` installed outside this repository; cost: its write scope is bound nowhere in this repository.
