@@ -11,9 +11,13 @@ def _branch(step_id: str) -> str:
     return f"foreman/{step_id}"
 
 
+def _path(cfg: Config, group_id: str) -> Path:
+    return cfg.worktree_root / group_id
+
+
 def make_worktree(cfg: Config, step_id: str) -> Path:
     """Create a worktree for the step on branch foreman/<step_id> from HEAD."""
-    wt = cfg.worktree_root / step_id
+    wt = _path(cfg, step_id)
     if wt.exists():
         raise ForemanError(f"worktree already exists: {wt}")
     cfg.worktree_root.mkdir(parents=True, exist_ok=True)
@@ -21,6 +25,14 @@ def make_worktree(cfg: Config, step_id: str) -> Path:
         ["git", "worktree", "add", "-B", _branch(step_id), str(wt), "HEAD"],
         cfg.target_repo,
     )
+    return wt
+
+
+def worktree(cfg: Config, group_id: str) -> Path:
+    """The kept worktree make_worktree created for group_id; raises when absent."""
+    wt = _path(cfg, group_id)
+    if not wt.is_dir():
+        raise ForemanError(f"no worktree for {group_id}: {wt}")
     return wt
 
 

@@ -173,14 +173,16 @@ def next_ready(groups: list[Group], done: set[str]) -> Group | None:
     return None
 
 
-def _holds(step_path: str, path: str) -> bool:
-    base = step_path.rstrip("/")
-    return path == base or path.startswith(base + "/")
+def holds(roots: list[str], path: str) -> bool:
+    """Whether path equals one of roots or lies under one."""
+    return any(
+        path == r.rstrip("/") or path.startswith(r.rstrip("/") + "/") for r in roots
+    )
 
 
 def owner(group: Group, path: str) -> Step | None:
     """The last step in group order whose paths hold `path`."""
     for s in reversed(group.steps):
-        if any(_holds(p, path) for p in s.paths):
+        if holds(s.paths, path):
             return s
     return None

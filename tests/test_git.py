@@ -10,6 +10,7 @@ from foreman.git import (
     make_worktree,
     push,
     remove_worktree,
+    worktree,
 )
 from foreman.run import run_ok
 from tests.conftest import identify
@@ -91,3 +92,19 @@ def test_push_without_remote_raises(cfg: Config) -> None:
     wt = make_worktree(cfg, "s1")
     with pytest.raises(ForemanError):
         push(wt)
+
+
+def test_worktree_finds_kept_checkout(cfg: Config) -> None:
+    wt = make_worktree(cfg, "g1")
+    assert worktree(cfg, "g1") == wt
+
+
+def test_worktree_absent_raises(cfg: Config) -> None:
+    with pytest.raises(ForemanError):
+        worktree(cfg, "g1")
+
+
+def test_worktree_after_remove_raises(cfg: Config) -> None:
+    remove_worktree(cfg, make_worktree(cfg, "g1"))
+    with pytest.raises(ForemanError):
+        worktree(cfg, "g1")
