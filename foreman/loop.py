@@ -10,10 +10,11 @@ from foreman.errors import (
     Escalated,
     FindingsToRule,
     RulingNeeded,
+    WrongTest,
 )
 from foreman.events import EventLog
 from foreman.run import Result
-from foreman.steps import Group, next_ready
+from foreman.steps import Group, Step, next_ready
 
 
 def _rule(log: EventLog, group: Group, wt: Path, kept: str, why: str) -> RulingNeeded:
@@ -50,22 +51,49 @@ def _dispatch(
 
 
 def _steps(
-    cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend
+    cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend, first: int
 ) -> None:
-    for step in group.steps:
+    for index in range(first, len(group.steps)):
+        step = group.steps[index]
         if step.views:
             made = views.make(cfg, group.id, step, wt)
             path = log.keep(f"{group.id}-{step.id}-views", _text(made.result))
             if not made.green:
                 raise _rule(log, group, wt, str(path), f"step {step.id} views failed")
-        _dispatch(
+        log.keep(f"{group.id}-{step.id}-before", git.snapshot(wt))
+        report = _dispatch(
             group, wt, log, backend, f"{group.id}-{step.id}", step.brief, step.role
         )
+        if report.test_wrong:
+            test = _test_owner(group, index, report, wt, log)
+            text = (
+                f"kept {group.id}-{step.id}.txt; stopped step {step.id}; "
+                f"test step {test.id}; worktree {wt}"
+            )
+            log.notify_dispatcher("test_wrong", group.id, text)
+            raise WrongTest(text)
         verdict = verify.check_step(step, wt)
         if verdict is not None:
             path = log.keep(f"{group.id}-{step.id}-check", _text(verdict.result))
             if not verdict.green:
                 raise _rule(log, group, wt, str(path), f"step {step.id} check missed")
+
+
+def _test_owner(
+    group: Group, index: int, report: reports.Report, wt: Path, log: EventLog
+) -> Step:
+    """Require every wrong-test line to name the same earlier step."""
+    owned, unowned = reports.route_tests(report.test_wrong, group)
+    earlier = [step for step in group.steps[:index] if step.id in owned]
+    if unowned or len(owned) != 1 or len(earlier) != 1:
+        raise _rule(
+            log,
+            group,
+            wt,
+            f"{group.id}-{group.steps[index].id}.txt",
+            "wrong tests must belong to exactly one earlier step",
+        )
+    return earlier[0]
 
 
 def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) -> None:
@@ -137,7 +165,7 @@ def run_group(cfg: Config, group: Group, log: EventLog, backend: Backend) -> str
     """Run a group to its commit; stops leave the worktree in place."""
     wt = git.make_worktree(cfg, group.id)
     log.emit("group_started", group.id)
-    _steps(cfg, group, wt, log, backend)
+    _steps(cfg, group, wt, log, backend, 0)
     return _check_review_land(cfg, group, wt, log, backend)
 
 
@@ -193,6 +221,44 @@ def run_upheld(
                     brief.finding(owned[step.id]),
                     step.role,
                 )
+    return _check_review_land(cfg, group, wt, log, backend)
+
+
+def run_retest(
+    cfg: Config,
+    group: Group,
+    text: str,
+    log: EventLog,
+    backend: Backend | None = None,
+) -> str:
+    """Fix tests with Void's verbatim brief and rerun from the stopped step."""
+    wt = git.worktree(cfg, group.id)
+    for index, stopped in enumerate(group.steps):
+        try:
+            report = reports.parse(log.kept(f"{group.id}-{stopped.id}"))
+        except ConfigError:
+            continue
+        if report.test_wrong:
+            break
+    else:
+        raise ConfigError(f"no kept wrong-test step for {group.id}")
+    test = _test_owner(group, index, report, wt, log)
+    backend = backend or backends.get(cfg)
+    if text:
+        name = f"{group.id}-{test.id}-retest"
+        if test.views:
+            made = views.make(cfg, group.id, test, wt)
+            path = log.keep(f"{name}-views", _text(made.result))
+            if not made.green:
+                raise _rule(log, group, wt, str(path), f"step {test.id} views failed")
+        _dispatch(group, wt, log, backend, name, text, test.role)
+        verdict = verify.check_step(test, wt)
+        if verdict is not None:
+            path = log.keep(f"{name}-check", _text(verdict.result))
+            if not verdict.green:
+                raise _rule(log, group, wt, str(path), f"step {test.id} check missed")
+    git.restore(wt, log.kept(f"{group.id}-{stopped.id}-before"), stopped.paths)
+    _steps(cfg, group, wt, log, backend, index)
     return _check_review_land(cfg, group, wt, log, backend)
 
 
