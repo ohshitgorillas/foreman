@@ -38,7 +38,7 @@ def cfg(tmp_path: Path, tmp_repo: Path) -> Config:
         worktree_root=tmp_path / "worktrees",
         check_cmd=["make", "check"],
         format_cmd=["ruff", "format"],
-        standing_lines=[],
+        reviewers=[],
         backend="claude-local",
         state_dir=tmp_path / "state",
     )

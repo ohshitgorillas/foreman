@@ -4,5 +4,16 @@ worktree_root = "~/dev/foreman-worktrees"
 state_dir = "~/dev/foreman/state"
 check_cmd = ["make", "check"]
 format_cmd = ["uv", "run", "ruff", "format"]
-standing_lines = ["Run ruff format on the files you wrote.", "Never commit or push."]
 backend = "claude-local"
+
+# Reviewers run in this order after the group check, when the group changed a
+# path equal to or under one of `paths`. `spec = true` adds "spec: <design>".
+[[reviewers]]
+role = "diff-reviewer"
+paths = ["foreman/", "tests/"]
+spec = false
+
+[[reviewers]]
+role = "spec-reviewer"
+paths = ["foreman/"]
+spec = true
