@@ -12,12 +12,7 @@ from foreman.git import (
     remove_worktree,
 )
 from foreman.run import run_ok
-
-
-def _identify(wt: Path) -> None:
-    run_ok(["git", "config", "user.name", "Test"], wt)
-    run_ok(["git", "config", "user.email", "test@example.com"], wt)
-    run_ok(["git", "config", "commit.gpgsign", "false"], wt)
+from tests.conftest import identify
 
 
 def test_make_worktree_creates_checkout(cfg: Config) -> None:
@@ -61,7 +56,7 @@ def test_changed_paths_rename(cfg: Config) -> None:
 
 def test_commit_paths_commits_only_named(cfg: Config) -> None:
     wt = make_worktree(cfg, "s1")
-    _identify(wt)
+    identify(wt)
     (wt / "a.txt").write_text("a")
     (wt / "b.txt").write_text("b")
     (wt / "README.md").write_text("edited\n")
@@ -85,7 +80,7 @@ def test_push_to_origin(cfg: Config, tmp_path: Path) -> None:
     run_ok(["git", "init", "-q", "--bare", str(bare)], tmp_path)
     run_ok(["git", "remote", "add", "origin", str(bare)], cfg.target_repo)
     wt = make_worktree(cfg, "s1")
-    _identify(wt)
+    identify(wt)
     (wt / "a.txt").write_text("a")
     h = commit_paths(wt, ["a.txt"], "step s1")
     push(wt)

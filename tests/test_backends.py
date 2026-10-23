@@ -5,24 +5,12 @@ import pytest
 from foreman import backends, run
 from foreman.config import Config
 from foreman.errors import BackendError, ConfigError
-from foreman.run import Result
 
 
-@pytest.fixture
-def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], Path]]:
-    seen: list[tuple[list[str], Path]] = []
-
-    def fake(cmd, cwd, timeout=None, env=None):
-        seen.append((cmd, cwd))
-        return Result(cmd, 0, "done", "", 0.0)
-
-    monkeypatch.setattr(run, "run", fake)
-    return seen
-
-
-def test_start_runs_claude_in_worktree(calls, tmp_path: Path) -> None:
+def test_start_runs_claude_in_worktree(fake_run, tmp_path: Path) -> None:
     b = backends.ClaudeLocal()
     job = b.start("do it", tmp_path, "builder")
+    calls, _ = fake_run
     cmd, cwd = calls[0]
     assert cmd[:2] == ["claude", "-p"]
     assert cmd[-1] == "do it"
@@ -30,14 +18,15 @@ def test_start_runs_claude_in_worktree(calls, tmp_path: Path) -> None:
     assert cmd[cmd.index("--agent") + 1] == "builder"
     assert cwd == tmp_path
     assert job.backend == "claude-local"
-    assert b.wait(job).out == "done"
+    assert b.wait(job).out == "out claude"
 
 
-def test_resume_reuses_session(calls, tmp_path: Path) -> None:
+def test_resume_reuses_session(fake_run, tmp_path: Path) -> None:
     b = backends.ClaudeLocal()
     job = b.start("first", tmp_path, "builder")
     b.wait(job)
     again = b.resume(job, "fix it")
+    calls, _ = fake_run
     cmd, _ = calls[1]
     assert cmd[cmd.index("--resume") + 1] == job.handle
     assert cmd[cmd.index("--agent") + 1] == "builder"

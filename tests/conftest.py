@@ -1,13 +1,21 @@
 """Shared fixtures."""
 
-import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from foreman import run
 from foreman.backends import Job
 from foreman.config import Config
-from foreman.run import Result
+from foreman.run import Result, run_ok
+
+
+def identify(repo: Path) -> None:
+    """Give a repository or worktree a git identity."""
+    run_ok(["git", "config", "user.name", "Test"], repo)
+    run_ok(["git", "config", "user.email", "test@example.com"], repo)
+    run_ok(["git", "config", "commit.gpgsign", "false"], repo)
 
 
 @pytest.fixture
@@ -15,18 +23,11 @@ def tmp_repo(tmp_path: Path) -> Path:
     """A throwaway git repository with one initial commit."""
     repo = tmp_path / "target"
     repo.mkdir()
-    env = [
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.com",
-        "-c",
-        "commit.gpgsign=false",
-    ]
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    run_ok(["git", "init", "-q", "-b", "main"], repo)
+    identify(repo)
     (repo / "README.md").write_text("initial\n")
-    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-    subprocess.run(["git", *env, "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+    run_ok(["git", "add", "README.md"], repo)
+    run_ok(["git", "commit", "-q", "-m", "initial"], repo)
     return repo
 
 
@@ -43,42 +44,61 @@ def cfg(tmp_path: Path, tmp_repo: Path) -> Config:
     )
 
 
+@pytest.fixture
+def green_cfg(cfg: Config) -> Config:
+    """cfg whose check and format commands both succeed."""
+    return replace(cfg, check_cmd=["true"], format_cmd=["true"])
+
+
+@pytest.fixture
+def fake_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[list[str], Path]], dict[str, int]]:
+    """Fake run.run: records (cmd, cwd); exit codes are looked up by argv[0]."""
+    calls: list[tuple[list[str], Path]] = []
+    codes: dict[str, int] = {}
+
+    def fake(cmd, cwd, timeout=None, env=None):
+        calls.append((cmd, cwd))
+        return Result(cmd, codes.get(cmd[0], 0), f"out {cmd[0]}", "", 0.0)
+
+    monkeypatch.setattr(run, "run", fake)
+    return calls, codes
+
+
 class FakeBackend:
-    """A Backend that writes given files into the worktree instead of an agent."""
+    """A Backend that writes each start's files into the worktree, not an agent.
+
+    The nth start writes files[n] and its wait returns outputs[n].
+    """
 
     name = "fake"
 
     def __init__(
         self,
-        files: dict[str, str] | None = None,
-        resume_files: dict[str, str] | None = None,
+        files: list[dict[str, str]] | None = None,
+        outputs: list[str] | None = None,
     ) -> None:
-        self.files = files or {}
-        self.resume_files = resume_files or {}
+        self.files = files or []
+        self.outputs = outputs or []
         self.briefs: list[str] = []
         self.agents: list[str] = []
-        self._n = 0
+        self._out: dict[str, str] = {}
 
-    def _write(self, files: dict[str, str], worktree: Path) -> None:
-        for rel, text in files.items():
+    def start(self, brief: str, worktree: Path, agent: str) -> Job:
+        n = len(self.briefs)
+        self.agents.append(agent)
+        self.briefs.append(brief)
+        for rel, text in (self.files[n] if n < len(self.files) else {}).items():
             target = worktree / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text)
-
-    def start(self, brief: str, worktree: Path, agent: str) -> Job:
-        self.agents.append(agent)
-        self.briefs.append(brief)
-        self._n += 1
-        self._write(self.files, worktree)
-        return Job(self.name, worktree.name, worktree, f"fake-{self._n}")
+        handle = f"fake-{n + 1}"
+        self._out[handle] = self.outputs[n] if n < len(self.outputs) else ""
+        return Job(self.name, worktree.name, worktree, handle)
 
     def wait(self, job: Job) -> Result:
-        return Result(["fake"], 0, "", "", 0.0)
-
-    def resume(self, job: Job, brief: str) -> Job:
-        self.briefs.append(brief)
-        self._write(self.resume_files, job.worktree)
-        return job
+        return Result(["fake"], 0, self._out[job.handle], "", 0.0)
 
 
 @pytest.fixture
