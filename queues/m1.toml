@@ -11,6 +11,10 @@ role = "gatesmith"
 paths = ["gates/check_shell.py"]
 brief = """stub
 44 stub | gatesmith | gates/check_shell.py | AST checker and existing gate host interfaces.
+def parsing_findings(parsed: Parsed) -> tuple[Finding, ...]: ...
+def check(run: Run) -> Outcome: ...
+GATE: Gate
+def main(paths: Sequence[Path]) -> int: ...
 gates/check_shell.py"""
 
 [steps.45]
