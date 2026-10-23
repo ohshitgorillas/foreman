@@ -3,119 +3,165 @@ from pathlib import Path
 import pytest
 
 from foreman.errors import ConfigError
-from foreman.steps import Step, lint, load, next_ready
+from foreman.steps import Group, Step, lint, load, next_ready, owner
 
 
 def mk(id: str, **kw: object) -> Step:
     base: dict[str, object] = {
         "id": id,
+        "role": "builder",
+        "brief": "do it",
         "paths": ["a.py"],
-        "done_check": ["make check"],
-        "design_ref": "design:1",
-        "depends_on": [],
-        "size": "s",
+        "check": ["make", "check"],
+        "expect_code": 0,
     }
     base.update(kw)
     return Step(**base)  # type: ignore[arg-type]
 
 
+def grp(id: str, steps: list[Step] | None = None, **kw: object) -> Group:
+    base: dict[str, object] = {
+        "id": id,
+        "steps": steps if steps is not None else [mk(id + "-s")],
+        "design": "d.md",
+        "after": [],
+    }
+    base.update(kw)
+    return Group(**base)  # type: ignore[arg-type]
+
+
 GOOD = """
+[groups.g1]
+steps = ["one", "two"]
+design = "docs/d.md"
+
+[groups.g2]
+steps = ["three"]
+after = ["g1"]
+
 [steps.one]
+role = "builder"
+brief = "Build one."
 paths = ["a.py", "b.py"]
-done_check = ["make check"]
-design_ref = "design:1"
-depends_on = []
-size = "s"
-agent = "builder"
+check = ["make", "check"]
 
 [steps.two]
+role = "builder"
+brief = "Build two."
 paths = ["c.py"]
-done_check = ["make check"]
-design_ref = "design:2"
-depends_on = ["one"]
-size = "m"
-agent = "builder"
+expect_code = 1
+
+[steps.three]
+role = "builder"
+brief = "Build three."
+paths = ["d.py"]
 """
 
 
 def write(tmp_path: Path, text: str) -> Path:
-    p = tmp_path / "m.toml"
+    p = tmp_path / "steps.toml"
     p.write_text(text)
     return p
 
 
-def test_load_reads_steps_in_order(tmp_path: Path) -> None:
-    steps = load(write(tmp_path, GOOD))
-    assert [s.id for s in steps] == ["one", "two"]
-    assert steps[0] == mk("one", paths=["a.py", "b.py"])
-    assert steps[1].depends_on == ["one"] and steps[1].size == "m"
+def test_load_groups_and_steps(tmp_path: Path) -> None:
+    groups = load(write(tmp_path, GOOD))
+    assert [g.id for g in groups] == ["g1", "g2"]
+    g1, g2 = groups
+    assert [s.id for s in g1.steps] == ["one", "two"]
+    assert g1.design == "docs/d.md" and g1.after == []
+    assert g2.after == ["g1"] and g2.design == ""
+    one, two = g1.steps
+    assert one.check == ["make", "check"] and one.expect_code == 0
+    assert two.check == [] and two.expect_code == 1
+    assert one.brief == "Build one."
 
 
 @pytest.mark.parametrize(
-    "text",
+    "old,new,msg",
     [
-        "not toml [",
-        "x = 1",
-        GOOD + "\n[other]\na = 1\n",
-        GOOD.replace('size = "s"\n', ""),
-        GOOD.replace('size = "s"', 'size = "s"\nextra = 1'),
-        GOOD.replace('paths = ["c.py"]', 'paths = "c.py"'),
-        GOOD.replace('size = "m"', "size = 3"),
-        GOOD.replace('agent = "builder"\n', "", 1),
+        ('brief = "Build one."\n', "", "missing keys: brief"),
+        ('role = "builder"\nbrief = "Build three."', 'role = 3\nbrief = "x"', "role"),
+        ("expect_code = 1", 'expect_code = "1"', "expect_code"),
+        ('steps = ["three"]', 'steps = ["three", "ghost"]', "unknown steps: ghost"),
+        ('steps = ["three"]', "steps = []\nbogus = 1", "unknown keys: bogus"),
     ],
 )
-def test_load_rejects_bad_files(tmp_path: Path, text: str) -> None:
-    with pytest.raises(ConfigError):
+def test_load_rejects(tmp_path: Path, old: str, new: str, msg: str) -> None:
+    with pytest.raises(ConfigError, match=msg):
+        load(write(tmp_path, GOOD.replace(old, new)))
+
+
+def test_load_rejects_step_in_no_group(tmp_path: Path) -> None:
+    text = GOOD + '\n[steps.lost]\nrole = "b"\nbrief = "x"\npaths = ["z"]\n'
+    with pytest.raises(ConfigError, match="steps in no group: lost"):
         load(write(tmp_path, text))
 
 
-def test_load_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError):
-        load(tmp_path / "nope.toml")
+def test_load_rejects_missing_file_bad_toml_and_no_tables(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="cannot read"):
+        load(tmp_path / "none.toml")
+    with pytest.raises(ConfigError, match="invalid TOML"):
+        load(write(tmp_path, "[groups"))
+    with pytest.raises(ConfigError, match="no \\[groups"):
+        load(write(tmp_path, ""))
+    with pytest.raises(ConfigError, match="unknown keys: x"):
+        load(write(tmp_path, GOOD + "\nx = 1\n"))
 
 
 def test_lint_clean() -> None:
-    assert lint([mk("a"), mk("b", depends_on=["a"])]) == []
+    assert lint([grp("a"), grp("b", after=["a"])]) == []
 
 
-def test_lint_five_paths_ok_six_not() -> None:
-    assert lint([mk("a", paths=list("12345"))]) == []
-    (problem,) = lint([mk("a", paths=list("123456"))])
-    assert "a" in problem and "6 paths" in problem
+def test_lint_paths_and_brief() -> None:
+    bad = [
+        mk("none", paths=[]),
+        mk("many", paths=list("abcdef")),
+        mk("blank", brief="  "),
+    ]
+    out = lint([grp("g", bad)])
+    assert "none: no paths" in out
+    assert "many: 6 paths, more than 5" in out
+    assert "blank: no brief" in out
 
 
-def test_lint_no_paths() -> None:
-    assert lint([mk("a", paths=[])]) == ["a: no paths"]
+def test_lint_five_paths_is_fine() -> None:
+    assert lint([grp("g", [mk("s", paths=list("abcde"))])]) == []
 
 
-@pytest.mark.parametrize("checks", [[], ["x", "y"]])
-def test_lint_done_check_count(checks: list[str]) -> None:
-    (problem,) = lint([mk("a", done_check=checks)])
-    assert f"{len(checks)} done-checks" in problem
+def test_lint_duplicates() -> None:
+    s = mk("s")
+    out = lint([grp("g", [s]), grp("g", [mk("t")]), grp("h", [s])])
+    assert "g: duplicate group id" in out
+    assert "s: step in more than one group: g, h" in out
+    assert "s: duplicate step id" not in out
+    assert "t: duplicate step id" not in out
+    assert any("s: duplicate step id" in p for p in lint([grp("g", [s, s])]))
 
 
-def test_lint_graph_problems() -> None:
-    assert lint([mk("a"), mk("a")]) == ["a: duplicate step id"]
-    assert lint([mk("a", depends_on=["zz"])]) == ["a: depends on unknown step zz"]
-    assert lint([mk("a", depends_on=["a"])]) == ["a: depends on itself"]
-    cyc = lint([mk("a", depends_on=["b"]), mk("b", depends_on=["a"])])
-    assert len(cyc) == 1 and "cycle" in cyc[0]
-
-
-def test_lint_reports_every_problem() -> None:
-    problems = lint([mk("a", paths=list("123456"), done_check=[])])
-    assert len(problems) == 2
+def test_lint_after_unknown_self_and_cycle() -> None:
+    out = lint([grp("a", after=["ghost", "a"])])
+    assert "a: after unknown group ghost" in out
+    assert "a: after itself" in out
+    cyc = lint([grp("a", after=["b"]), grp("b", after=["a"])])
+    assert any("after cycle" in p for p in cyc)
 
 
 def test_next_ready() -> None:
-    steps = [mk("a"), mk("b", depends_on=["a"]), mk("c")]
-    assert next_ready(steps, set()) == steps[0]
-    assert next_ready(steps, {"a"}) == steps[1]
-    assert next_ready(steps, {"a", "b"}) == steps[2]
-    assert next_ready(steps, {"a", "b", "c"}) is None
+    a, b = grp("a"), grp("b", after=["a"])
+    assert next_ready([b, a], set()) is a
+    assert next_ready([a, b], {"a"}) is b
+    assert next_ready([a, b], {"a", "b"}) is None
+    assert next_ready([b], set()) is None
 
 
-def test_next_ready_skips_blocked() -> None:
-    steps = [mk("b", depends_on=["a"]), mk("a")]
-    assert next_ready(steps, set()) == steps[1]
-    assert next_ready([mk("b", depends_on=["zz"])], set()) is None
+def test_owner_is_last_step_holding_path() -> None:
+    first = mk("first", paths=["foreman/", "x.py"])
+    second = mk("second", paths=["foreman/steps.py"])
+    g = grp("g", [first, second])
+    assert owner(g, "foreman/steps.py") is second
+    assert owner(g, "foreman/other.py") is first
+    assert owner(g, "x.py") is first
+    assert owner(g, "x.pyc") is None
+    assert owner(g, "foremanx/a.py") is None
+    assert owner(g, "nowhere.py") is None
