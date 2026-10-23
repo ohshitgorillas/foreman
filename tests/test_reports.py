@@ -3,27 +3,23 @@
 from pathlib import Path
 
 import pytest
+from conftest import make_group, make_step
 
 from foreman import reports
 from foreman.errors import ConfigError
 from foreman.reports import Report
 from foreman.run import Result
-from foreman.steps import Group, Step
 
 
 def result(out: str) -> Result:
     return Result(cmd=["x"], code=0, out=out, err="", seconds=0.0)
 
 
-def step(sid: str, *paths: str) -> Step:
-    return Step(id=sid, role="builder", brief="b", paths=list(paths), check=[])
-
-
-GROUP = Group(
-    id="g",
-    steps=[step("s1", "foreman/a.py", "tests/"), step("s2", "foreman/b.py")],
+GROUP = make_group(
+    make_step("s1", ["foreman/a.py", "tests/"]),
+    make_step("s2", ["foreman/b.py"]),
+    gid="g",
     design="d.md",
-    after=[],
 )
 
 

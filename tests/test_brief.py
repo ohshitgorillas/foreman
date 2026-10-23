@@ -1,10 +1,11 @@
 """Tests for foreman.brief."""
 
+from conftest import make_group
+
 from foreman.brief import finding, review
 from foreman.config import Reviewer
-from foreman.steps import Group
 
-GROUP = Group(id="g1", steps=[], design="docs/d.md", after=[])
+GROUP = make_group(gid="g1", design="docs/d.md")
 
 
 def test_finding_is_the_lines_verbatim() -> None:

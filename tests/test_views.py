@@ -1,12 +1,14 @@
 from pathlib import Path
 
+from conftest import make_step
+
 from foreman import views
 from foreman.config import Config
 from foreman.steps import Step
 
 
 def _step(*sources: str) -> Step:
-    return Step("s", "builder", "b", ["x.py"], [], 0, list(sources))
+    return make_step("s", ["x.py"], views=list(sources))
 
 
 def test_path_swaps_suffix_under_group_dir(cfg: Config) -> None:
