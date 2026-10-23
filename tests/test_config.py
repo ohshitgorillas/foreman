@@ -12,6 +12,8 @@ check_cmd = ["make", "check"]
 format_cmd = ["ruff", "format"]
 backend = "claude-local"
 state_dir = "/work/state"
+view_cmd = ["uv", "run", "stubgen"]
+view_root = "/work/views"
 """
 
 
@@ -31,6 +33,8 @@ def test_load_good(tmp_path: Path) -> None:
         backend="claude-local",
         state_dir=Path("/work/state"),
         reviewers=[],
+        view_cmd=["uv", "run", "stubgen"],
+        view_root=Path("/work/views"),
     )
 
 
@@ -129,3 +133,10 @@ def test_reviewers_must_be_tables(tmp_path: Path) -> None:
 def test_standing_lines_now_unknown(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="unknown keys: standing_lines"):
         load(_write(tmp_path, GOOD + "standing_lines = []\n"))
+
+
+@pytest.mark.parametrize("key", ["view_cmd", "view_root"])
+def test_view_keys_are_required(tmp_path: Path, key: str) -> None:
+    text = "".join(ln + "\n" for ln in GOOD.splitlines() if not ln.startswith(key))
+    with pytest.raises(ConfigError, match=f"missing keys: {key}"):
+        load(_write(tmp_path, text))

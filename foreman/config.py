@@ -23,10 +23,12 @@ class Config:
     backend: str  # "claude-local" in the first version
     state_dir: Path  # holds events.jsonl
     reviewers: list[Reviewer]  # [[reviewers]] tables, in run order
+    view_cmd: list[str]  # the stubgen argv, e.g. ["uv", "run", "stubgen"]
+    view_root: Path  # outside every worktree; views live under view_root/<group id>/
 
 
-_PATHS = ("target_repo", "worktree_root", "state_dir")
-_LISTS = ("check_cmd", "format_cmd")
+_PATHS = ("target_repo", "worktree_root", "state_dir", "view_root")
+_LISTS = ("check_cmd", "format_cmd", "view_cmd")
 
 
 def _str_list(key: str, value: object) -> list[str]:

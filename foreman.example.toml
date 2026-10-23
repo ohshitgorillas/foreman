@@ -5,6 +5,8 @@ state_dir = "~/dev/foreman/state"
 check_cmd = ["make", "check"]
 format_cmd = ["uv", "run", "ruff", "format"]
 backend = "claude-local"
+view_cmd = ["uv", "run", "stubgen"]
+view_root = "~/dev/foreman/views"
 
 # Reviewers run in this order after the group check, when the group changed a
 # path equal to or under one of `paths`. `spec = true` adds "spec: <design>".

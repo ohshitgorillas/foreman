@@ -1,5 +1,6 @@
 """Shared fixtures."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -41,6 +42,8 @@ def cfg(tmp_path: Path, tmp_repo: Path) -> Config:
         reviewers=[],
         backend="claude-local",
         state_dir=tmp_path / "state",
+        view_cmd=["stubgen"],
+        view_root=tmp_path / "views",
     )
 
 
@@ -48,6 +51,20 @@ def cfg(tmp_path: Path, tmp_repo: Path) -> Config:
 def green_cfg(cfg: Config) -> Config:
     """cfg whose check and format commands both succeed."""
     return replace(cfg, check_cmd=["true"], format_cmd=["true"])
+
+
+@pytest.fixture
+def conf_file(green_cfg: Config, tmp_path: Path) -> Path:
+    """green_cfg written as a foreman.toml, every required key included."""
+    path = tmp_path / "foreman.toml"
+    path.write_text(
+        "".join(
+            f"{key} = {json.dumps([str(x) for x in v] if isinstance(v, list) else str(v))}\n"
+            for key, v in vars(green_cfg).items()
+            if key != "reviewers"
+        )
+    )
+    return path
 
 
 @pytest.fixture
