@@ -17,18 +17,24 @@ The unit of a run becomes the group. Every brief a role receives is either a ste
 
 The core modules and homes of `docs/superpowers/specs/harness-core-design.md:16-174` stand except where this file changes them. Only changed and new modules are listed.
 
-`foreman/errors.py`: adds the owner-ruling failure. Replaces nothing.
+`foreman/errors.py`: adds the owner-ruling failure and the stop for reviewer findings. Replaces nothing.
 
 ```python
-class RulingNeeded(ForemanError): exit_code = 6   # an agent refused or overloaded, a step check missed, reviewers filed findings, or red output named no group path
+class RulingNeeded(ForemanError): exit_code = 6    # an agent refused or overloaded, a step check missed, red output or an upheld finding named no group path, or nothing changed
+class FindingsToRule(ForemanError): exit_code = 7  # reviewers filed findings; Void, the dispatcher, upholds or declines each
 ```
 
-`foreman/events.py`: adds kept text, the done set and the two stream writes. Replaces `foreman/cli.py:28-32`, `foreman/cli.py:100`, `foreman/cli.py:105`, `foreman/cli.py:112`.
+`foreman/events.py`: adds kept text, the done set, the dispatcher signal and the two stream writes. Replaces `foreman/cli.py:28-32`, `foreman/cli.py:100`, `foreman/cli.py:105`, `foreman/cli.py:112`.
 
 ```python
+DISPATCHER_SIGNALS = ("findings",)   # beside OWNER_SIGNALS (foreman/events.py:9), which keeps its three
+
 class EventLog:
     def keep(self, name: str, text: str) -> Path: ...   # writes state_dir/<name>.txt, emits "kept", returns the path
+    def kept(self, name: str) -> str: ...               # the text keep(name, ...) wrote; raises ConfigError when absent
     def done(self) -> set[str]: ...                     # group ids with a "group_done" event
+    def notify_dispatcher(self, signal: str, group_id: str, text: str) -> None: ...
+        # signal in DISPATCHER_SIGNALS; emits it and writes "[<signal>] <group_id>: <text>" to stderr
 
 def say(text: str) -> None: ...    # one line to stdout
 def fail(text: str) -> None: ...   # "foreman: <text>" to stderr, usable before a Config exists
@@ -79,7 +85,7 @@ def next_ready(groups: list[Group], done: set[str]) -> Group | None: ...
 def owner(group: Group, path: str) -> Step | None: ...          # the last step in group order whose paths hold path
 ```
 
-`foreman/reports.py` (new): the one reader of text other programs print: an agent's report and a gate run's output. Replaces the unread replies at `foreman/cli.py:48`, `foreman/cli.py:53`.
+`foreman/reports.py` (new): the one reader of text other programs print or Void hands back: an agent's report, a gate run's output, and the upheld findings. Replaces the unread replies at `foreman/cli.py:48`, `foreman/cli.py:53`.
 
 ```python
 @dataclass(frozen=True)
@@ -87,11 +93,23 @@ class Report:
     kind: str              # "done" | "rejected" (a line starting "REJECTED: STEERING") | "overloaded" (a line starting "OVERLOADED:")
     findings: list[str]    # the lines under a "FINDINGS <n>" header, verbatim without indent
 
-def read(result: Result) -> Report: ...
-def gate_lines(result: Result, wt: Path, group: Group) -> tuple[dict[str, list[str]], list[str]]: ...
-    # step id -> each output line, verbatim, whose path:line (relative, or absolute under wt) steps.owner maps to it;
+def parse(text: str) -> Report: ...
+def read(result: Result) -> Report: ...                      # parse(result.out)
+def lines(result: Result) -> list[str]: ...                  # every output line of a gate run, verbatim
+def route(lines: list[str], wt: Path, group: Group) -> tuple[dict[str, list[str]], list[str]]: ...
+    # step id -> each line, verbatim, whose path:line (relative, or absolute under wt) steps.owner maps to it;
     # and the lines naming a path:line no step owns
+def upheld(text: str, kept: dict[str, Report]) -> dict[str, list[str]]: ...
+    # reviewer role -> each line of text, verbatim, that is one of that reviewer's kept findings; raises ConfigError for a line in none
 ```
+
+`foreman/git.py`: adds the lookup of a kept worktree. Replaces nothing.
+
+```python
+def worktree(cfg: Config, group_id: str) -> Path: ...   # the path make_worktree creates for group_id; raises ForemanError when absent
+```
+
+`make_worktree` and `worktree` build the path in one private function.
 
 `foreman/verify.py`: adds the per-step check. Replaces `foreman/cli.py:58` as the use of a step's check.
 
@@ -120,20 +138,29 @@ class Backend(Protocol):
 
 ```python
 def run_group(cfg: Config, group: Group, log: EventLog, backend: Backend) -> str: ...
-    # returns the commit hash; raises RulingNeeded or Escalated and leaves the worktree in place
+    # returns the commit hash; raises RulingNeeded, FindingsToRule or Escalated and leaves the worktree in place
+def run_upheld(cfg: Config, group: Group, text: str, log: EventLog, backend: Backend | None = None) -> str: ...
+    # continues the group in its kept worktree from the findings Void upheld (text); returns and raises as run_group
 def run_section(cfg: Config, groups: list[Group], log: EventLog, backend: Backend | None = None) -> list[str]: ...
     # runs each ready group (next_ready over log.done()) until none is ready; notifies milestone_done when every group is done
 ```
 
-`run_group`, in order; every agent output and check output goes to `log.keep`, and every raise names the kept file and the worktree in its owner signal:
+`run_group`, in order; every agent output and check output goes to `log.keep`, and every raise names the kept file and the worktree in its signal:
 
 1. `git.make_worktree(cfg, group.id)`.
 2. Each step: `start(step.brief, wt, step.role)`, `wait`. `reports.read`: `rejected` or `overloaded` raises `RulingNeeded`. `verify.check_step`: red raises `RulingNeeded`.
-3. `verify.verify`. Red: `reports.gate_lines`; unowned lines, or no owned line, raise `RulingNeeded`; otherwise each owning step in group order gets `start(brief.finding(lines), wt, step.role)`, read as in 2; `verify.verify` again; red notifies `red_twice` and raises `Escalated`.
-4. Each `cfg.reviewers` entry whose paths hold a changed path: `start(brief.review(reviewer, group), wt, reviewer.role)`, read as in 2; any finding raises `RulingNeeded`.
+3. `verify.verify`. Red: `reports.route(reports.lines(result), wt, group)`; unowned lines, or no owned line, raise `RulingNeeded`; otherwise each owning step in group order gets `start(brief.finding(lines), wt, step.role)`, read as in 2; `verify.verify` again; red notifies `red_twice` and raises `Escalated`.
+4. Each `cfg.reviewers` entry whose paths hold a changed path: `start(brief.review(reviewer, group), wt, reviewer.role)`, read as in 2, its output kept as `<group id>-review-<reviewer role>`. Any finding from any reviewer: `log.notify_dispatcher("findings", group.id, ...)` naming each kept review and the worktree, then raise `FindingsToRule`.
 5. Commit the changed paths under the group's step paths as `Group <id>: steps <ids>` (none changed raises `RulingNeeded`), push, `git.remove_worktree`, emit `group_done`.
 
-`foreman/cli.py`: `python -m foreman run queues/<milestone>.toml [--group ID]` and `python -m foreman status`; parses argv, lints, calls `loop`, maps every `ForemanError` to its exit code. Holds no loop and writes no stream.
+`run_upheld`, in order:
+
+1. `git.worktree(cfg, group.id)`.
+2. `reports.upheld(text, kept)`, `kept` mapping each reviewer role with a kept `<group id>-review-<role>` to `reports.parse(log.kept(...))`. No upheld line: go to 4.
+3. Each reviewer's upheld lines: `reports.route`; unowned lines raise `RulingNeeded`; each owning step in group order gets `start(brief.finding(lines), wt, step.role)`, one brief per reviewer, read as in `run_group` 2. Then `run_group` 3 and 4.
+4. `run_group` 5.
+
+`foreman/cli.py`: `python -m foreman run queues/<milestone>.toml [--group ID]`, `python -m foreman upheld queues/<milestone>.toml GROUP FILE` (FILE holds the findings Void upheld, each line verbatim from a kept review) and `python -m foreman status`; parses argv, lints, calls `loop`, maps every `ForemanError` to its exit code. Holds no loop, writes no stream and sends no signal.
 
 ```python
 def main(argv: list[str] | None = None) -> int: ...
@@ -146,9 +173,12 @@ def entry() -> NoReturn: ...
 
 | Concern | Home | Forbidden elsewhere |
 |---|---|---|
-| Output, kept text, owner signals | `foreman/events.py` | `sys.stdout`, `sys.stderr`, `print`, files written under `state_dir` |
-| Owner-ruling failure | `RulingNeeded` in `foreman/errors.py` | any other exception or exit code for a refusal, a missed step check or reviewer findings |
-| Reading agent and gate text | `foreman/reports.py` | matching `REJECTED`, `OVERLOADED`, `FINDINGS` or `path:line` anywhere else |
+| Output, kept text, owner and dispatcher signals | `foreman/events.py` | `sys.stdout`, `sys.stderr`, `print`, files written or read under `state_dir` |
+| Owner-ruling failure | `RulingNeeded` in `foreman/errors.py` | any other exception or exit code for a refusal, a missed step check or an unowned line |
+| Reviewer findings stop | `FindingsToRule` in `foreman/errors.py`, signalled by `notify_dispatcher("findings", ...)` | reviewer findings in an owner signal; any other exception or exit code for them |
+| Upholding or declining reviewer findings | Void, the dispatcher, handing the upheld lines to `python -m foreman upheld` | Foreman upholding, declining or dispatching a reviewer finding Void has not upheld |
+| Reading agent, gate and upheld text | `foreman/reports.py` | matching `REJECTED`, `OVERLOADED`, `FINDINGS`, `path:line` or upheld lines anywhere else |
+| Kept worktree lookup | `git.worktree` | building a worktree path anywhere else |
 | Path ownership | `steps.owner` | mapping a path to a step or role anywhere else |
 | Step briefs | the `brief` field of `queues/<milestone>.toml`, written by Void, the dispatcher, in the role's shape | Foreman editing, wrapping or appending to a step brief |
 | Briefs Foreman composes | `foreman/brief.py` | brief text built in any other module; brief templates |
@@ -159,7 +189,7 @@ def entry() -> NoReturn: ...
 
 ## Order
 
-`builder` is the roster agent whose writes are `foreman/`, `tests/`, `pyproject.toml`, `Makefile` and `foreman.example.toml` (`docs/superpowers/specs/harness-core-design.md:178`). Steps 1-9 land on one branch; each step's done-check is its own test files, step 9's is `make check`.
+`builder` is the roster agent whose writes are `foreman/`, `tests/`, `pyproject.toml`, `Makefile` and `foreman.example.toml` (`docs/superpowers/specs/harness-core-design.md:178`). Steps 1-10 land on one branch; each step's done-check is its own test files, step 10's is `make check`.
 
 | Step | Paths | Agent |
 |---|---|---|
@@ -171,15 +201,14 @@ def entry() -> NoReturn: ...
 | 6 | `foreman/verify.py`, `tests/test_verify.py` | `builder` |
 | 7 | `foreman/brief.py`, `tests/test_brief.py`, `foreman/templates/brief.md`, `foreman/templates/resume.md` (both deleted) | `builder` |
 | 8 | `foreman/backends.py`, `tests/test_backends.py` | `builder` |
-| 9 | `foreman/loop.py`, `tests/test_loop.py`, `foreman/cli.py`, `tests/test_cli.py` | `builder` |
-| 10 | `queues/m1.toml` | Void, the dispatcher |
+| 9 | `foreman/git.py`, `tests/test_git.py`, `foreman/loop.py`, `tests/test_loop.py` | `builder` |
+| 10 | `foreman/cli.py`, `tests/test_cli.py` | `builder` |
+| 11 | `queues/m1.toml` | Void, the dispatcher |
 
-Step 10 rewrites the step file in the group format, each step's brief in its role's shape. The first real run is one Gauntlet group through `python -m foreman run`, by the owner.
+Step 11 rewrites the step file in the group format, each step's brief in its role's shape. The first real run is one Gauntlet group through `python -m foreman run`, by the owner.
 
 ## Decisions for the owner
 
-1. **Who writes each step's brief.** Recommend: Void writes it verbatim in the step file, in the role's shape; cost: Void writes one brief per step by hand. Alternative: Foreman renders each shape (`stub`, `red`, module, `wire`, ...) from step fields; cost: a Python copy of every role's brief grammar (`docs/research/gauntlet-roles/gatesmith.md:23-33`, `docs/research/gauntlet-roles/test-writer.md:26-32`), which drifts when a role changes.
-2. **A red group check.** Recommend: one `finding` round, the gate lines routed by `steps.owner` to the owning step's role, then escalate; cost: `reports.gate_lines` depends on gates printing `path:line`, unmeasured on Gauntlet's gates, and output with no owned line goes to the owner. Alternative: every red group check goes straight to the owner; cost: an owner action per red check, however mechanical.
-3. **Reviewer findings.** Recommend: any finding raises `RulingNeeded` with the kept report, since a `finding` brief carries only upheld findings (`docs/research/gauntlet-roles/test-writer.md:27`); cost: an owner ruling per round with findings. Alternative: Foreman forwards every finding as upheld to the owning role and rechecks; cost: no one upholds a finding before it is built.
-4. **The worktree on escalation.** Recommend: kept, its path in the owner signal; cost: a rerun of the group fails at `foreman/git.py:17-18` until the owner removes it. Alternative: removed as today; cost: the group's work is lost (`docs/research/first-run-2026-10-23.md:6`).
-5. **The free template brief and `Backend.resume`.** Recommend: removed, every brief verbatim or composed in `foreman/brief.py`, every dispatch fresh; cost: a target repo with free-form roles needs every brief written into its step file. Alternative: kept beside step briefs for such targets; cost: two brief sources and a resume path Gauntlet never uses.
+1. **The other stops: a refusal or overload, a missed step check, an unowned line, nothing changed, and red twice.** None asks what the product does, and each goes to the owner as `ruling_needed` or `red_twice` (`foreman/events.py:9`). Recommend: each goes to Void as a dispatcher signal, `RulingNeeded` and `Escalated` signalled by `notify_dispatcher`, leaving `milestone_done` the one signal Foreman sends the owner; cost: Void decides every stop, and a product question reaches the owner only when Void forwards it. Alternative: they stay owner signals; cost: the owner acts on brief-shape and mechanical stops, at a rate unmeasured.
+2. **Review after an upheld round.** Recommend: once the round's check is green, the reviewers run again and new findings go back to Void, as `run_upheld` 3 holds; cost: one review and one Void ruling per round, the number of rounds unmeasured. Alternative: commit once the round's check is green; cost: the fix to an upheld finding lands unreviewed.
+3. **How Void hands back the upheld findings.** Recommend: one file of lines copied verbatim from the kept reviews, each line's reviewer found by `reports.upheld` matching it in that reviewer's kept findings; cost: an edited line fails as `ConfigError`. Alternative: one file per reviewer, named on the command line with its role; cost: Void names each role, and a line filed under the wrong role reaches the wrong round.
