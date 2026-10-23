@@ -2,16 +2,13 @@ Status: proposed, for the owner's approval.
 
 ## Why
 
-Gauntlet lands a section as commit groups: each step goes to its role in that role's fixed brief shape, the group's full check runs once at the end, a red check goes back as a `finding` brief of gate lines, reviewers read the group's diff, and the group is one commit (`docs/research/first-run-2026-10-23.md:7`). Foreman runs one step per worktree, check and commit (`docs/research/first-run-2026-10-23.md:8`). Its shared concerns have 22 copies or second sources:
+Gauntlet lands a section as commit groups: each step goes to its role in that role's fixed brief shape, the group's full check runs once at the end, a red check goes back as a `finding` brief of gate lines, reviewers read the group's diff, and the group is one commit (`docs/research/first-run-2026-10-23.md:7`). Gauntlet's roles refuse any brief outside their fixed shapes as steering (`docs/research/first-run-2026-10-23.md:5-6`).
 
-- Brief text, 3 sources: the verbatim `Step.brief` (`foreman/steps.py:22`, `foreman/brief.py:23-24`), the template (`foreman/brief.py:30-39`), and Foreman's own resume text (`foreman/brief.py:42-51`), which Gauntlet's roles refuse as steering (`docs/research/first-run-2026-10-23.md:5-6`).
-- The check, 2 sources: `Step.done_check` (`foreman/steps.py:17`) is never run, only printed (`foreman/cli.py:58`); `Config.check_cmd` runs for every step (`foreman/verify.py:22`).
-- Output outside `foreman/events.py`, 4: the report files `foreman/cli.py:28-32`, and stream writes `foreman/cli.py:100`, `foreman/cli.py:105`, `foreman/cli.py:112`.
-- Agent replies saved but never read, 2: `foreman/cli.py:48`, `foreman/cli.py:53`; a refusal surfaces as "changed none of its paths" (`foreman/cli.py:62-63`).
-- Cleanup on escalation, 1: the worktree is removed when red twice (`foreman/cli.py:68-69`), losing the work (`docs/research/first-run-2026-10-23.md:6`).
-- Test helpers, 10: git identity set three ways (`tests/conftest.py:18-29`, `tests/test_cli.py:24-29`, `tests/test_git.py:17-20`); `run.run` faked twice (`tests/test_verify.py:11-22`, `tests/test_backends.py:11-20`); a green `Config` built four times (`tests/test_cli.py:33-36`, `tests/test_cli.py:61-66`, `tests/test_cli.py:80`, `tests/test_verify.py:57`); `subprocess` imported outside `foreman/run.py` (`tests/conftest.py:3`).
+The group run stands in the tree, each concern in its one home: step briefs carried verbatim (`foreman/steps.py:16`), composed briefs (`foreman/brief.py:7`, `foreman/brief.py:12`), checks (`foreman/verify.py:18`, `foreman/verify.py:27`), output and kept text (`foreman/events.py:15`), agent and gate text (`foreman/reports.py:26`, `foreman/reports.py:64`, `foreman/reports.py:88`), run order and cleanup (`foreman/loop.py:52-61`, `foreman/loop.py:115-125`), test helpers (`tests/conftest.py:14`, `tests/conftest.py:35-50`, `tests/conftest.py:54`, `tests/conftest.py:69`). One copy stands: `tests/test_cli.py:16-25` writes `foreman.toml` text by hand in a test file, and every config key this design adds reaches it.
 
-The unit of a run becomes the group. Every brief a role receives is either a step brief carried verbatim from the step file, or a `finding` or review brief Foreman composes in one home. Agent and gate text is read in one home.
+One gap stands. A `red` brief gives `test-writer`, per behavior, one `view:`, a `stubgen` `.pyi` of the module under test (`docs/research/gauntlet-roles/test-writer.md:26`), read for names and signatures (`docs/research/gauntlet-roles/test-writer.md:19`) and imported by its dotted path under the `stubgen` output (`docs/research/gauntlet-roles/test-writer.md:39`). The code it views is what the group's `stub` step writes (`docs/research/gauntlet-roles/core-builder.md:43`, `docs/research/gauntlet-roles/seam-builder.md:49`, `docs/research/gauntlet-roles/gatesmith.md:43`). `loop._steps` starts each step as soon as the one before it returns (`foreman/loop.py:52-61`), and nothing in `foreman/` writes a view, so no `.pyi` exists when the red step starts: 1 gap, 0 copies.
+
+The unit of a run is the group. Every brief a role receives is either a step brief carried verbatim from the step file, or a `finding` or review brief Foreman composes in one home. Agent and gate text is read in one home. A step that names views gets them made, from the code earlier steps of its group wrote, before it is dispatched.
 
 ## Modules
 
@@ -21,11 +18,11 @@ The core modules and homes of `docs/superpowers/specs/harness-core-design.md:16-
 
 ```python
 class Escalated(ForemanError): exit_code = 5       # red twice; Void, the dispatcher, acts
-class RulingNeeded(ForemanError): exit_code = 6    # an agent refused or overloaded, a step check missed, red output or an upheld finding named no group path, or nothing changed; Void, the dispatcher, rules
+class RulingNeeded(ForemanError): exit_code = 6    # an agent refused or overloaded, a view was not made, a step check missed, red output or an upheld finding named no group path, or nothing changed; Void, the dispatcher, rules
 class FindingsToRule(ForemanError): exit_code = 7  # reviewers filed findings; Void, the dispatcher, upholds or declines each
 ```
 
-`foreman/events.py`: adds kept text, the done set, the dispatcher signals and the two stream writes; `milestone_done` is the one owner signal. Replaces `foreman/events.py:9`, `foreman/cli.py:28-32`, `foreman/cli.py:57-59`, `foreman/cli.py:100`, `foreman/cli.py:105`, `foreman/cli.py:112`, `foreman/cli.py:115-116`.
+`foreman/events.py`: adds kept text, the done set, the dispatcher signals and the two stream writes; `milestone_done` is the one owner signal. Replaces nothing.
 
 ```python
 OWNER_SIGNALS = ("milestone_done",)
@@ -42,7 +39,7 @@ def say(text: str) -> None: ...    # one line to stdout
 def fail(text: str) -> None: ...   # "foreman: <text>" to stderr, usable before a Config exists
 ```
 
-`foreman/config.py`: adds the reviewer roster; drops `standing_lines`. Replaces nothing.
+`foreman/config.py`: adds the reviewer roster and the view command and root; drops `standing_lines`. Replaces nothing. `view_cmd` and `view_root` are required keys of `foreman.toml`.
 
 ```python
 @dataclass(frozen=True)
@@ -60,9 +57,11 @@ class Config:
     backend: str
     state_dir: Path
     reviewers: list[Reviewer]  # [[reviewers]] tables in foreman.toml, in run order
+    view_cmd: list[str]        # the stubgen argv, e.g. ["uv", "run", "stubgen"]; views.make appends "-o <dir>" and the sources
+    view_root: Path            # outside every worktree; a group's views live under view_root/<group id>/
 ```
 
-`foreman/steps.py`: loads groups and steps, lints them, picks the next ready group, names the step that owns a path. A step file holds `[groups.<id>]` tables (`steps`, `design`, `after`) and `[steps.<id>]` tables (`role`, `brief`, `paths`, `check`, `expect_code`). Replaces `foreman/steps.py:13-22` (`agent`, `done_check`, `design_ref`, `size`, `depends_on`).
+`foreman/steps.py`: loads groups and steps, lints them, picks the next ready group, names the step that owns a path. A step file holds `[groups.<id>]` tables (`steps`, `design`, `after`) and `[steps.<id>]` tables (`role`, `brief`, `paths`, `check`, `expect_code`, `views`). Replaces nothing.
 
 ```python
 @dataclass(frozen=True)
@@ -73,6 +72,7 @@ class Step:
     paths: list[str]       # 1 to 5
     check: list[str]       # one argv; empty means the step runs no check
     expect_code: int       # the check's passing exit code, 0 by default
+    views: list[str]       # .py sources, relative to the worktree, viewed before this step; empty by default
 
 @dataclass(frozen=True)
 class Group:
@@ -82,12 +82,13 @@ class Group:
     after: list[str]       # group ids that land first
 
 def load(path: Path) -> list[Group]: ...                        # raises ConfigError
-def lint(groups: list[Group]) -> list[str]: ...                 # paths 1-5, brief set, each step in one group, ids unique, no unknown or cyclic `after`
+def lint(groups: list[Group]) -> list[str]: ...                 # paths 1-5, brief set, each step in one group, ids unique, no unknown or cyclic `after`,
+    # each view a .py source held (steps.holds) by the paths of an earlier step in its group
 def next_ready(groups: list[Group], done: set[str]) -> Group | None: ...
 def owner(group: Group, path: str) -> Step | None: ...          # the last step in group order whose paths hold path
 ```
 
-`foreman/reports.py` (new): the one reader of text other programs print or Void hands back: an agent's report, a gate run's output, and the upheld findings. Replaces the unread replies at `foreman/cli.py:48`, `foreman/cli.py:53`.
+`foreman/reports.py` (new): the one reader of text other programs print or Void hands back: an agent's report, a gate run's output, and the upheld findings. Replaces nothing.
 
 ```python
 @dataclass(frozen=True)
@@ -113,21 +114,34 @@ def worktree(cfg: Config, group_id: str) -> Path: ...   # the path make_worktree
 
 `make_worktree` and `worktree` build the path in one private function.
 
-`foreman/verify.py`: adds the per-step check. Replaces `foreman/cli.py:58` as the use of a step's check.
+`foreman/verify.py`: adds the per-step check. Replaces nothing.
 
 ```python
 def verify(cfg: Config, wt: Path) -> Verdict: ...               # unchanged: format_cmd, then check_cmd
 def check_step(step: Step, wt: Path) -> Verdict | None: ...     # None when step.check is empty; green when the code equals step.expect_code
 ```
 
-`foreman/brief.py`: the briefs Foreman composes; nothing else. Removes `render`, `render_resume` and `foreman/templates/`. Replaces `foreman/brief.py:21-51`.
+`foreman/views.py` (new): the `.pyi` views a step reads of code its group already wrote; the one runner of `view_cmd` and the one writer under `view_root`. Replaces nothing.
+
+```python
+def path(cfg: Config, group_id: str, source: str) -> Path: ...
+    # view_root/<group_id>/<source with .py replaced by .pyi>: where stubgen writes the view of a source in a package
+def make(cfg: Config, group_id: str, step: Step, wt: Path) -> Verdict: ...
+    # runs view_cmd + ["-o", view_root/<group_id>] + step.views in wt through run.run;
+    # green when the code is 0 and path(cfg, group_id, s) exists for every s in step.views
+def clear(cfg: Config, group_id: str) -> None: ...    # removes view_root/<group_id> when present
+```
+
+A red step's brief names each view by its `views.path`, written there by Void, the dispatcher; Foreman adds nothing to it.
+
+`foreman/brief.py`: the briefs Foreman composes; nothing else. Holds no `render`, `render_resume` or `foreman/templates/`. Replaces nothing.
 
 ```python
 def finding(lines: list[str]) -> str: ...                    # the lines verbatim, one per line, nothing else
 def review(reviewer: Reviewer, group: Group) -> str: ...     # "working tree against HEAD", then "spec: <group.design>" when reviewer.spec
 ```
 
-`foreman/backends.py`: every dispatch is a fresh agent; `resume` goes. Replaces `foreman/backends.py:27`, `foreman/backends.py:72-77`.
+`foreman/backends.py`: every dispatch is a fresh agent; no `resume`. Replaces nothing.
 
 ```python
 class Backend(Protocol):
@@ -136,7 +150,7 @@ class Backend(Protocol):
     def wait(self, job: Job) -> Result: ...
 ```
 
-`foreman/loop.py` (new): runs groups. Replaces `foreman/cli.py:22-69`.
+`foreman/loop.py` (new): runs groups. Replaces nothing.
 
 ```python
 def run_group(cfg: Config, group: Group, log: EventLog, backend: Backend) -> str: ...
@@ -150,10 +164,10 @@ def run_section(cfg: Config, groups: list[Group], log: EventLog, backend: Backen
 `run_group`, in order; every agent output and check output goes to `log.keep`; every `RulingNeeded` raise follows `log.notify_dispatcher("ruling_needed", group.id, ...)`, and every signal names the kept file and the worktree:
 
 1. `git.make_worktree(cfg, group.id)`.
-2. Each step: `start(step.brief, wt, step.role)`, `wait`. `reports.read`: `rejected` or `overloaded` raises `RulingNeeded`. `verify.check_step`: red raises `RulingNeeded`.
+2. Each step: when `step.views` is set, `views.make(cfg, group.id, step, wt)`, its output kept as `<group id>-<step id>-views`; red raises `RulingNeeded`. Then `start(step.brief, wt, step.role)`, `wait`. `reports.read`: `rejected` or `overloaded` raises `RulingNeeded`. `verify.check_step`: red raises `RulingNeeded`.
 3. `verify.verify`. Red: `reports.route(reports.lines(result), wt, group)`; unowned lines, or no owned line, raise `RulingNeeded`; otherwise each owning step in group order gets `start(brief.finding(lines), wt, step.role)`, read as in 2; `verify.verify` again; red calls `log.notify_dispatcher("red_twice", group.id, ...)` and raises `Escalated`.
 4. Each `cfg.reviewers` entry whose paths hold a changed path: `start(brief.review(reviewer, group), wt, reviewer.role)`, read as in 2, its output kept as `<group id>-review-<reviewer role>`. Any finding from any reviewer: `log.notify_dispatcher("findings", group.id, ...)` naming each kept review and the worktree, then raise `FindingsToRule`.
-5. Commit the changed paths under the group's step paths as `Group <id>: steps <ids>` (none changed raises `RulingNeeded`), push, `git.remove_worktree`, emit `group_done`.
+5. Commit the changed paths under the group's step paths as `Group <id>: steps <ids>` (none changed raises `RulingNeeded`), push, `git.remove_worktree`, `views.clear(cfg, group.id)`, emit `group_done`.
 
 `run_upheld`, in order:
 
@@ -169,7 +183,7 @@ def main(argv: list[str] | None = None) -> int: ...
 def entry() -> NoReturn: ...
 ```
 
-`tests/conftest.py`: adds `identify(repo: Path) -> None` (git identity through `run.run_ok`), the `fake_run` fixture (records `(cmd, cwd)`, exit codes looked up by `argv[0]`), and the `green_cfg` fixture (`cfg` with `check_cmd` and `format_cmd` set to `["true"]`). `FakeBackend(files, outputs)` writes each start's files and returns each start's output in turn; its `resume` goes. `tmp_repo` creates its repository through `run.run_ok`.
+`tests/conftest.py`: adds `identify(repo: Path) -> None` (git identity through `run.run_ok`), the `fake_run` fixture (records `(cmd, cwd)`, exit codes looked up by `argv[0]`), and the `green_cfg` fixture (`cfg` with `check_cmd` and `format_cmd` set to `["true"]`). `cfg` sets `view_cmd` to `["stubgen"]` and `view_root` to `tmp_path / "views"`. The `conf_file` fixture writes `green_cfg` as a `foreman.toml`, every required key included, and returns its path; `tests/test_cli.py` takes it in place of its `conf` fixture (`tests/test_cli.py:16-25`). `FakeBackend(files, outputs)` writes each start's files and returns each start's output in turn; its `resume` goes. `tmp_repo` creates its repository through `run.run_ok`.
 
 ## Homes
 
@@ -177,7 +191,7 @@ def entry() -> NoReturn: ...
 |---|---|---|
 | Output, kept text, owner and dispatcher signals | `foreman/events.py` | `sys.stdout`, `sys.stderr`, `print`, files written or read under `state_dir` |
 | Owner signal | `log.notify_owner("milestone_done", ...)` in `loop.run_section` | any other owner signal; a stop reaching the owner except as Void forwards it |
-| Stops Void rules on | `RulingNeeded` and `Escalated` in `foreman/errors.py`, signalled by `notify_dispatcher("ruling_needed", ...)` and `notify_dispatcher("red_twice", ...)` | any other exception, exit code or signal for a refusal, an overload, a missed step check, an unowned line, nothing changed or red twice |
+| Stops Void rules on | `RulingNeeded` and `Escalated` in `foreman/errors.py`, signalled by `notify_dispatcher("ruling_needed", ...)` and `notify_dispatcher("red_twice", ...)` | any other exception, exit code or signal for a refusal, an overload, a view not made, a missed step check, an unowned line, nothing changed or red twice |
 | Reviewer findings stop | `FindingsToRule` in `foreman/errors.py`, signalled by `notify_dispatcher("findings", ...)` | reviewer findings in an owner signal; any other exception or exit code for them |
 | Upholding or declining reviewer findings | Void, the dispatcher, handing the upheld lines to `python -m foreman upheld` | Foreman upholding, declining or dispatching a reviewer finding Void has not upheld |
 | Reading agent, gate and upheld text | `foreman/reports.py` | matching `REJECTED`, `OVERLOADED`, `FINDINGS`, `path:line` or upheld lines anywhere else |
@@ -186,13 +200,14 @@ def entry() -> NoReturn: ...
 | Step briefs | the `brief` field of `queues/<milestone>.toml`, written by Void, the dispatcher, in the role's shape | Foreman editing, wrapping or appending to a step brief |
 | Briefs Foreman composes | `foreman/brief.py` | brief text built in any other module; brief templates |
 | Step and group checks | `foreman/verify.py` | running `step.check`, `check_cmd` or `format_cmd` elsewhere |
+| Views of a group's code | `foreman/views.py`, from the `views` of a step | running `view_cmd`, building a view path, or writing or removing under `view_root` anywhere else; a view written inside a worktree; Foreman adding a `view:` line to a step brief |
 | Reviewer roster | `Config.reviewers` | reviewer role names or reviewed path lists in code |
 | Run order and cleanup decisions | `foreman/loop.py` | dispatch order or `git.remove_worktree` calls in `foreman/cli.py` |
-| Test helpers | `tests/conftest.py` | git identity, `run.run` fakes, green configs or `subprocess` in a test file |
+| Test helpers | `tests/conftest.py` | git identity, `run.run` fakes, green configs, config values written by hand or `subprocess` in a test file |
 
 ## Order
 
-`builder` is the roster agent whose writes are `foreman/`, `tests/`, `pyproject.toml`, `Makefile` and `foreman.example.toml` (`docs/superpowers/specs/harness-core-design.md:178`). Steps 1-10 land on one branch; each step's done-check is its own test files, step 10's is `make check`.
+`builder` is the roster agent whose writes are `foreman/`, `tests/`, `pyproject.toml`, `Makefile` and `foreman.example.toml` (`docs/superpowers/specs/harness-core-design.md:178`). Steps 1-14 land on one branch; each step's done-check is its own test files, steps 10 and 14 take `make check`. Steps 11-14 land before step 15.
 
 | Step | Paths | Agent |
 |---|---|---|
@@ -206,6 +221,15 @@ def entry() -> NoReturn: ...
 | 8 | `foreman/backends.py`, `tests/test_backends.py` | `builder` |
 | 9 | `foreman/git.py`, `tests/test_git.py`, `foreman/loop.py`, `tests/test_loop.py` | `builder` |
 | 10 | `foreman/cli.py`, `tests/test_cli.py` | `builder` |
-| 11 | `queues/m1.toml` | Void, the dispatcher |
+| 11 | `foreman/config.py`, `tests/test_config.py`, `foreman.example.toml`, `tests/conftest.py`, `tests/test_cli.py` | `builder` |
+| 12 | `foreman/steps.py`, `tests/test_steps.py` | `builder` |
+| 13 | `foreman/views.py`, `tests/test_views.py` | `builder` |
+| 14 | `foreman/loop.py`, `tests/test_loop.py` | `builder` |
+| 15 | `queues/m1.toml` | Void, the dispatcher |
 
-Step 11 rewrites the step file in the group format, each step's brief in its role's shape. The first real run is one Gauntlet group through `python -m foreman run`, by the owner.
+Step 11 adds `view_cmd` and `view_root` to `Config`, `foreman.example.toml` and the `cfg` fixture, adds `conf_file`, and moves `tests/test_cli.py` onto it. Step 15 rewrites the step file in the group format, each step's brief in its role's shape; each red step lists its `views`, and its brief's `view:` lines name their `views.path`. The first real run is one Gauntlet group through `python -m foreman run`, by the owner.
+
+## Decisions for the owner
+
+1. **Where views are written.** Recommend: under `Config.view_root`, outside every worktree; cost: one more required key, and each red brief's `view:` lines carry absolute paths Void builds from `foreman.toml`, a wrong one surfacing only when `test-writer` cannot read it. Alternative: under a directory inside the group's worktree that git ignores; cost: `git.changed_paths` (`foreman/git.py:45-55`) lists the views unless the target repository ignores that directory, and `check_cmd` may run over them; neither cost measured.
+2. **Whether `view_cmd` and `view_root` are required keys.** Recommend: required; cost: the owner's `foreman.toml` gains two lines before the next run, and every config written by a test carries them. Alternative: optional, empty by default, with `views.make` raising `ConfigError` for a step with views under an empty `view_cmd`; cost: a second default path in `config.load` and a stop found only mid-run, after earlier steps of the group ran.
