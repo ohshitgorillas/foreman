@@ -56,6 +56,7 @@ class FakeBackend:
         self.files = files or {}
         self.resume_files = resume_files or {}
         self.briefs: list[str] = []
+        self.agents: list[str] = []
         self._n = 0
 
     def _write(self, files: dict[str, str], worktree: Path) -> None:
@@ -64,7 +65,8 @@ class FakeBackend:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text)
 
-    def start(self, brief: str, worktree: Path) -> Job:
+    def start(self, brief: str, worktree: Path, agent: str) -> Job:
+        self.agents.append(agent)
         self.briefs.append(brief)
         self._n += 1
         self._write(self.files, worktree)

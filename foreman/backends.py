@@ -22,7 +22,7 @@ class Job:
 class Backend(Protocol):
     name: str
 
-    def start(self, brief: str, worktree: Path) -> Job: ...
+    def start(self, brief: str, worktree: Path, agent: str) -> Job: ...
     def wait(self, job: Job) -> Result: ...
     def resume(self, job: Job, brief: str) -> Job: ...
 
@@ -39,11 +39,10 @@ class ClaudeLocal:
     ) -> None:
         self.command = command if command is not None else ["claude"]
         self.args = (
-            args
-            if args is not None
-            else ["--agent", "builder", "--permission-mode", "bypassPermissions"]
+            args if args is not None else ["--permission-mode", "bypassPermissions"]
         )
         self._results: dict[str, Result] = {}
+        self._agents: dict[str, str] = {}
 
     def _launch(
         self, flags: list[str], brief: str, worktree: Path, handle: str
@@ -56,9 +55,12 @@ class ClaudeLocal:
         except Exception as e:
             raise BackendError(f"cannot start {self.command}: {e}") from e
 
-    def start(self, brief: str, worktree: Path) -> Job:
+    def start(self, brief: str, worktree: Path, agent: str) -> Job:
         handle = str(uuid.uuid4())
-        self._launch(["--session-id", handle], brief, worktree, handle)
+        self._agents[handle] = agent
+        self._launch(
+            ["--agent", agent, "--session-id", handle], brief, worktree, handle
+        )
         return Job(self.name, worktree.name, worktree, handle)
 
     def wait(self, job: Job) -> Result:
@@ -68,7 +70,10 @@ class ClaudeLocal:
             raise BackendError(f"no running job {job.handle}") from None
 
     def resume(self, job: Job, brief: str) -> Job:
-        self._launch(["--resume", job.handle], brief, job.worktree, job.handle)
+        agent = self._agents[job.handle]
+        self._launch(
+            ["--agent", agent, "--resume", job.handle], brief, job.worktree, job.handle
+        )
         return job
 
 

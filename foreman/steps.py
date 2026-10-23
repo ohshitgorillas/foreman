@@ -18,10 +18,11 @@ class Step:
     design_ref: str
     depends_on: list[str]
     size: str
+    agent: str = "builder"  # the target repo's role that builds this step
 
 
 _LISTS = ("paths", "done_check", "depends_on")
-_STRS = ("design_ref", "size")
+_STRS = ("design_ref", "size", "agent")
 
 
 def _str_list(where: str, key: str, value: object) -> list[str]:
@@ -69,6 +70,7 @@ def load(path: Path) -> list[Step]:
                 design_ref=table["design_ref"],
                 depends_on=_str_list(where, "depends_on", table["depends_on"]),
                 size=table["size"],
+                agent=table["agent"],
             )
         )
     return steps

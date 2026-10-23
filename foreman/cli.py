@@ -36,7 +36,7 @@ def run_step(
     try:
         log.emit("step_started", step.id)
         text = brief.render(cfg, step, git.head(wt), {})
-        job = backend.start(text, wt)
+        job = backend.start(text, wt, step.agent)
         backend.wait(job)
         verdict = verify.verify(cfg, wt)
         if not verdict.green:

@@ -111,7 +111,7 @@ def test_main_overloaded_step_file_exits_3(cfg: Config, tmp_path: Path) -> None:
     sf = tmp_path / "m.toml"
     sf.write_text(
         '[steps.a]\npaths = ["1","2","3","4","5","6"]\ndone_check = ["x"]\n'
-        'design_ref = "r"\ndepends_on = []\nsize = "s"\n'
+        'design_ref = "r"\ndepends_on = []\nsize = "s"\nagent = "a"\n'
     )
     assert main(["--config", str(conf), "run", str(sf)]) == 3
 
@@ -121,6 +121,6 @@ def test_main_unknown_backend_exits_2(cfg: Config, tmp_path: Path) -> None:
     sf = tmp_path / "m.toml"
     sf.write_text(
         '[steps.a]\npaths = ["1"]\ndone_check = ["x"]\n'
-        'design_ref = "r"\ndepends_on = []\nsize = "s"\n'
+        'design_ref = "r"\ndepends_on = []\nsize = "s"\nagent = "a"\n'
     )
     assert main(["--config", str(conf), "run", str(sf)]) == 2

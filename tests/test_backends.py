@@ -22,11 +22,12 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], Path]]:
 
 def test_start_runs_claude_in_worktree(calls, tmp_path: Path) -> None:
     b = backends.ClaudeLocal()
-    job = b.start("do it", tmp_path)
+    job = b.start("do it", tmp_path, "builder")
     cmd, cwd = calls[0]
     assert cmd[:2] == ["claude", "-p"]
     assert cmd[-1] == "do it"
     assert cmd[cmd.index("--session-id") + 1] == job.handle
+    assert cmd[cmd.index("--agent") + 1] == "builder"
     assert cwd == tmp_path
     assert job.backend == "claude-local"
     assert b.wait(job).out == "done"
@@ -34,11 +35,12 @@ def test_start_runs_claude_in_worktree(calls, tmp_path: Path) -> None:
 
 def test_resume_reuses_session(calls, tmp_path: Path) -> None:
     b = backends.ClaudeLocal()
-    job = b.start("first", tmp_path)
+    job = b.start("first", tmp_path, "builder")
     b.wait(job)
     again = b.resume(job, "fix it")
     cmd, _ = calls[1]
     assert cmd[cmd.index("--resume") + 1] == job.handle
+    assert cmd[cmd.index("--agent") + 1] == "builder"
     assert cmd[-1] == "fix it"
     assert again.handle == job.handle
     assert b.wait(again).code == 0
@@ -58,7 +60,7 @@ def test_start_failure_is_backend_error(
 
     monkeypatch.setattr(run, "run", boom)
     with pytest.raises(BackendError):
-        backends.ClaudeLocal().start("x", tmp_path)
+        backends.ClaudeLocal().start("x", tmp_path, "builder")
 
 
 def test_get_resolves_backend(cfg: Config) -> None:

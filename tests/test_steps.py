@@ -26,6 +26,7 @@ done_check = ["make check"]
 design_ref = "design:1"
 depends_on = []
 size = "s"
+agent = "builder"
 
 [steps.two]
 paths = ["c.py"]
@@ -33,6 +34,7 @@ done_check = ["make check"]
 design_ref = "design:2"
 depends_on = ["one"]
 size = "m"
+agent = "builder"
 """
 
 
@@ -59,6 +61,7 @@ def test_load_reads_steps_in_order(tmp_path: Path) -> None:
         GOOD.replace('size = "s"', 'size = "s"\nextra = 1'),
         GOOD.replace('paths = ["c.py"]', 'paths = "c.py"'),
         GOOD.replace('size = "m"', "size = 3"),
+        GOOD.replace('agent = "builder"\n', "", 1),
     ],
 )
 def test_load_rejects_bad_files(tmp_path: Path, text: str) -> None:
