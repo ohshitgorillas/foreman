@@ -3,7 +3,7 @@ import json
 import pytest
 
 from foreman.config import Config
-from foreman.errors import ConfigError, FindingsToRule, RulingNeeded
+from foreman.errors import ConfigError, FindingsToRule, RulingNeeded, WrongTest
 from foreman.events import DISPATCHER_SIGNALS, OWNER_SIGNALS, EventLog, fail, say
 
 
@@ -50,7 +50,12 @@ def test_notify_dispatcher_logs_and_writes_stderr(
     cfg: Config, capsys: pytest.CaptureFixture[str]
 ) -> None:
     log = EventLog(cfg)
-    assert DISPATCHER_SIGNALS == ("findings", "ruling_needed", "red_twice")
+    assert DISPATCHER_SIGNALS == (
+        "findings",
+        "ruling_needed",
+        "red_twice",
+        "test_wrong",
+    )
     log.notify_dispatcher("red_twice", "g1", "stuck")
     assert capsys.readouterr().err == "[red_twice] g1: stuck\n"
     row = json.loads((cfg.state_dir / "events.jsonl").read_text())
@@ -91,3 +96,13 @@ def test_say_and_fail(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_new_error_exit_codes() -> None:
     assert (RulingNeeded.exit_code, FindingsToRule.exit_code) == (6, 7)
+
+
+def test_wrong_test_exit_code_and_signal(
+    cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert WrongTest.exit_code == 8
+    EventLog(cfg).notify_dispatcher("test_wrong", "g1", "bad test")
+    assert capsys.readouterr().err == "[test_wrong] g1: bad test\n"
+    row = json.loads((cfg.state_dir / "events.jsonl").read_text())
+    assert (row["kind"], row["step_id"]) == ("test_wrong", "g1")

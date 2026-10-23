@@ -41,4 +41,10 @@ class FindingsToRule(ForemanError):
     exit_code = 7
 
 
+class WrongTest(ForemanError):
+    """A builder reported TEST WRONG; Void, the dispatcher, rules and runs `retest`."""
+
+    exit_code = 8
+
+
 EXIT_OK = 0

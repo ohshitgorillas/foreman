@@ -9,7 +9,7 @@ from foreman.config import Config
 from foreman.errors import ConfigError
 
 OWNER_SIGNALS = ("milestone_done",)
-DISPATCHER_SIGNALS = ("findings", "ruling_needed", "red_twice")
+DISPATCHER_SIGNALS = ("findings", "ruling_needed", "red_twice", "test_wrong")
 
 
 class EventLog:
