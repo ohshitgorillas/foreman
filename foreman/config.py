@@ -20,7 +20,7 @@ class Config:
     worktree_root: Path  # where step worktrees are made
     check_cmd: list[str]  # e.g. ["make", "check"]
     format_cmd: list[str]  # e.g. ["ruff", "format"]
-    backend: str  # "claude-local" in the first version
+    backend: str  # "claude-local" or "codex-local"
     state_dir: Path  # holds events.jsonl
     reviewers: list[Reviewer]  # [[reviewers]] tables, in run order
     view_cmd: list[str]  # the stubgen argv, e.g. ["uv", "run", "stubgen"]
