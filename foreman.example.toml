@@ -1,0 +1,8 @@
+# Copy to foreman.toml and edit.
+target_repo = "~/dev/gauntlet"
+worktree_root = "~/dev/foreman-worktrees"
+state_dir = "~/dev/foreman/state"
+check_cmd = ["make", "check"]
+format_cmd = ["uv", "run", "ruff", "format"]
+standing_lines = ["Run ruff format on the files you wrote.", "Never commit or push."]
+backend = "claude-local"

@@ -43,13 +43,18 @@ def changed_paths(wt: Path) -> list[str]:
     return paths
 
 
+def head(wt: Path) -> str:
+    """The commit hash HEAD points at in the worktree."""
+    return run_ok(["git", "rev-parse", "HEAD"], wt).out.strip()
+
+
 def commit_paths(wt: Path, paths: list[str], message: str) -> str:
     """Commit only the given paths; return the new commit hash."""
     if not paths:
         raise ForemanError("commit_paths needs at least one path")
     run_ok(["git", "add", "--", *paths], wt)
     run_ok(["git", "commit", "--only", "-m", message, "--", *paths], wt)
-    return run_ok(["git", "rev-parse", "HEAD"], wt).out.strip()
+    return head(wt)
 
 
 def push(wt: Path) -> None:
