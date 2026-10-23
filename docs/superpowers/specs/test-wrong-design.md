@@ -44,7 +44,7 @@ class Report:
     test_wrong: list[str] = field(default_factory=list)        # lines under "TEST WRONG <n>" or "TEST WRONG <n>:", verbatim without indent
 
 def _block(lines: list[str], header: str) -> list[str]: ...
-    # the indented lines after the first "<header> <n>" line, a trailing ":..." on it allowed, up to the first blank or unindented line
+    # the indented lines after the first "<header> <n>" line, a trailing ":..." on it allowed and not read, up to the first blank or unindented line
 def route_tests(lines: list[str], group: Group) -> tuple[dict[str, list[str]], list[str]]: ...
     # step id -> each line, verbatim, whose leading "<test path>::" steps.owner maps to it; and the lines whose test path no step owns
 ```
@@ -119,11 +119,3 @@ def origin(cfg: Config, tmp_path: Path) -> Path: ...   # a bare repository added
 | 5 | `foreman/git.py`, `tests/test_git.py` | `builder` |
 | 6 | `foreman/loop.py`, `tests/test_loop.py` | `builder` |
 | 7 | `foreman/cli.py`, `tests/test_cli.py` | `builder` |
-
-## Decisions for the owner
-
-1. Who writes the test-fix brief. Recommend: Void writes it in the test-writer's shape and Foreman carries it verbatim; cost: one brief by Void per round, time unmeasured. Alternative: Foreman composes a `repair` brief in `foreman/brief.py`; cost: `repair` keeps every claim and expected value byte for byte (`docs/research/gauntlet-roles/test-writer.md:42`), so it cannot fix a test that contradicts a document, and core-builder's `TEST WRONG` line carries no failure summary line (`docs/research/gauntlet-roles/core-builder.md:89`) where `repair` requires one (`docs/research/gauntlet-roles/test-writer.md:28`).
-2. The stopped step's paths before it runs again. Recommend: `git.snapshot` before every step dispatch and `git.restore` before the rerun; cost: one snapshot per step, time unmeasured. Alternative: leave them as the builder left them; cost: a build left in place by a `TEST WRONG` after building (`docs/research/gauntlet-roles/core-builder.md:51`) makes the fresh builder's red run see passing tests, which it reports as `TEST WRONG` again (`docs/research/gauntlet-roles/core-builder.md:49`).
-3. `TEST WRONG` lines owned by more than one earlier step. Recommend: `RulingNeeded`, so FILE is one brief for one test step; cost: a group with two red steps cannot use `retest` for both at once. Alternative: FILE carries one brief per test step; cost: a FILE format and its reader in `foreman/reports.py`.
-4. gatesmith's `TEST WRONG <n>:` header. Recommend: read the indented lines after it, as for the other roles; cost: anything gatesmith writes after the colon on the header line is not read. Alternative: also split the header line's remainder into items; cost: its separator is undocumented (`docs/research/gauntlet-roles/gatesmith.md:75`), so the split is a guess.
-5. A second `TEST WRONG` from the same step after `retest`. Recommend: it stops as `WrongTest` again, each round through Void; cost: no bound on rounds. Alternative: it raises `Escalated` with `red_twice`, as the gate does (`foreman/loop.py:94-99`); cost: a second, different wrong test also escalates.
