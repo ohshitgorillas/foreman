@@ -11,11 +11,11 @@ The tree holds no harness code: no `foreman/`, `gauntlet/`, `gates/`, `tests/`, 
 - The overload check, run separately by every agent and by the dispatcher: `docs/research/dispatch-rules.md:2`.
 - `make check` run by the agent, then again by hand before commit: `docs/research/void-sketch.md:3`, `docs/research/void-sketch.md:31`.
 
-The core below gives each of these one home before any piece exists, so none is written twice. The first version runs one step of a Gauntlet step file end to end on one backend: lint, brief, launch, verify, resume once, commit the step's paths, escalate when red twice (`docs/research/void-sketch.md:5-37`). Budget routing, the reviewer pass, cloud, Codex and API adapters come after it.
+The core below gives each of these one home before any piece exists, so none is written twice. The first version runs one Gauntlet step from a milestone's step file end to end on one backend: lint, brief, launch, verify, resume once, commit the step's paths, escalate when red twice (`docs/research/void-sketch.md:5-37`). Budget routing, the reviewer pass, cloud, Codex and API adapters come after it.
 
 ## Modules
 
-Python 3.11, standard library only. Package `foreman/`.
+Python 3.12, standard library only. Package `foreman/`. TOML is read with `tomllib`.
 
 Core (every piece builds on these):
 
@@ -89,7 +89,7 @@ def push(wt: Path) -> None: ...
 
 Pieces (each built on the core):
 
-`foreman/steps.py`: reads a step file, lints every step against the overload test, picks the next ready step. Replaces the overload check each agent runs (`docs/research/dispatch-rules.md:2`) as the one dispatcher-side lint.
+`foreman/steps.py`: reads a milestone's step file, lints every step against the overload test, picks the next ready step. A step file is `queues/<milestone>.toml` in Foreman, one per milestone, holding one `[steps.<id>]` table per step whose keys are the other `Step` fields; Gauntlet's plan files are never parsed. Replaces the overload check each agent runs (`docs/research/dispatch-rules.md:2`) as the one dispatcher-side lint.
 
 ```python
 @dataclass(frozen=True)
@@ -101,7 +101,7 @@ class Step:
     depends_on: list[str]
     size: str
 
-def load(path: Path) -> list[Step]: ...
+def load(path: Path) -> list[Step]: ...                 # queues/<milestone>.toml
 def lint(steps: list[Step]) -> list[str]: ...         # problems; empty means clean
 def next_ready(steps: list[Step], done: set[str]) -> Step | None: ...
 ```
@@ -113,7 +113,7 @@ def render(cfg: Config, step: Step, head: str, earlier: dict[str, str]) -> str: 
 def render_resume(step: Step, failures: Result) -> str: ...   # quotes the exact failing output
 ```
 
-`foreman/backends.py`: one adapter interface and the first adapter, local Claude Code on the main plan. Replaces nothing (new).
+`foreman/backends.py`: one adapter interface and the first adapter, local Claude Code (`claude -p`) on the Max plan. `get` returns the adapter `Config.backend` names; the first version has no budget ledger and no routing. Replaces nothing (new).
 
 ```python
 @dataclass
@@ -146,7 +146,7 @@ class Verdict:
 def verify(cfg: Config, wt: Path) -> Verdict: ...
 ```
 
-`foreman/cli.py` and `foreman/__main__.py`: `python -m foreman run <step-file> [--step ID]` and `python -m foreman status`; the loop: lint, worktree, brief, start, wait, verify, resume once when red, escalate when red twice, commit the step's paths when green, push, remove the worktree. Maps every `ForemanError` to its exit code; nothing else calls `sys.exit`.
+`foreman/cli.py` and `foreman/__main__.py`: `python -m foreman run queues/<milestone>.toml [--step ID]` and `python -m foreman status`; the loop: lint, worktree, brief, start, wait, verify, resume once when red, escalate when red twice, commit the step's paths when green, push, remove the worktree. Maps every `ForemanError` to its exit code; nothing else calls `sys.exit`.
 
 ```python
 def run_step(cfg: Config, step: Step, log: EventLog) -> str: ...   # returns commit hash; raises Escalated
@@ -165,6 +165,8 @@ Test helpers: `tests/conftest.py` holds `tmp_repo` (a throwaway git repository w
 | Output and owner signals | `foreman/events.py` | `print`, logging setup, any other file written as a log, any other way of reaching the owner |
 | Git, worktrees, cleanup | `foreman/git.py` | running `git` (it goes through `run.run` from here only); deleting worktrees; staging the whole index |
 | Step file and overload lint | `foreman/steps.py` | parsing step files; checking file counts or done-check counts |
+| Step lists | `queues/<milestone>.toml`, one per milestone | steps kept in any other file; reading Gauntlet's plan files |
+| Backend choice | `Config.backend`, resolved by `backends.get` | budget ledgers, meter readings or routing rules in the first version |
 | Brief text and standing lines | `foreman/brief.py` | brief or resume text built anywhere else |
 | Agent launch | `foreman/backends.py` | starting an agent process outside a `Backend` |
 | Format and check | `foreman/verify.py` | running `format_cmd` or `check_cmd` |
@@ -172,23 +174,23 @@ Test helpers: `tests/conftest.py` holds `tmp_repo` (a throwaway git repository w
 
 ## Order
 
+`builder` is a roster agent whose writes are `foreman/`, `tests/`, `pyproject.toml`, `Makefile` and `foreman.example.toml`.
+
 | Step | Paths | Agent |
 |---|---|---|
-| 1 | `pyproject.toml`, `Makefile`, `foreman/__init__.py`, `foreman/errors.py`, `foreman/config.py` | `builder` (not on the roster) |
-| 2 | `foreman/run.py`, `foreman/events.py`, `tests/conftest.py`, `tests/test_run.py`, `tests/test_events.py` | `builder` (not on the roster) |
-| 3 | `foreman/git.py`, `tests/test_git.py`, `tests/test_config.py` | `builder` (not on the roster) |
-| 4 | `foreman/steps.py`, `tests/test_steps.py` | `builder` (not on the roster) |
-| 5 | `foreman/brief.py`, `foreman/templates/brief.md`, `foreman/templates/resume.md`, `tests/test_brief.py` | `builder` (not on the roster) |
-| 6 | `foreman/backends.py`, `tests/test_backends.py` | `builder` (not on the roster) |
-| 7 | `foreman/verify.py`, `tests/test_verify.py` | `builder` (not on the roster) |
-| 8 | `foreman/cli.py`, `foreman/__main__.py`, `tests/test_cli.py`, `foreman.example.toml` | `builder` (not on the roster) |
+| 1 | `pyproject.toml`, `Makefile`, `foreman/__init__.py`, `foreman/errors.py`, `foreman/config.py` | `builder` |
+| 2 | `foreman/run.py`, `foreman/events.py`, `tests/conftest.py`, `tests/test_run.py`, `tests/test_events.py` | `builder` |
+| 3 | `foreman/git.py`, `tests/test_git.py`, `tests/test_config.py` | `builder` |
+| 4 | `foreman/steps.py`, `tests/test_steps.py` | `builder` |
+| 5 | `foreman/brief.py`, `foreman/templates/brief.md`, `foreman/templates/resume.md`, `tests/test_brief.py` | `builder` |
+| 6 | `foreman/backends.py`, `tests/test_backends.py` | `builder` |
+| 7 | `foreman/verify.py`, `tests/test_verify.py` | `builder` |
+| 8 | `foreman/cli.py`, `foreman/__main__.py`, `tests/test_cli.py`, `foreman.example.toml` | `builder` |
 
 Steps 1-3 are the core; no piece starts before step 3 lands. Step 8's done-check is `make check`; the first real run is one Gauntlet step through `python -m foreman run`, by the owner.
 
 ## Decisions for the owner
 
-1. **Language.** Recommend: Python 3.11 standard library only, matching Gauntlet's `ruff format` and `make check` toolchain (`docs/research/void-sketch.md:18`); cost: eight steps above, size unmeasured. Alternative: one shell script around the step file; cost: fewer files at first, but lint, event log and resume logic in shell, and no unit tests for them.
-2. **Who builds.** Recommend: add a `builder` roster agent whose Writes hold `foreman/`, `tests/`, `pyproject.toml`, `Makefile` and `foreman.example.toml`; cost: one new role file. Alternative: the owner builds by hand from this file; cost: the owner's time, unmeasured.
-3. **First backend.** Recommend: local Claude Code (`claude -p`) on the Max plan, the default pool (`docs/research/credit-plan.md:20`); cost: draws on the weekly meter. Alternative: `codex exec`; cost: Codex is for parallel steps, not the main road (`docs/research/credit-plan.md:7`), and its reset times are random.
-4. **Budget ledger and routing.** Recommend: out of the first version; `Config.backend` fixes the backend, and a `foreman/ledger.py` module comes after step 8; cost: no automatic routing until then. Alternative: a ledger with hand-entered meter readings in the first version; cost: two more steps before the first run.
-5. **Step file.** Recommend: one TOML file per milestone, kept in Foreman under `queues/`, one table per step with the `Step` fields; cost: Gauntlet's plans are copied into it once per milestone. Alternative: read Gauntlet's own plan files under its `docs/superpowers/plans/`; cost: a parser for prose plans, whose format is unread.
+1. **Test runner.** Recommend: standard library only binds `foreman/`; tests run under pytest as a development-only dependency in `pyproject.toml`, with helpers as fixtures in `tests/conftest.py` as above; cost: one development dependency. Alternative: tests use `unittest`, with the helpers as plain functions and a base class in `tests/helpers.py`; cost: no fixtures, every test calls its helpers explicitly.
+2. **Builder role file.** Recommend: the owner writes `.claude/agents/builder.md` with the writes above before step 1; cost: one role file, the owner's time unmeasured. Alternative: a roster agent that owns role files writes it from this design; cost: one extra dispatch before step 1.
+3. **Who writes step lists.** Recommend: the owner copies each milestone's steps from Gauntlet's plan into `queues/<milestone>.toml` before its first run; cost: one hand copy per milestone, time unmeasured. Alternative: add `queues/` to `builder`'s writes and dispatch one step per milestone to write it; cost: one dispatch per milestone, and the builder reads Gauntlet's plan.
