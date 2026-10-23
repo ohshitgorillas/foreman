@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from foreman.backends import Job
 from foreman.config import Config
+from foreman.run import Result
 
 
 @pytest.fixture
@@ -39,3 +41,45 @@ def cfg(tmp_path: Path, tmp_repo: Path) -> Config:
         backend="claude-local",
         state_dir=tmp_path / "state",
     )
+
+
+class FakeBackend:
+    """A Backend that writes given files into the worktree instead of an agent."""
+
+    name = "fake"
+
+    def __init__(
+        self,
+        files: dict[str, str] | None = None,
+        resume_files: dict[str, str] | None = None,
+    ) -> None:
+        self.files = files or {}
+        self.resume_files = resume_files or {}
+        self.briefs: list[str] = []
+        self._n = 0
+
+    def _write(self, files: dict[str, str], worktree: Path) -> None:
+        for rel, text in files.items():
+            target = worktree / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+
+    def start(self, brief: str, worktree: Path) -> Job:
+        self.briefs.append(brief)
+        self._n += 1
+        self._write(self.files, worktree)
+        return Job(self.name, worktree.name, worktree, f"fake-{self._n}")
+
+    def wait(self, job: Job) -> Result:
+        return Result(["fake"], 0, "", "", 0.0)
+
+    def resume(self, job: Job, brief: str) -> Job:
+        self.briefs.append(brief)
+        self._write(self.resume_files, job.worktree)
+        return job
+
+
+@pytest.fixture
+def fake_backend() -> type[FakeBackend]:
+    """The FakeBackend class; call it with the files to write."""
+    return FakeBackend

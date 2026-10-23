@@ -38,7 +38,11 @@ class ClaudeLocal:
         args: list[str] | None = None,
     ) -> None:
         self.command = command if command is not None else ["claude"]
-        self.args = args if args is not None else ["--permission-mode", "acceptEdits"]
+        self.args = (
+            args
+            if args is not None
+            else ["--agent", "builder", "--permission-mode", "bypassPermissions"]
+        )
         self._results: dict[str, Result] = {}
 
     def _launch(
