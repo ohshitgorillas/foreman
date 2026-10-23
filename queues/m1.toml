@@ -1,37 +1,44 @@
-# Gauntlet M1, Order steps 44-47 (docs/superpowers/specs/m1-core-records-design.md:1281-1284), written by Void.
-# Every new Gauntlet file starts with: # Copyright 2026 oh shit, gorillas!
+# Gauntlet M1, Order steps 44-46 (docs/superpowers/specs/m1-core-records-design.md:1281-1283), written by Void in the group format.
+# Step 47 (wire) is not here yet: its Makefile and pyproject.toml rows need their own brief check against gatesmith's wire shape.
+
+[groups.g44]
+steps = ["44", "45", "46"]
+design = "docs/superpowers/specs/m1-core-records-design.md"
+after = []
 
 [steps.44]
-agent = "gatesmith"
+role = "gatesmith"
+paths = ["gates/check_shell.py"]
 brief = """stub
 44 stub | gatesmith | gates/check_shell.py | AST checker and existing gate host interfaces.
 gates/check_shell.py"""
-paths = ["gates/check_shell.py"]
-done_check = ["make check"]
-design_ref = "docs/superpowers/specs/m1-core-records-design.md:983 and Order row 44 (stub): AST checker and existing gate host interfaces"
-depends_on = []
-size = "small"
 
 [steps.45]
-agent = "test-writer"
+role = "test-writer"
 paths = ["tests/test_check_shell.py", "tests/test_check_shell_contract.py"]
-done_check = ["uv run pytest -q tests/test_check_shell.py tests/test_check_shell_contract.py (expected red)"]
-design_ref = "docs/superpowers/specs/m1-core-records-design.md:983 and Order row 45 (red): prohibited constructs and aliases, accepted opaque strings, shadowing, scope, grammar/empty-run contracts"
-depends_on = ["44"]
-size = "medium"
+views = ["gates/check_shell.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_check_shell.py", "tests/test_check_shell_contract.py"]
+expect_code = 1
+brief = """red
+design: docs/superpowers/specs/m1-core-records-design.md, Order step 45
+behavior: A prohibited AST use is an import or from-import of shlex, bashlex, bashparser, bashparserlib or shellparse, their submodules included; an importlib.import_module or __import__ call with one of those literal module names; or shell=True passed to subprocess execution.
+view: /Users/atom/dev/foreman-views/g44/gates/check_shell.pyi
+behavior: Resolve aliases of importlib, __import__, subprocess and their directly imported names in the module's imports.
+view: /Users/atom/dev/foreman-views/g44/gates/check_shell.pyi
+behavior: One finding names the source anchor and prohibited construct.
+view: /Users/atom/dev/foreman-views/g44/gates/check_shell.pyi
+behavior: A shadowed or dynamically computed target is not falsely claimed to be resolved.
+view: /Users/atom/dev/foreman-views/g44/gates/check_shell.pyi
+behavior: Every input Python file is counted and parsed through the shared grammar home; findings apply to gauntlet/ code.
+view: /Users/atom/dev/foreman-views/g44/gates/check_shell.pyi
+behavior: Tests exercise every prohibited syntax and alias form, safe opaque storage/forwarding, shadowing, malformed source and the shared empty-run/exit contract.
+view: /Users/atom/dev/foreman-views/g44/gates/check_shell.pyi"""
 
 [steps.46]
-agent = "gatesmith"
+role = "gatesmith"
 paths = ["gates/check_shell.py"]
-done_check = ["make check"]
-design_ref = "docs/superpowers/specs/m1-core-records-design.md:983 and Order row 46 (build): step 45 on shared gates core; no external checker"
-depends_on = ["45"]
-size = "medium"
-
-[steps.47]
-agent = "gatesmith"
-paths = ["Makefile", "pyproject.toml"]
-done_check = ["make check"]
-design_ref = "docs/superpowers/specs/m1-core-records-design.md Order row 47 (wire): add check_shell over every Python input and to the real-time import contract's explicit source-module list"
-depends_on = ["46"]
-size = "small"
+check = ["uv", "run", "pytest", "-q", "tests/test_check_shell.py", "tests/test_check_shell_contract.py"]
+brief = """gates/check_shell.py
+docs/superpowers/specs/m1-core-records-design.md, Order step 46
+tests/test_check_shell.py
+tests/test_check_shell_contract.py"""
