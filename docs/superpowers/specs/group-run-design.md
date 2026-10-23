@@ -228,8 +228,3 @@ def entry() -> NoReturn: ...
 | 15 | `queues/m1.toml` | Void, the dispatcher |
 
 Step 11 adds `view_cmd` and `view_root` to `Config`, `foreman.example.toml` and the `cfg` fixture, adds `conf_file`, and moves `tests/test_cli.py` onto it. Step 15 rewrites the step file in the group format, each step's brief in its role's shape; each red step lists its `views`, and its brief's `view:` lines name their `views.path`. The first real run is one Gauntlet group through `python -m foreman run`, by the owner.
-
-## Decisions for the owner
-
-1. **Where views are written.** Recommend: under `Config.view_root`, outside every worktree; cost: one more required key, and each red brief's `view:` lines carry absolute paths Void builds from `foreman.toml`, a wrong one surfacing only when `test-writer` cannot read it. Alternative: under a directory inside the group's worktree that git ignores; cost: `git.changed_paths` (`foreman/git.py:45-55`) lists the views unless the target repository ignores that directory, and `check_cmd` may run over them; neither cost measured.
-2. **Whether `view_cmd` and `view_root` are required keys.** Recommend: required; cost: the owner's `foreman.toml` gains two lines before the next run, and every config written by a test carries them. Alternative: optional, empty by default, with `views.make` raising `ConfigError` for a step with views under an empty `view_cmd`; cost: a second default path in `config.load` and a stop found only mid-run, after earlier steps of the group ran.
