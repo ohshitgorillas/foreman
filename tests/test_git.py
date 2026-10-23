@@ -10,6 +10,8 @@ from foreman.git import (
     make_worktree,
     push,
     remove_worktree,
+    restore,
+    snapshot,
     worktree,
 )
 from foreman.run import run_ok
@@ -108,3 +110,106 @@ def test_worktree_after_remove_raises(cfg: Config) -> None:
     remove_worktree(cfg, make_worktree(cfg, "g1"))
     with pytest.raises(ForemanError):
         worktree(cfg, "g1")
+
+
+def test_snapshot_preserves_index_head_and_working_files(cfg: Config) -> None:
+    wt = make_worktree(cfg, "snapshot")
+    (wt / "README.md").write_text("staged\n")
+    run_ok(["git", "add", "README.md"], wt)
+    (wt / "README.md").write_text("working\n")
+    (wt / "new file").write_bytes(b"\x00\xff\n")
+    (wt / ".gitignore").write_text("ignored\n")
+    (wt / "ignored").write_text("ignored content\n")
+    (wt / "executable").write_text("#!/bin/sh\n")
+    (wt / "executable").chmod(0o755)
+    (wt / "link").symlink_to("new file")
+    index = Path(run_ok(["git", "rev-parse", "--git-path", "index"], wt).out.strip())
+    before_index = index.read_bytes()
+    before_head = run_ok(["git", "rev-parse", "HEAD"], wt).out
+    before_files = run_ok(["git", "status", "--porcelain", "-uall"], wt).out
+
+    tree = snapshot(wt)
+
+    assert run_ok(["git", "cat-file", "-t", tree], wt).out == "tree\n"
+    assert run_ok(["git", "show", f"{tree}:README.md"], wt).out == "working\n"
+    assert run_ok(["git", "show", f"{tree}:ignored"], wt).out == "ignored content\n"
+    assert index.read_bytes() == before_index
+    assert run_ok(["git", "rev-parse", "HEAD"], wt).out == before_head
+    assert run_ok(["git", "status", "--porcelain", "-uall"], wt).out == before_files
+    assert (wt / "new file").read_bytes() == b"\x00\xff\n"
+    assert (wt / "link").readlink() == Path("new file")
+    assert (wt / "executable").stat().st_mode & 0o111
+
+    (wt / "new file").unlink()
+    (wt / "link").unlink()
+    (wt / "executable").chmod(0o644)
+    restore(wt, tree, ["new file", "link", "executable"])
+    assert (wt / "new file").read_bytes() == b"\x00\xff\n"
+    assert (wt / "link").readlink() == Path("new file")
+    assert (wt / "executable").stat().st_mode & 0o111
+
+
+def test_restore_directory_and_absent_files_keeps_other_changes(cfg: Config) -> None:
+    wt = make_worktree(cfg, "restore")
+    (wt / "owned").mkdir()
+    (wt / "owned" / "before").write_text("earlier step\n")
+    (wt / "README.md").unlink()
+    tree = snapshot(wt)
+    (wt / "owned" / "before").unlink()
+    (wt / "owned" / "new").write_text("staged new\n")
+    run_ok(["git", "add", "owned/new"], wt)
+    (wt / "owned" / ".gitignore").write_text("ignored\n")
+    (wt / "owned" / "ignored").write_text("new ignored\n")
+    (wt / "README.md").write_text("recreated\n")
+    (wt / "outside").write_text("test fix\n")
+    (wt / "owned-sibling").write_text("keep\n")
+    staged = run_ok(["git", "diff", "--cached"], wt).out
+    before_head = run_ok(["git", "rev-parse", "HEAD"], wt).out
+
+    restore(wt, tree, ["owned", "README.md", "never-existed"])
+
+    assert sorted(p.name for p in (wt / "owned").iterdir()) == ["before"]
+    assert (wt / "owned" / "before").read_text() == "earlier step\n"
+    assert not (wt / "README.md").exists()
+    assert (wt / "outside").read_text() == "test fix\n"
+    assert (wt / "owned-sibling").read_text() == "keep\n"
+    assert run_ok(["git", "diff", "--cached"], wt).out == staged
+    assert run_ok(["git", "rev-parse", "HEAD"], wt).out == before_head
+
+
+def test_restore_empty_paths_changes_nothing(cfg: Config) -> None:
+    wt = make_worktree(cfg, "empty")
+    tree = snapshot(wt)
+    (wt / "README.md").write_text("keep\n")
+    restore(wt, tree, [])
+    assert (wt / "README.md").read_text() == "keep\n"
+
+
+def test_restore_literal_path_and_file_directory_swaps(cfg: Config) -> None:
+    wt = make_worktree(cfg, "swaps")
+    (wt / "literal[1]").write_text("literal\n")
+    (wt / "literal1").write_text("other\n")
+    (wt / "directory").mkdir()
+    (wt / "directory" / "child").write_text("child\n")
+    tree = snapshot(wt)
+    (wt / "literal[1]").unlink()
+    (wt / "literal[1]").mkdir()
+    (wt / "literal[1]" / "new").write_text("new\n")
+    (wt / "literal1").write_text("keep\n")
+    (wt / "directory" / "child").unlink()
+    (wt / "directory").rmdir()
+    (wt / "directory").write_text("file now\n")
+
+    restore(wt, tree, ["literal[1]", "directory"])
+
+    assert (wt / "literal[1]").read_text() == "literal\n"
+    assert (wt / "literal1").read_text() == "keep\n"
+    assert (wt / "directory" / "child").read_text() == "child\n"
+
+
+def test_restore_invalid_tree_leaves_files_alone(cfg: Config) -> None:
+    wt = make_worktree(cfg, "invalid")
+    (wt / "new").write_text("keep\n")
+    with pytest.raises(ForemanError):
+        restore(wt, "not-a-tree", ["new"])
+    assert (wt / "new").read_text() == "keep\n"

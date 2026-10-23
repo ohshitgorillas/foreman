@@ -1,10 +1,55 @@
 """Git, worktrees and cleanup: the only module that runs git."""
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from foreman.config import Config
 from foreman.errors import ForemanError
-from foreman.run import run_ok
+from foreman.run import run, run_ok
+
+
+def _indexed(wt: Path, index: Path, *args: str) -> str:
+    """Run git against a private index, leaving the worktree index alone."""
+    result = run(
+        ["git", "--literal-pathspecs", *args],
+        wt,
+        env={"GIT_INDEX_FILE": str(index)},
+    )
+    if result.code != 0:
+        raise ForemanError(f"{result.cmd} exited {result.code}: {result.err.strip()}")
+    return result.out
+
+
+def snapshot(wt: Path) -> str:
+    """Capture working files, including untracked and ignored files, as a tree."""
+    with TemporaryDirectory() as directory:
+        index = Path(directory) / "index"
+        _indexed(wt, index, "read-tree", "--empty")
+        _indexed(wt, index, "add", "--all", "--force", "--", ".")
+        return _indexed(wt, index, "write-tree").strip()
+
+
+def restore(wt: Path, tree: str, paths: list[str]) -> None:
+    """Restore only the named paths, removing files absent from the snapshot."""
+    if not paths:
+        return
+    with TemporaryDirectory() as directory:
+        index = Path(directory) / "index"
+        _indexed(wt, index, "read-tree", tree)
+        # Against this index, only files absent from the snapshot are untracked.
+        _indexed(wt, index, "clean", "-fdx", "--", *paths)
+        present = _indexed(wt, index, "ls-files", "-z", "--", *paths)
+        if present:
+            _indexed(
+                wt,
+                index,
+                "restore",
+                "--source",
+                tree,
+                "--worktree",
+                "--",
+                *present.rstrip("\0").split("\0"),
+            )
 
 
 def _branch(step_id: str) -> str:
