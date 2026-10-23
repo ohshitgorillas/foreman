@@ -1,7 +1,7 @@
 """Reads a step file's groups and steps, lints them, and picks the next ready group."""
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from foreman.errors import ConfigError
@@ -17,6 +17,7 @@ class Step:
     paths: list[str]  # 1 to 5
     check: list[str]  # one argv; empty means the step runs no check
     expect_code: int = 0  # the check's passing exit code
+    views: list[str] = field(default_factory=list)  # .py sources viewed before the step
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,9 @@ def _str(where: str, key: str, value: object) -> str:
 
 def _step(path: Path, step_id: str, raw: object) -> Step:
     where = f"{path}: steps.{step_id}"
-    t = _table(where, raw, {"role", "brief", "paths"}, {"check", "expect_code"})
+    t = _table(
+        where, raw, {"role", "brief", "paths"}, {"check", "expect_code", "views"}
+    )
     code = t.get("expect_code", 0)
     if isinstance(code, bool) or not isinstance(code, int):
         raise ConfigError(f"{where}: expect_code must be an integer")
@@ -64,6 +67,7 @@ def _step(path: Path, step_id: str, raw: object) -> Step:
         paths=_str_list(where, "paths", t["paths"]),
         check=_str_list(where, "check", t.get("check", [])),
         expect_code=code,
+        views=_str_list(where, "views", t.get("views", [])),
     )
 
 
@@ -132,6 +136,16 @@ def lint(groups: list[Group]) -> list[str]:
                 problems.append(f"{s.id}: {len(s.paths)} paths, more than {MAX_PATHS}")
             if not s.brief.strip():
                 problems.append(f"{s.id}: no brief")
+    for g in groups:
+        for i, s in enumerate(g.steps):
+            earlier = [p for e in g.steps[:i] for p in e.paths]
+            for v in s.views:
+                if not v.endswith(".py"):
+                    problems.append(f"{s.id}: view {v} is not a .py source")
+                elif not holds(earlier, v):
+                    problems.append(
+                        f"{s.id}: view {v} not held by an earlier step of {g.id}"
+                    )
     known = set(gids)
     for g in groups:
         for dep in g.after:

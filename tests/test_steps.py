@@ -165,3 +165,31 @@ def test_owner_is_last_step_holding_path() -> None:
     assert owner(g, "x.pyc") is None
     assert owner(g, "foremanx/a.py") is None
     assert owner(g, "nowhere.py") is None
+
+
+def test_load_views_default_empty_and_read(tmp_path: Path) -> None:
+    groups = load(
+        write(
+            tmp_path,
+            GOOD.replace('paths = ["d.py"]', 'paths = ["d.py"]\nviews = ["a.py"]'),
+        )
+    )
+    three = groups[1].steps[0]
+    assert three.views == ["a.py"]
+    assert groups[0].steps[0].views == []
+
+
+def test_load_rejects_bad_views(tmp_path: Path) -> None:
+    text = GOOD.replace('paths = ["d.py"]', 'paths = ["d.py"]\nviews = "a.py"')
+    with pytest.raises(ConfigError, match="views must be a list of strings"):
+        load(write(tmp_path, text))
+
+
+def test_lint_views() -> None:
+    first = mk("a", paths=["pkg"])
+    ok = grp("g", [first, mk("b", views=["pkg/m.py"])])
+    assert lint([ok]) == []
+    assert lint([grp("g", [mk("b", views=["pkg/m.py"]), first])]) != []
+    assert lint([grp("g", [mk("b", views=["x.py"])])]) != []
+    bad = grp("g", [first, mk("b", views=["pkg/README.md"])])
+    assert any("not a .py" in p for p in lint([bad]))
