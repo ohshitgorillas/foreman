@@ -2,8 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from foreman import backends
+from foreman import backends, loop
 from foreman.cli import main
+from foreman.errors import WrongTest
 from foreman.run import run_ok
 
 GROUP_FILE = (
@@ -78,6 +79,68 @@ def test_stop_maps_to_its_exit_code(
     assert main(["--config", str(conf_file), "run", str(steps_file)]) == 6
 
 
-def test_upheld_unreadable_file_exits_2(conf_file, steps_file, tmp_path: Path) -> None:
-    argv = ["--config", str(conf_file), "upheld", str(steps_file), "g1"]
-    assert main([*argv, str(tmp_path / "none.txt")]) == 2
+@pytest.mark.parametrize("command", ["upheld", "retest"])
+@pytest.mark.parametrize("problem", ["missing", "directory", "invalid_utf8"])
+def test_continuation_unreadable_file_exits_2(
+    conf_file, steps_file, tmp_path: Path, capsys, command, problem
+) -> None:
+    path = tmp_path / "brief.txt"
+    if problem == "directory":
+        path.mkdir()
+    elif problem == "invalid_utf8":
+        path.write_bytes(b"\xff")
+    argv = ["--config", str(conf_file), command, str(steps_file), "g1", str(path)]
+    assert main(argv) == 2
+    assert f"cannot read {path}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["upheld", "retest"])
+@pytest.mark.parametrize("text", ["  Void's brief: café\n\nkeep this indent\n", ""])
+def test_continuation_forwards_file_verbatim_and_prints_commit(
+    conf_file, steps_file, tmp_path: Path, monkeypatch, capsys, command, text
+) -> None:
+    path = tmp_path / "brief.txt"
+    path.write_text(text, encoding="utf-8")
+    calls = []
+
+    def continue_group(cfg, group, brief, log):
+        calls.append((group.id, brief))
+        return "landed-commit"
+
+    monkeypatch.setattr(loop, f"run_{command}", continue_group)
+    argv = ["--config", str(conf_file), command, str(steps_file), "g1", str(path)]
+    assert main(argv) == 0
+    assert calls == [("g1", text)]
+    assert capsys.readouterr().out == "landed-commit\n"
+
+
+def test_retest_unknown_group_exits_2(
+    conf_file, steps_file, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    path = tmp_path / "brief.txt"
+    path.write_text("")
+
+    def unexpected(*args):
+        pytest.fail("unknown group must not reach run_retest")
+
+    monkeypatch.setattr(loop, "run_retest", unexpected)
+    argv = ["--config", str(conf_file), "retest", str(steps_file), "unknown", str(path)]
+    assert main(argv) == 2
+    assert "unknown group 'unknown'" in capsys.readouterr().err
+
+
+def test_retest_wrong_test_exits_8(
+    conf_file, steps_file, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    path = tmp_path / "brief.txt"
+    path.write_text("fix the tests")
+
+    def stopped(*args):
+        raise WrongTest("builder stopped again")
+
+    monkeypatch.setattr(loop, "run_retest", stopped)
+    argv = ["--config", str(conf_file), "retest", str(steps_file), "g1", str(path)]
+    assert main(argv) == 8
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "foreman: builder stopped again" in captured.err

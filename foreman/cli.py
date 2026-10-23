@@ -22,6 +22,12 @@ def _parser() -> argparse.ArgumentParser:
     u.add_argument("step_file", type=Path)
     u.add_argument("group_id")
     u.add_argument("findings", type=Path)
+    t = sub.add_parser(
+        "retest", help="continue a kept group after ruling on wrong tests"
+    )
+    t.add_argument("step_file", type=Path)
+    t.add_argument("group_id")
+    t.add_argument("brief", type=Path)
     sub.add_parser("status", help="print the one-line status")
     return p
 
@@ -41,6 +47,13 @@ def _find(groups: list[Group], group_id: str) -> Group:
     raise ConfigError(f"unknown group {group_id!r}")
 
 
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as e:
+        raise ConfigError(f"cannot read {path}: {e}") from e
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -51,11 +64,11 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_OK
         groups = _load(args.step_file)
         if args.command == "upheld":
-            try:
-                text = args.findings.read_text(encoding="utf-8")
-            except OSError as e:
-                raise ConfigError(f"cannot read {args.findings}: {e}") from e
+            text = _read(args.findings)
             say(loop.run_upheld(cfg, _find(groups, args.group_id), text, log))
+        elif args.command == "retest":
+            text = _read(args.brief)
+            say(loop.run_retest(cfg, _find(groups, args.group_id), text, log))
         elif args.group_id:
             say(
                 loop.run_group(
