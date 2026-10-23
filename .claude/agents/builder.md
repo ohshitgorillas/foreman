@@ -18,7 +18,7 @@ Read the design your brief names (`docs/superpowers/specs/harness-core-design.md
 
 ## Brief rule
 
-A legal brief names one design and one Order step of it (harness-core 1-8, lines 183-190; group-run 1-10, lines 199-208) and its paths, which must lie within your writes. The brief's path list is binding: the dispatcher may add files to a step's Order paths, up to five in all (`foreman/`, `tests/`, `pyproject.toml`, `Makefile`, `foreman.example.toml`; design line 178), and its one done-check. Check the brief before any work:
+A legal brief names one design and one Order step of it (harness-core 1-8, lines 183-190; group-run 1-14, lines 214-227) and its paths, which must lie within your writes. The brief's path list is binding: the dispatcher may add files to a step's Order paths, up to five in all (`foreman/`, `tests/`, `pyproject.toml`, `Makefile`, `foreman.example.toml`; design line 178), and its one done-check. Check the brief before any work:
 
 - It fails the 7.1f test in `docs/research/dispatch-rules.md:2`: refuse as that rule says, first line `OVERLOADED: <test failed, with its numbers>`, with no edits.
 - It names a path outside your writes, or more than five paths: return `REFUSED: OUT OF SCOPE`, then each offending line quoted, and nothing else; write nothing.
