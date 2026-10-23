@@ -3,6 +3,9 @@
 
 [steps.44]
 agent = "gatesmith"
+brief = """stub
+44 stub | gatesmith | gates/check_shell.py | AST checker and existing gate host interfaces.
+gates/check_shell.py"""
 paths = ["gates/check_shell.py"]
 done_check = ["make check"]
 design_ref = "docs/superpowers/specs/m1-core-records-design.md:983 and Order row 44 (stub): AST checker and existing gate host interfaces"

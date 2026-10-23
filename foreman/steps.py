@@ -19,6 +19,7 @@ class Step:
     depends_on: list[str]
     size: str
     agent: str = "builder"  # the target repo's role that builds this step
+    brief: str = ""  # when set, sent verbatim in place of the template
 
 
 _LISTS = ("paths", "done_check", "depends_on")
@@ -56,12 +57,14 @@ def load(path: Path) -> list[Step]:
         missing = [k for k in required if k not in table]
         if missing:
             raise ConfigError(f"{where}: missing keys: {', '.join(missing)}")
-        unknown = sorted(set(table) - set(required))
+        unknown = sorted(set(table) - set(required) - {"brief"})
         if unknown:
             raise ConfigError(f"{where}: unknown keys: {', '.join(unknown)}")
         for key in _STRS:
             if not isinstance(table[key], str):
                 raise ConfigError(f"{where}: {key} must be a string")
+        if not isinstance(table.get("brief", ""), str):
+            raise ConfigError(f"{where}: brief must be a string")
         steps.append(
             Step(
                 id=step_id,
@@ -71,6 +74,7 @@ def load(path: Path) -> list[Step]:
                 depends_on=_str_list(where, "depends_on", table["depends_on"]),
                 size=table["size"],
                 agent=table["agent"],
+                brief=table.get("brief", ""),
             )
         )
     return steps

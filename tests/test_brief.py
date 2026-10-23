@@ -61,3 +61,8 @@ def test_render_resume_quotes_exact_failure() -> None:
     assert failure.out in text
     assert failure.err in text
     assert "- foreman/a.py" in text
+
+
+def test_render_sends_a_steps_own_brief_verbatim(cfg: Config) -> None:
+    step = replace(STEP, brief="stub\nexact text\ngates/x.py")
+    assert render(cfg, step, "abc", {}) == "stub\nexact text\ngates/x.py"

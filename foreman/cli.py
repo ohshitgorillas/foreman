@@ -15,6 +15,7 @@ from foreman.errors import (
     OverloadedStep,
 )
 from foreman.events import EventLog
+from foreman.run import Result
 from foreman.steps import Step
 
 
@@ -22,6 +23,13 @@ def _in_scope(step: Step, changed: list[str]) -> list[str]:
     """Changed paths that are one of the step's paths or lie beneath one."""
     roots = [p.rstrip("/") for p in step.paths]
     return [c for c in changed if any(c == r or c.startswith(r + "/") for r in roots)]
+
+
+def _keep(cfg: Config, step: Step, attempt: int, result: Result) -> None:
+    """Save the agent's own report so a stopped step can be read afterwards."""
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    out = cfg.state_dir / f"{step.id}-{attempt}.out"
+    out.write_text(result.out + result.err)
 
 
 def run_step(
@@ -37,12 +45,12 @@ def run_step(
         log.emit("step_started", step.id)
         text = brief.render(cfg, step, git.head(wt), {})
         job = backend.start(text, wt, step.agent)
-        backend.wait(job)
+        _keep(cfg, step, 1, backend.wait(job))
         verdict = verify.verify(cfg, wt)
         if not verdict.green:
             log.emit("step_red", step.id, attempt=1)
             job = backend.resume(job, brief.render_resume(step, verdict.result))
-            backend.wait(job)
+            _keep(cfg, step, 2, backend.wait(job))
             verdict = verify.verify(cfg, wt)
         if not verdict.green:
             log.emit("step_red", step.id, attempt=2)

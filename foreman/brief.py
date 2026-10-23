@@ -20,6 +20,8 @@ def _bullets(items: list[str]) -> str:
 
 def render(cfg: Config, step: Step, head: str, earlier: dict[str, str]) -> str:
     """Render the brief for a step; `earlier` maps step id to its returned output."""
+    if step.brief:
+        return step.brief
     if earlier:
         blocks = "\n\n".join(f"From step {k}:\n{v}" for k, v in earlier.items())
         earlier_text = f"\nEarlier outputs this step needs:\n{blocks}\n"
