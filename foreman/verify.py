@@ -6,6 +6,7 @@ from pathlib import Path
 from foreman import run
 from foreman.config import Config
 from foreman.run import Result
+from foreman.steps import Step
 
 
 @dataclass(frozen=True)
@@ -21,3 +22,11 @@ def verify(cfg: Config, wt: Path) -> Verdict:
         return Verdict(False, formatted)
     checked = run.run(cfg.check_cmd, wt)
     return Verdict(checked.code == 0, checked)
+
+
+def check_step(step: Step, wt: Path) -> Verdict | None:
+    """Run step.check in wt; None when it is empty, green when the code is expect_code."""
+    if not step.check:
+        return None
+    result = run.run(step.check, wt)
+    return Verdict(result.code == step.expect_code, result)
