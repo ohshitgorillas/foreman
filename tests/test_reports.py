@@ -318,3 +318,170 @@ def test_anchor_accepts_resolved_worktree_path(tmp_path: Path) -> None:
             "foreman/a.py",
             5,
         )
+
+
+VERDICT = """VERDICT tests wrong
+ACTION repair
+STEP red-2
+REASON The fixture fails before the original assertion.
+REASON Preserve the original test ids and assertions.
+EVIDENCE tests/test_errors.py:12 | fixture accesses an absent attribute
+EVIDENCE docs/superpowers/specs/errors.md:8 | the approved claim is clear
+EVIDENCE /state/g-build.txt:19 | observed failure | additional detail
+FAILURE FAILED tests/test_errors.py::test_safe[two words] - AttributeError: missing | value
+FAILURE ERROR tests/test_errors.py::test_hierarchy - fixture setup failed
+END JUDGMENT"""
+
+
+@pytest.mark.parametrize("final_lf", ["", "\n"])
+def test_verdict_preserves_order_and_verbatim_evidence(final_lf: str) -> None:
+    assert reports.verdict(VERDICT + final_lf) == reports.Verdict(
+        kind="tests wrong",
+        action="repair",
+        step="red-2",
+        reasons=(
+            "The fixture fails before the original assertion.",
+            "Preserve the original test ids and assertions.",
+        ),
+        evidence=(
+            "tests/test_errors.py:12 | fixture accesses an absent attribute",
+            "docs/superpowers/specs/errors.md:8 | the approved claim is clear",
+            "/state/g-build.txt:19 | observed failure | additional detail",
+        ),
+        failures=(
+            "FAILED tests/test_errors.py::test_safe[two words] - AttributeError: missing | value",
+            "ERROR tests/test_errors.py::test_hierarchy - fixture setup failed",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "action", "step"),
+    [
+        ("spec wrong", "owner", None),
+        ("undetermined", "owner", None),
+        ("tests wrong", "redo red", "red-2"),
+        ("build wrong", "retry", "build-3"),
+    ],
+)
+def test_verdict_decodes_each_other_permitted_transition(
+    kind: str, action: str, step: str | None
+) -> None:
+    text = f"VERDICT {kind}\nACTION {action}\n"
+    if step is not None:
+        text += f"STEP {step}\n"
+    text += "REASON Missing evidence.\nEVIDENCE report.txt:1 | observed\nEND JUDGMENT"
+    assert reports.verdict(text) == reports.Verdict(
+        kind, action, step, ("Missing evidence.",), ("report.txt:1 | observed",), ()
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("VERDICT tests wrong", "VERDICT build wrong"),
+        ("VERDICT tests wrong", "VERDICT Tests wrong"),
+        ("VERDICT tests wrong", "VERDICT unknown"),
+        ("ACTION repair", "ACTION owner"),
+        ("ACTION repair", "ACTION retry"),
+        ("ACTION repair", "ACTION redo red"),
+        ("ACTION repair", "ACTION unknown"),
+        ("ACTION repair", "ACTION  repair"),
+        ("STEP red-2\n", ""),
+        ("STEP red-2", "STEP "),
+        ("STEP red-2", "STEP red-2\nSTEP red-2"),
+        ("ACTION repair", "ACTION repair\nACTION repair"),
+        ("REASON The fixture fails before the original assertion.", "REASON "),
+        ("REASON Preserve the original test ids and assertions.", "UNKNOWN value"),
+        ("EVIDENCE tests/test_errors.py:12", "EVIDENCE ../tests/test_errors.py:12"),
+        ("EVIDENCE tests/test_errors.py:12", "EVIDENCE ./tests/test_errors.py:12"),
+        ("EVIDENCE tests/test_errors.py:12", "EVIDENCE tests//test_errors.py:12"),
+        ("EVIDENCE tests/test_errors.py:12", "EVIDENCE tests/test errors.py:12"),
+        ("EVIDENCE tests/test_errors.py:12", "EVIDENCE tests/test_errors.py:0"),
+        ("EVIDENCE tests/test_errors.py:12", "EVIDENCE tests/test_errors.py:01"),
+        ("EVIDENCE tests/test_errors.py:12", "EVIDENCE tests/test_errors.py:-1"),
+        ("EVIDENCE tests/test_errors.py:12", "EVIDENCE tests/test_errors.py:one"),
+        ("EVIDENCE tests/test_errors.py:12", "EVIDENCE tests/test_errors.py"),
+        ("EVIDENCE /state/g-build.txt:19", "EVIDENCE //state/g-build.txt:19"),
+        ("EVIDENCE /state/g-build.txt:19", "EVIDENCE /state/../g-build.txt:19"),
+        (" | fixture accesses an absent attribute", " | "),
+        (" | fixture accesses an absent attribute", " |  extra space"),
+        (
+            " | fixture accesses an absent attribute",
+            "|fixture accesses an absent attribute",
+        ),
+        (
+            "FAILURE ERROR tests/test_errors.py::test_hierarchy - fixture setup failed",
+            "FAILURE ",
+        ),
+        ("END JUDGMENT", ""),
+        ("END JUDGMENT", "END JUDGMENT\ntrailing prose"),
+        ("END JUDGMENT", "END JUDGMENT\nEND JUDGMENT"),
+    ],
+)
+def test_verdict_refuses_invalid_fields_and_transitions(old: str, new: str) -> None:
+    with pytest.raises(ConfigError, match="verdict"):
+        reports.verdict(VERDICT.replace(old, new))
+
+
+@pytest.mark.parametrize("key", ["REASON", "EVIDENCE", "FAILURE"])
+def test_verdict_requires_nonempty_repeated_fields(key: str) -> None:
+    text = "\n".join(
+        line for line in VERDICT.split("\n") if not line.startswith(key + " ")
+    )
+    with pytest.raises(ConfigError, match="verdict"):
+        reports.verdict(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "preamble\n" + VERDICT,
+        "```text\n" + VERDICT + "\n```",
+        VERDICT + "\n\n",
+        VERDICT + "\n" + VERDICT,
+        VERDICT.replace("\n", "\r\n"),
+        VERDICT.replace("original assertion.", "original\0assertion."),
+        VERDICT.replace("original assertion.", "original assertion. "),
+        VERDICT.replace("original assertion.", "original \ud800 assertion."),
+        VERDICT.replace("\nSTEP", "\n\nSTEP"),
+        "\n".join(" " + line for line in VERDICT.split("\n")),
+        VERDICT.replace("ACTION repair\nSTEP red-2", "STEP red-2\nACTION repair"),
+        VERDICT.replace(
+            "REASON The fixture fails before the original assertion.",
+            "EVIDENCE tests/test_errors.py:12 | out of order",
+        ),
+    ],
+)
+def test_verdict_refuses_non_envelopes(text: str) -> None:
+    with pytest.raises(ConfigError, match="verdict"):
+        reports.verdict(text)
+
+
+@pytest.mark.parametrize(
+    ("kind", "action"),
+    [
+        ("spec wrong", "owner"),
+        ("undetermined", "owner"),
+        ("tests wrong", "redo red"),
+        ("build wrong", "retry"),
+    ],
+)
+def test_verdict_forbids_failures_outside_repair(kind: str, action: str) -> None:
+    text = f"VERDICT {kind}\nACTION {action}\n"
+    if action != "owner":
+        text += "STEP candidate\n"
+    text += "REASON why\nEVIDENCE report.txt:1 | claim\nFAILURE observed\nEND JUDGMENT"
+    with pytest.raises(ConfigError, match="verdict"):
+        reports.verdict(text)
+
+
+@pytest.mark.parametrize("kind", ["spec wrong", "undetermined"])
+def test_verdict_owner_action_forbids_target(kind: str) -> None:
+    text = (
+        f"VERDICT {kind}\nACTION owner\nSTEP candidate\n"
+        "REASON why\nEVIDENCE report.txt:1 | claim\nEND JUDGMENT"
+    )
+    with pytest.raises(ConfigError, match="verdict"):
+        reports.verdict(text)

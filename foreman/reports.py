@@ -29,6 +29,71 @@ class RedEvidence:
     rerun: RedRun
 
 
+@dataclass(frozen=True)
+class Verdict:
+    kind: str
+    action: str
+    step: str | None
+    reasons: tuple[str, ...]
+    evidence: tuple[str, ...]
+    failures: tuple[str, ...]
+
+
+def verdict(text: str) -> Verdict:
+    """Decode the shared juror/owner envelope; context checks belong to loop."""
+    where = "verdict"
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ConfigError(f"{where}: requires UTF-8 text") from exc
+    records = text.removesuffix("\n").split("\n")
+    for record in records:
+        forms._line(record, where)
+    index = 0
+
+    def take(key: str) -> str:
+        nonlocal index
+        if index >= len(records) or not records[index].startswith(key + " "):
+            raise ConfigError(f"{where}: expected {key} record")
+        value = forms._line(records[index][len(key) + 1 :], f"{where} {key}")
+        index += 1
+        return value
+
+    def many(key: str) -> tuple[str, ...]:
+        values = [take(key)]
+        while index < len(records) and records[index].startswith(key + " "):
+            values.append(take(key))
+        return tuple(values)
+
+    kind, action = take("VERDICT"), take("ACTION")
+    allowed = {
+        ("spec wrong", "owner"),
+        ("tests wrong", "repair"),
+        ("tests wrong", "redo red"),
+        ("build wrong", "retry"),
+        ("undetermined", "owner"),
+    }
+    if (kind, action) not in allowed:
+        raise ConfigError(f"{where}: invalid kind/action pair {kind!r}/{action!r}")
+    step = None if action == "owner" else take("STEP")
+    reasons = many("REASON")
+    evidence = many("EVIDENCE")
+    for record in evidence:
+        location, delimiter, claim = record.partition(" | ")
+        if not delimiter:
+            raise ConfigError(f"{where}: EVIDENCE requires path:line | claim")
+        forms._line(claim, f"{where} EVIDENCE claim")
+        path, colon, number = location.rpartition(":")
+        if not colon or re.fullmatch(r"[1-9][0-9]*", number) is None:
+            raise ConfigError(f"{where}: EVIDENCE requires a positive line number")
+        # Absolute kept-report references are checked against the judgment later.
+        forms._path(path.removeprefix("/"), f"{where} EVIDENCE path")
+    failures = many("FAILURE") if action == "repair" else ()
+    if records[index:] != ["END JUDGMENT"]:
+        raise ConfigError(f"{where}: expected only terminal END JUDGMENT")
+    return Verdict(kind, action, step, reasons, evidence, failures)
+
+
 def _envelope(lines: list[str]) -> list[str]:
     """Exclude quoted brief text and the diff/command payloads."""
     out = []
