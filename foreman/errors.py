@@ -42,7 +42,7 @@ class FindingsToRule(ForemanError):
 
 
 class WrongTest(ForemanError):
-    """A builder reported TEST WRONG; Void, the dispatcher, rules and runs `retest`."""
+    """Spec defect, undetermined judgment or exhausted juror rounds; owner acts."""
 
     exit_code = 8
 

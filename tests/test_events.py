@@ -3,7 +3,13 @@ import json
 import pytest
 
 from foreman.config import Config
-from foreman.errors import ConfigError, FindingsToRule, RulingNeeded, WrongTest
+from foreman.errors import (
+    ConfigError,
+    FindingsToRule,
+    ForemanError,
+    RulingNeeded,
+    WrongTest,
+)
 from foreman.events import DISPATCHER_SIGNALS, OWNER_SIGNALS, EventLog, fail, say
 
 
@@ -31,10 +37,12 @@ def test_notify_owner_logs_and_writes_stderr(
     assert (row["kind"], row["step_id"], row["text"]) == ("milestone_done", "s2", "yay")
 
 
-def test_notify_owner_rejects_unknown_signal(cfg: Config) -> None:
-    assert OWNER_SIGNALS == ("milestone_done",)
+@pytest.mark.parametrize("signal", ["bogus", "findings", "ruling_needed", "red_twice"])
+def test_notify_owner_rejects_unknown_signal(cfg: Config, signal: str) -> None:
+    assert OWNER_SIGNALS == ("milestone_done", "test_wrong")
     with pytest.raises(ValueError):
-        EventLog(cfg).notify_owner("bogus", None, "x")
+        EventLog(cfg).notify_owner(signal, None, "x")
+    assert not (cfg.state_dir / "events.jsonl").exists()
 
 
 def test_status_one_line_from_log(cfg: Config) -> None:
@@ -46,22 +54,30 @@ def test_status_one_line_from_log(cfg: Config) -> None:
     assert "\n" not in s and "2 events" in s and "verify" in s and "s1" in s
 
 
+@pytest.mark.parametrize("signal", ["findings", "ruling_needed"])
 def test_notify_dispatcher_logs_and_writes_stderr(
-    cfg: Config, capsys: pytest.CaptureFixture[str]
+    cfg: Config, capsys: pytest.CaptureFixture[str], signal: str
 ) -> None:
     log = EventLog(cfg)
     assert DISPATCHER_SIGNALS == (
         "findings",
         "ruling_needed",
-        "red_twice",
-        "test_wrong",
     )
-    log.notify_dispatcher("red_twice", "g1", "stuck")
-    assert capsys.readouterr().err == "[red_twice] g1: stuck\n"
+    log.notify_dispatcher(signal, "g1", "stuck")
+    assert capsys.readouterr().err == f"[{signal}] g1: stuck\n"
     row = json.loads((cfg.state_dir / "events.jsonl").read_text())
-    assert (row["kind"], row["step_id"], row["text"]) == ("red_twice", "g1", "stuck")
+    assert (row["kind"], row["step_id"], row["text"]) == (signal, "g1", "stuck")
+
+
+@pytest.mark.parametrize(
+    "signal", ["bogus", "milestone_done", "test_wrong", "red_twice"]
+)
+def test_notify_dispatcher_rejects_removed_and_unknown_signals(
+    cfg: Config, signal: str
+) -> None:
     with pytest.raises(ValueError):
-        log.notify_dispatcher("milestone_done", "g1", "x")
+        EventLog(cfg).notify_dispatcher(signal, "g1", "x")
+    assert not (cfg.state_dir / "events.jsonl").exists()
 
 
 def test_keep_and_kept_round_trip(cfg: Config) -> None:
@@ -102,7 +118,45 @@ def test_wrong_test_exit_code_and_signal(
     cfg: Config, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert WrongTest.exit_code == 8
-    EventLog(cfg).notify_dispatcher("test_wrong", "g1", "bad test")
+    assert isinstance(WrongTest("owner must act"), ForemanError)
+    EventLog(cfg).notify_owner("test_wrong", "g1", "bad test")
     assert capsys.readouterr().err == "[test_wrong] g1: bad test\n"
     row = json.loads((cfg.state_dir / "events.jsonl").read_text())
     assert (row["kind"], row["step_id"]) == ("test_wrong", "g1")
+
+
+@pytest.mark.parametrize("outcome", ["done", "overran", "refused"])
+@pytest.mark.parametrize(("load", "tokens"), [(237, 1234), (None, None), (0, 0)])
+def test_dispatched_records_one_event_with_measurements(
+    cfg: Config,
+    capsys: pytest.CaptureFixture[str],
+    outcome: str,
+    load: int | None,
+    tokens: int | None,
+) -> None:
+    log = EventLog(cfg)
+    log.dispatched(
+        "g1",
+        "g1-review-diff-reviewer-batch-2",
+        "core-builder",
+        load=load,
+        seconds=1.25,
+        tokens=tokens,
+        outcome=outcome,
+    )
+    lines = (cfg.state_dir / "events.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert isinstance(row.pop("ts"), float)
+    assert row == {
+        "kind": "dispatch",
+        "step_id": "g1",
+        "name": "g1-review-diff-reviewer-batch-2",
+        "role": "core-builder",
+        "load": load,
+        "seconds": 1.25,
+        "tokens": tokens,
+        "outcome": outcome,
+    }
+    assert capsys.readouterr() == ("", "")
+    assert log.done() == set()

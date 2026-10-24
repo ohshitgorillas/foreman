@@ -8,8 +8,8 @@ from pathlib import Path
 from foreman.config import Config
 from foreman.errors import ConfigError
 
-OWNER_SIGNALS = ("milestone_done",)
-DISPATCHER_SIGNALS = ("findings", "ruling_needed", "red_twice", "test_wrong")
+OWNER_SIGNALS = ("milestone_done", "test_wrong")
+DISPATCHER_SIGNALS = ("findings", "ruling_needed")
 
 
 class EventLog:
@@ -34,6 +34,28 @@ class EventLog:
             raise ValueError(f"unknown dispatcher signal: {signal}")
         self.emit(signal, group_id, text=text)
         sys.stderr.write(f"[{signal}] {group_id}: {text}\n")
+
+    def dispatched(
+        self,
+        group_id: str,
+        name: str,
+        role: str,
+        *,
+        load: int | None,
+        seconds: float,
+        tokens: int | None,
+        outcome: str,
+    ) -> None:
+        self.emit(
+            "dispatch",
+            group_id,
+            name=name,
+            role=role,
+            load=load,
+            seconds=seconds,
+            tokens=tokens,
+            outcome=outcome,
+        )
 
     def keep(self, name: str, text: str) -> Path:
         path = self._dir / f"{name}.txt"
