@@ -322,6 +322,7 @@ def _judgment(
 def _owner_stop(
     group: Group, judgment: forms.Judgment, wt: Path, log: EventLog, why: str
 ) -> WrongTest:
+    log.keep(f"{group.id}-owner-judgment", json.dumps(asdict(judgment)))
     text = f"{why}; kept {', '.join(judgment.reports)}; worktree {wt}"
     log.notify_owner("test_wrong", group.id, text)
     return WrongTest(text)
@@ -339,6 +340,17 @@ def _judge(
     completed: bool = False,
 ) -> None:
     """Reserve attempts before launch so restarts cannot reset the cap."""
+    log.keep(
+        f"{group.id}-pending-judgment",
+        json.dumps(
+            {
+                "context": context,
+                "completed": completed or context == "group-check",
+                "judgment": asdict(judgment),
+            }
+        ),
+    )
+    log.keep(f"{group.id}-owner-judgment", "")
     number = 1
     while True:
         name = f"{group.id}-{context}-juror-{number}"
@@ -622,23 +634,6 @@ def _repair(
         _step(cfg, group, stopped, wt, log, backend)
 
 
-def _test_owner(
-    group: Group, index: int, report: reports.Report, wt: Path, log: EventLog
-) -> Step:
-    """Require every wrong-test line to name the same earlier step."""
-    owned, unowned = reports.route_tests(report.test_wrong, group)
-    earlier = [step for step in group.steps[:index] if step.id in owned]
-    if unowned or len(owned) != 1 or len(earlier) != 1:
-        raise _rule(
-            log,
-            group,
-            wt,
-            f"{group.id}-{group.steps[index].id}.txt",
-            "wrong tests must belong to exactly one earlier step",
-        )
-    return earlier[0]
-
-
 def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) -> None:
     while True:
         verdict = verify.verify(cfg, wt)
@@ -787,34 +782,45 @@ def run_retest(
     log: EventLog,
     backend: Backend | None = None,
 ) -> str:
-    """Fix tests with Void's verbatim brief and rerun from the stopped step."""
+    """Continue an owner stop through the same decoded verdict transition."""
+    verdict = reports.verdict(text)
     wt = git.worktree(cfg, group.id)
-    for index, stopped in enumerate(group.steps):
-        try:
-            report = reports.parse(log.kept(f"{group.id}-{stopped.id}"))
-        except ConfigError:
-            continue
-        if report.test_wrong:
-            break
-    else:
-        raise ConfigError(f"no kept wrong-test step for {group.id}")
-    test = _test_owner(group, index, report, wt, log)
+    try:
+        pending = json.loads(log.kept(f"{group.id}-pending-judgment"))
+        owner = json.loads(log.kept(f"{group.id}-owner-judgment"))
+        raw = pending["judgment"]
+        if owner != raw or not isinstance(pending["completed"], bool):
+            raise ValueError("no matching owner stop")
+        judgment = forms.Judgment(
+            raw["spec"],
+            tuple(raw["steps"]),
+            raw["step"],
+            tuple(raw["red_ids"]),
+            tuple(raw["reports"]),
+        )
+        problems = forms.validate_judgment(judgment)
+        if problems:
+            raise ValueError("; ".join(problems))
+        context = pending["context"]
+        index = next(
+            (i for i, step in enumerate(group.steps) if step.id == context), None
+        )
+        if context != "group-check" and index is None:
+            raise ValueError("stopped step is absent from the group")
+    except (KeyError, TypeError, ValueError) as error:
+        raise ConfigError(
+            f"invalid kept owner judgment for {group.id}: {error}"
+        ) from error
+    log.keep(f"{group.id}-retest-verdict", text)
     backend = backend or backends.get(cfg)
-    if text:
-        name = f"{group.id}-{test.id}-retest"
-        if test.views:
-            made = views.make(cfg, group.id, test, wt)
-            path = log.keep(f"{name}-views", _text(made.result))
-            if not made.green:
-                raise _rule(log, group, wt, str(path), f"step {test.id} views failed")
-        _dispatch(group, wt, log, backend, name, text, test.role)
-        verdict = verify.check_step(test, wt)
-        if verdict is not None:
-            path = log.keep(f"{name}-check", _text(verdict.result))
-            if not verdict.green:
-                raise _rule(log, group, wt, str(path), f"step {test.id} check missed")
-    git.restore(wt, log.kept(f"{group.id}-{stopped.id}-before"), stopped.paths)
-    _steps(cfg, group, wt, log, backend, index)
+    _follow_verdict(
+        cfg, group, judgment, wt, log, backend, verdict, completed=pending["completed"]
+    )
+    log.keep(f"{group.id}-owner-judgment", "")
+    log.keep(f"{group.id}-pending-judgment", "")
+    if not pending["completed"]:
+        assert index is not None
+        _steps(cfg, group, wt, log, backend, index + 1)
     return _check_review_land(cfg, group, wt, log, backend)
 
 
