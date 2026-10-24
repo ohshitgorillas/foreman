@@ -102,11 +102,6 @@ def test_load_groups_and_steps(tmp_path: Path) -> None:
             'views = ["gauntlet/core/b.py"]',
             "distinct view sources",
         ),
-        (
-            '"stub", "red", "build"',
-            '"red", "stub", "build"',
-            "not held by an earlier step",
-        ),
         ('paths = ["gauntlet/seams/a.py"]', "paths = []", "no paths"),
         (
             'paths = ["gauntlet/seams/a.py"]',
@@ -343,3 +338,28 @@ def test_next_ready_and_owner() -> None:
     assert owner(g, "x.py") is first
     for path in ("x.pyc", "foremanx/a.py", "nowhere.py"):
         assert owner(g, path) is None
+
+
+@pytest.mark.parametrize("source", ["gauntlet/core/a.py", "gauntlet/core/existing.py"])
+def test_load_views_need_no_earlier_producing_step(tmp_path: Path, source: str) -> None:
+    text = GOOD.replace('"stub", "red", "build"', '"red", "stub", "build"')
+    text = text.replace('views = ["gauntlet/core/a.py"]', f'views = ["{source}"]')
+    text = text.replace('source = "gauntlet/core/a.py"', f'source = "{source}"')
+    groups = load(write(tmp_path, text))
+    assert groups[0].steps[0].views == [source]
+    assert lint(groups) == []
+
+
+def test_lint_views_accepts_worktree_sources_and_rejects_non_python() -> None:
+    first = mk("a", paths=["gauntlet/core/a.py"])
+    viewer = mk("b", views=["gauntlet/core/a.py", "gauntlet/core/existing.py"])
+    assert lint([grp("g", [viewer, first])]) == []
+    assert lint([grp("g", [viewer])]) == []
+    bad = replace(viewer, views=["gauntlet/core/README.md"])
+    assert any("not a .py" in problem for problem in lint([grp("g", [bad])]))
+
+
+def test_legacy_top_level_red_cannot_bypass_typed_selection(tmp_path: Path) -> None:
+    text = GOOD.replace("[steps.build]", '[steps.build]\nred = "red"')
+    with pytest.raises(ConfigError, match="unknown keys: red"):
+        load(write(tmp_path, text))

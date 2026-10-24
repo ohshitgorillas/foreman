@@ -2209,3 +2209,47 @@ def test_retest_refreshes_preserved_red_evidence_before_restoring_build(
         assert resumed.briefs == []
         assert (wt / "a.py").read_text() == "stopped"
         assert not log.done()
+
+
+@pytest.mark.parametrize("valid_report", [True, False])
+def test_named_red_producer_uses_report_ids_with_existing_source_view(
+    green_cfg, log, fake_backend, valid_report
+):
+    cfg = _viewing(green_cfg)
+    first = "tests/test_a.py::test_new[1-2]"
+    second = "tests/test_a.py::test_other"
+    summary = "FAILED tests/test_a.py::test_existing - boom\nERROR tests/test_b.py\n"
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("A behavior", "a.py"),)),
+        views=["a.py"],
+        check=["sh", "-c", f"printf '{summary}'; exit 1"],
+        expect_code=1,
+    )
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red"),)
+        ),
+    )
+    group = make_group(red, build)
+    wt = git.make_worktree(cfg, group.id)
+    (wt / "a.py").write_text("existing source")
+    backend = fake_backend(
+        outputs=[_red_report(first, second) if valid_report else summary]
+    )
+    if valid_report:
+        loop._steps(cfg, group, wt, log, backend, 0)
+        assert (
+            backend.briefs[1]
+            == f"Approved build\ngauntlet/core/a.py\n{first}\n{second}"
+        )
+        assert log.kept("g1-build-brief") == backend.briefs[1]
+    else:
+        with pytest.raises(RulingNeeded, match="g1-red.txt"):
+            loop._steps(cfg, group, wt, log, backend, 0)
+        assert backend.agents == ["test-writer"]
+    assert log.kept("g1-red-check") == summary
+    assert (cfg.view_root / "g1/a.pyi").is_file()

@@ -177,15 +177,10 @@ def lint(groups: list[Group]) -> list[str]:
             problems.append(f"groups.{g.id}.steps: must be nonempty")
         problems.extend(forms.validate_group(g))
     for g in groups:
-        for i, s in enumerate(g.steps):
-            earlier = [p for e in g.steps[:i] for p in e.paths]
+        for s in g.steps:
             for v in s.views:
                 if not v.endswith(".py"):
                     problems.append(f"{s.id}: view {v} is not a .py source")
-                elif not holds(earlier, v):
-                    problems.append(
-                        f"{s.id}: view {v} not held by an earlier step of {g.id}"
-                    )
     replaced: set[str] = set()
     for g in groups:
         for s in g.steps:
