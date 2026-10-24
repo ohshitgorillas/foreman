@@ -260,25 +260,6 @@ def _relative(path: str, wt: Path) -> str | None:
     return None
 
 
-def route(
-    lines: list[str], wt: Path, group: Group
-) -> tuple[dict[str, list[str]], list[str]]:
-    owned: dict[str, list[str]] = {}
-    unowned: list[str] = []
-    for line in lines:
-        location = anchor(line, wt)
-        if location is None:
-            if _primary_anchor(line) is not None:
-                unowned.append(line)
-            continue
-        step = steps.owner(group, location[0])
-        if step is None:
-            unowned.append(line)
-        else:
-            owned.setdefault(step.id, []).append(line)
-    return owned, unowned
-
-
 def _primary_anchor(line: str) -> re.Match[str] | None:
     fields = line.split(" | ")
     match = _PATH_LINE.match(line)

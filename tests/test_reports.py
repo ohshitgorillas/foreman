@@ -89,28 +89,6 @@ def test_lines_verbatim() -> None:
     assert reports.lines(result("  a\nb\n")) == ["  a", "b"]
 
 
-def test_route_relative_and_absolute(tmp_path: Path) -> None:
-    out = [
-        "foreman/a.py:3: error",
-        f"{tmp_path}/foreman/b.py:9: E1",
-        "tests/test_x.py:4: F",
-        "plain line",
-    ]
-    owned, unowned = reports.route(out, tmp_path, GROUP)
-    assert owned == {
-        "s1": ["foreman/a.py:3: error", "tests/test_x.py:4: F"],
-        "s2": [f"{tmp_path}/foreman/b.py:9: E1"],
-    }
-    assert unowned == []
-
-
-def test_route_unowned(tmp_path: Path) -> None:
-    out = ["other/z.py:1: bad", "/elsewhere/foreman/a.py:2: bad"]
-    owned, unowned = reports.route(out, tmp_path, GROUP)
-    assert owned == {}
-    assert unowned == out
-
-
 def test_upheld_maps_roles() -> None:
     kept = {
         "diff-reviewer": Report("done", ["c | a.py:1 | x", "c | b.py:2 | y"]),
@@ -251,20 +229,6 @@ TEST WRONG 1
     )
     with pytest.raises(ConfigError, match="missing or unstable"):
         reports.red(text)
-
-
-def test_route_uses_primary_finding_anchor(tmp_path: Path) -> None:
-    lines = [
-        'hand-rolled | foreman/b.py:7 | reuse "foreman/a.py:2" | fails when: drift',
-        'misplaced | other/z.py:1 | reuse "foreman/a.py:2" | fails when: drift',
-        "other/z.py:1: error mentions foreman/a.py:2",
-        "note mentions foreman/a.py:2",
-    ]
-    owned, unowned = reports.route(lines, tmp_path, GROUP)
-    assert owned == {"s2": [lines[0]]}
-    assert unowned == lines[1:3]
-    assert reports.anchor(lines[0], tmp_path) == ("foreman/b.py", 7)
-    assert reports.anchor(lines[3], tmp_path) is None
 
 
 @pytest.mark.parametrize(

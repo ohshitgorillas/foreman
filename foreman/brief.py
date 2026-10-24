@@ -1,11 +1,9 @@
-"""Exact dispatched text for validated forms, plus legacy caller entry points."""
+"""Exact dispatched text for validated forms."""
 
 from typing import assert_never
 
 from foreman import forms
-from foreman.config import Reviewer
 from foreman.errors import ConfigError
-from foreman.steps import Group
 
 
 def render(
@@ -84,16 +82,3 @@ def render(
 def _origin(origin: forms.Origin) -> str:
     label = "step" if len(origin.steps) == 1 else "steps"
     return f"design: {origin.design}, Order {label} {', '.join(origin.steps)}"
-
-
-def finding(lines: list[str]) -> str:
-    """The lines verbatim, one per line, nothing else."""
-    return "\n".join(lines)
-
-
-def review(reviewer: Reviewer, group: Group) -> str:
-    """Point a reviewer at the working tree, and at the design when it reads the spec."""
-    parts = ["working tree against HEAD"]
-    if reviewer.spec:
-        parts.append(f"spec: {group.design}")
-    return "\n".join(parts)
