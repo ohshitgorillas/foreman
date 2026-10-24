@@ -96,6 +96,22 @@ def _red_evidence(step: Step, text: str) -> tuple[reports.RedEvidence, ...]:
     return evidence
 
 
+def _current_red_evidence(
+    step: Step, name: str, wt: Path, log: EventLog
+) -> tuple[reports.RedEvidence, ...]:
+    """Resolve one successful generation, including any preserved repair baseline."""
+    if log.kept(f"{name}-evidence") != _producer_identity(step):
+        raise ConfigError("red producer has no current successful evidence")
+    evidence = _red_evidence(step, log.kept(name))
+    preserved = log.kept(f"{name}-repair-evidence")
+    if preserved:
+        ids = tuple(item.test_id for item in evidence)
+        current = verify.capture_repair(wt, ids)
+        if json.dumps(asdict(current), sort_keys=True) != preserved:
+            raise RulingNeeded("repair differs from preserved producer evidence")
+    return evidence
+
+
 def _red_ids(group: Group, index: int, wt: Path, log: EventLog) -> list[str]:
     step = group.steps[index]
     if not isinstance(step.form, forms.Build):
@@ -119,9 +135,7 @@ def _red_ids(group: Group, index: int, wt: Path, log: EventLog) -> list[str]:
                 or not set(selection.files) <= set(producer.paths)
             ):
                 raise ConfigError("invalid red file filter")
-            if log.kept(f"{name}-evidence") != _producer_identity(producer):
-                raise ConfigError("red producer has no current successful evidence")
-            evidence = _red_evidence(producer, log.kept(name))
+            evidence = _current_red_evidence(producer, name, wt, log)
             selected = [
                 item.test_id
                 for item in evidence
@@ -133,9 +147,31 @@ def _red_ids(group: Group, index: int, wt: Path, log: EventLog) -> list[str]:
             if set(ids).intersection(selected):
                 raise ConfigError("overlapping red test ids")
             ids.extend(selected)
-        except ConfigError as error:
+        except (ConfigError, RulingNeeded) as error:
             raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
     return ids
+
+
+def _group_red_ids(group: Group, wt: Path, log: EventLog) -> list[str]:
+    """Resolve complete-group evidence through the same producer/build checks."""
+    ids: list[str] = []
+    for candidate in group.steps:
+        if isinstance(candidate.form, forms.Red):
+            name = f"{group.id}-{candidate.id}"
+            try:
+                evidence = _current_red_evidence(candidate, name, wt, log)
+            except (ConfigError, RulingNeeded) as error:
+                raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+            for item in evidence:
+                if item.test_id not in ids:
+                    ids.append(item.test_id)
+    for index in range(len(group.steps)):
+        _red_ids(group, index, wt, log)
+    return ids
+
+
+def _queue_identity(group: Group) -> str:
+    return json.dumps(asdict(group), sort_keys=True)
 
 
 def _steps(
@@ -267,7 +303,7 @@ def _judgment(
     if index is None:
         name = f"{group.id}-group-check"
         candidates = group.steps
-        red_ids: list[str] = []
+        red_ids = _group_red_ids(group, wt, log)
     else:
         step = group.steps[index]
         name = f"{group.id}-{step.id}"
@@ -285,12 +321,6 @@ def _judgment(
     try:
         for candidate in candidates:
             key = f"{group.id}-{candidate.id}"
-            if index is None and isinstance(candidate.form, forms.Red):
-                if log.kept(f"{key}-evidence") != _producer_identity(candidate):
-                    raise ConfigError("red producer has no current successful evidence")
-                for item in _red_evidence(candidate, log.kept(key)):
-                    if item.test_id not in red_ids:
-                        red_ids.append(item.test_id)
             block = (
                 candidate.form.step
                 if isinstance(candidate.form, (forms.Build, forms.Stub))
@@ -298,9 +328,6 @@ def _judgment(
             )
             blocks.append(block)
             paths.append(str(log.keep(key, log.kept(key))))
-        if index is None:
-            for candidate_index in range(len(group.steps)):
-                _red_ids(group, candidate_index, wt, log)
         if failure is not None:
             paths.append(failure)
         judgment = forms.Judgment(
@@ -313,7 +340,7 @@ def _judgment(
         problems = forms.validate_judgment(judgment)
         if problems:
             raise ConfigError("; ".join(problems))
-    except ConfigError as error:
+    except (ConfigError, RulingNeeded) as error:
         raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
     log.keep(f"{name}-judgment", json.dumps(asdict(judgment)))
     return judgment
@@ -345,6 +372,7 @@ def _judge(
         json.dumps(
             {
                 "context": context,
+                "queue": _queue_identity(group),
                 "completed": completed or context == "group-check",
                 "judgment": asdict(judgment),
             }
@@ -649,6 +677,7 @@ def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) 
 def _review(
     group: Group, wt: Path, log: EventLog, backend: Backend, reviewers: list[Reviewer]
 ) -> None:
+    log.keep(f"{group.id}-review-queue", _queue_identity(group))
     changed = git.changed_paths(wt)
     kept: list[str] = []
     for reviewer in reviewers:
@@ -714,6 +743,14 @@ def run_upheld(
     """Continue a kept group from the findings Void upheld."""
     backend = backend or backends.get(cfg)
     wt = git.worktree(cfg, group.id)
+    try:
+        if log.kept(f"{group.id}-review-queue") != _queue_identity(group):
+            raise ConfigError("review queue changed; rerun producer evidence")
+    except ConfigError as error:
+        raise _rule(
+            log, group, wt, f"{group.id}-review-queue.txt", str(error)
+        ) from error
+    _group_red_ids(group, wt, log)
     kept: dict[str, reports.Report] = {}
     for reviewer in cfg.reviewers:
         try:
@@ -811,6 +848,21 @@ def run_retest(
         raise ConfigError(
             f"invalid kept owner judgment for {group.id}: {error}"
         ) from error
+    # Check the loaded queue and evidence before any transition can restore files.
+    # A producer rerun must establish a fresh generation; an old owner stop cannot
+    # authorize new forms or bless selectors from a replacement report.
+    try:
+        if pending.get("queue") != _queue_identity(group):
+            raise ConfigError("owner judgment queue changed; rerun producer evidence")
+        if context == "group-check":
+            current_ids = _group_red_ids(group, wt, log)
+        else:
+            assert index is not None
+            current_ids = _red_ids(group, index, wt, log)
+        if tuple(current_ids) != judgment.red_ids:
+            raise ConfigError("owner judgment red selectors changed; refresh judgment")
+    except (ConfigError, RulingNeeded) as error:
+        raise _rule(log, group, wt, ", ".join(judgment.reports), str(error)) from error
     log.keep(f"{group.id}-retest-verdict", text)
     backend = backend or backends.get(cfg)
     _follow_verdict(

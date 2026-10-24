@@ -1,5 +1,5 @@
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
 from conftest import make_group, make_step
@@ -1044,6 +1044,7 @@ def test_upheld_batches_share_role_across_steps_and_keep_sources_separate(
         "FINDINGS 4\n  " + f"{core_a}\n  {core_c}\n  {core_b}\n  {seam}" + "\n"
     )
     test_report = f"FINDINGS 1\n  {test}\n"
+    log.keep("g1-review-queue", json.dumps(asdict(g), sort_keys=True))
     log.keep(diff_key, diff_report)
     log.keep(test_key, test_report)
     upheld = f"{core_a}\n{core_b}\n{core_c}\n{seam}\n{test}"
@@ -1105,6 +1106,7 @@ def test_upheld_round_is_not_handled_until_every_batch_returns(
         for path in g.steps[0].paths
     ]
     key = "g1-review-diff-reviewer"
+    log.keep("g1-review-queue", json.dumps(asdict(g), sort_keys=True))
     log.keep(key, "FINDINGS 2\n  " + "\n  ".join(lines) + "\n")
     backend = fake_backend(
         outputs=["", output], codes=[0, TIMEOUT_CODE if output == "timeout" else 0]
@@ -1133,6 +1135,7 @@ def test_upheld_invalid_typed_finding_stops_before_any_batch(
         (wt / path).write_text("value = 1\n")
     valid = "misplaced | gauntlet/core/a.py:1 | wrong | fails when: called"
     invalid = "unsupported | gauntlet/core/b.py:1 | wrong | fails when: called"
+    log.keep("g1-review-queue", json.dumps(asdict(g), sort_keys=True))
     log.keep("g1-review-diff-reviewer", f"FINDINGS 2\n  {valid}\n  {invalid}\n")
     backend = fake_backend()
     with pytest.raises(RulingNeeded, match="unsupported builder finding category"):
@@ -2061,3 +2064,148 @@ def test_group_test_fix_keeps_transitive_completed_dependents(
     assert run_ok(["git", "show", f"{commit}:b.py"], origin).out == "fresh"
     assert run_ok(["git", "show", f"{commit}:c.py"], origin).out == "fresh"
     assert run_ok(["git", "show", f"{commit}:keep.py"], origin).out == "preserve"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "missing",
+        "assertions",
+        "membership",
+        "report",
+        "invalidated",
+        "partial",
+        "form",
+        "paths",
+        "views",
+        "design",
+        "build",
+    ],
+)
+@pytest.mark.parametrize("continuation", ["step", "group", "upheld"])
+def test_retest_refreshes_preserved_red_evidence_before_restoring_build(
+    green_cfg, origin, log, fake_backend, change, continuation
+):
+    cfg = _viewing(green_cfg)
+    test_id = "tests/test_a.py::test_new"
+    original = "def test_new():\n    value = 1\n    assert value == 1\n"
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        views=["a.py"],
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        check=["false"],
+        expect_code=1,
+    )
+    build = make_step(
+        "build",
+        ["a.py"],
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red"),)
+        ),
+    )
+    group = make_group(red, build, design="docs/superpowers/specs/approved.md")
+    wt = git.make_worktree(cfg, group.id)
+    (wt / "a.py").write_text("original")
+    wrong = f"TEST WRONG 1:\n  {test_id} | wrong machinery\n"
+    repair = (
+        "VERDICT tests wrong\nACTION repair\nSTEP red\nREASON Repair machinery\n"
+        "EVIDENCE tests/test_a.py:2 | wrong fixture\nFAILURE wrong fixture\nEND JUDGMENT"
+    )
+    with pytest.raises(WrongTest):
+        loop._steps(
+            cfg,
+            group,
+            wt,
+            log,
+            fake_backend(
+                [
+                    {"tests/test_a.py": original},
+                    {"a.py": "partial"},
+                    {},
+                    {},
+                    {"a.py": "stopped"},
+                    {},
+                ],
+                [
+                    _red_report(test_id),
+                    wrong,
+                    repair,
+                    "RUN after all green",
+                    wrong,
+                    _undetermined("tests/test_a.py:1"),
+                ],
+            ),
+            0,
+        )
+    retry = (
+        "VERDICT build wrong\nACTION retry\nSTEP build\nREASON Fix implementation\n"
+        "EVIDENCE a.py:1 | implementation defect\nEND JUDGMENT"
+    )
+    if continuation == "group":
+        cfg = replace(cfg, check_cmd=RED_UNTIL_FIXED)
+        with pytest.raises(WrongTest):
+            loop.run_retest(
+                cfg,
+                group,
+                retry,
+                EventLog(cfg),
+                fake_backend([{"a.py": "stopped"}, {}], ["", _undetermined("a.py:1")]),
+            )
+    elif continuation == "upheld":
+        cfg = _reviewed(cfg)
+        with pytest.raises(FindingsToRule):
+            loop.run_retest(
+                cfg,
+                group,
+                retry,
+                EventLog(cfg),
+                fake_backend(
+                    [{"a.py": "stopped"}, {}], ["", "FINDINGS 1\n  a.py:1 wrong\n"]
+                ),
+            )
+    if change == "missing":
+        (wt / "tests/test_a.py").unlink()
+    elif change == "assertions":
+        (wt / "tests/test_a.py").write_text(original.replace("== 1", "== 2"))
+    elif change == "membership":
+        (wt / "tests/test_a.py").write_text(
+            original + "\ndef test_extra():\n    pass\n"
+        )
+    elif change == "report":
+        log.keep("g1-red", _red_report("tests/test_a.py::test_replaced"))
+    elif change == "invalidated":
+        log.keep("g1-red-evidence", "")
+    elif change == "partial":
+        log.keep("g1-red", "SHAPE red")
+    elif change == "form":
+        red = replace(
+            red, form=forms.Red((forms.Behavior("Changed behavior", "a.py"),))
+        )
+    elif change == "paths":
+        red = replace(red, paths=["tests/test_a.py", "tests/test_b.py"])
+    elif change == "views":
+        red = replace(red, views=["a.py", "b.py"])
+    elif change == "design":
+        group = replace(group, design="docs/superpowers/specs/changed.md")
+    elif change == "build":
+        build = replace(build, form=replace(build.form, step="Changed build"))
+    group = replace(group, steps=[red, build])
+    resumed = fake_backend([{"a.py": "fixed"}])
+    resume = loop.run_upheld if continuation == "upheld" else loop.run_retest
+    text = "" if continuation == "upheld" else retry
+    if change == "none":
+        resume(cfg, group, text, EventLog(cfg), resumed)
+        assert resumed.briefs == (
+            []
+            if continuation == "upheld"
+            else [f"Approved build\na.py\n{test_id}\nFix implementation"]
+        )
+    else:
+        with pytest.raises(RulingNeeded):
+            resume(cfg, group, text, EventLog(cfg), resumed)
+        assert resumed.briefs == []
+        assert (wt / "a.py").read_text() == "stopped"
+        assert not log.done()
