@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from foreman import run
+from foreman import forms, run
 from foreman.backends import Job
 from foreman.config import Config
 from foreman.run import Result, run_ok
@@ -128,15 +128,21 @@ def fake_backend() -> type[FakeBackend]:
 def make_step(
     sid: str = "s1", paths: list[str] | None = None, **fields: object
 ) -> Step:
-    """A builder Step; fields override any of the defaults."""
+    """A typed core-builder stub Step; fields override any defaults."""
     base = Step(
-        sid, "builder", f"brief {sid}", ["a.py"] if paths is None else paths, [], 0, []
+        sid,
+        "core-builder",
+        forms.Stub("core-builder", f"Approved step {sid}"),
+        ["gauntlet/core/a.py"] if paths is None else paths,
+        [],
+        0,
+        [],
     )
     return replace(base, **fields)  # type: ignore[arg-type]
 
 
 def make_group(*steps: Step, gid: str = "g1", **fields: object) -> Group:
-    """A Group of steps; fields override design or after."""
+    """A Group of typed steps; fields override design, after or reviews."""
     return replace(Group(gid, list(steps), "design.md", []), **fields)  # type: ignore[arg-type]
 
 

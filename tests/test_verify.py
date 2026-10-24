@@ -3,7 +3,7 @@ from pathlib import Path
 
 from conftest import make_step
 
-from foreman import verify
+from foreman import forms, verify
 from foreman.config import Config
 from foreman.steps import Step
 
@@ -49,7 +49,14 @@ def test_uses_configured_commands(green_cfg: Config, tmp_path: Path, fake_run) -
 
 
 def _step(check: list[str], expect_code: int = 0) -> Step:
-    return make_step("s1", check=check, expect_code=expect_code)
+    return make_step(
+        "s1",
+        ["tests/test_x.py"],
+        role="test-writer",
+        form=forms.Repair((), ("Assertion failed.",)),
+        check=check,
+        expect_code=expect_code,
+    )
 
 
 def test_check_step_empty_check_is_none(tmp_path: Path, fake_run) -> None:

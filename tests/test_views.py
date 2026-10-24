@@ -2,13 +2,21 @@ from pathlib import Path
 
 from conftest import make_step
 
-from foreman import views
+from foreman import forms, views
 from foreman.config import Config
 from foreman.steps import Step
 
 
 def _step(*sources: str) -> Step:
-    return make_step("s", ["x.py"], views=list(sources))
+    return make_step(
+        "s",
+        ["tests/test_x.py"],
+        role="test-writer",
+        form=forms.Red(
+            tuple(forms.Behavior("Preserves source behavior.", s) for s in sources)
+        ),
+        views=list(sources),
+    )
 
 
 def test_path_swaps_suffix_under_group_dir(cfg: Config) -> None:
