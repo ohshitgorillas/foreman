@@ -2,8 +2,11 @@
 
 import re
 import unicodedata
-from dataclasses import dataclass
-from typing import ClassVar
+from dataclasses import dataclass, fields, is_dataclass
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from foreman.steps import Group
 
 from foreman.errors import ConfigError
 
@@ -539,3 +542,114 @@ def parse(role: str, shape: str, fields: object, *, where: str) -> Form:
     ):
         raise ConfigError(f"{where}: unsupported role/shape pair {role!r}/{shape!r}")
     return _PARSERS[role, shape](fields, where)
+
+
+def _fields(value: object) -> object:
+    """Re-use the parser for programmatically constructed records as well."""
+    if is_dataclass(value) and not isinstance(value, type):
+        data = {
+            f.name: _fields(getattr(value, f.name))
+            for f in fields(value)
+            if getattr(value, f.name) is not None
+            and f.name != "role"
+            and not (f.name == "exclude" and not getattr(value, f.name))
+        }
+        if isinstance(value, (ReviewerSource, GateSource)):
+            data["kind"] = value.kind
+        if isinstance(value, ReviewerSource):
+            data["role"] = value.role
+        return data
+    if isinstance(value, tuple):
+        return [_fields(v) for v in value]
+    return value
+
+
+def validate_step(form: Form, paths: list[str], views: list[str]) -> list[str]:
+    """Check structural grammar and the relationship to declared step fields."""
+    try:
+        if not isinstance(
+            form,
+            (Red, Port, Repair, Moved, Finding, Stub, Build, Rewrite, BuilderFinding),
+        ):
+            raise ConfigError("form: expected a writable step form")
+        parse(form.role, form.shape, _fields(form), where="form")
+        declared = _distinct(
+            tuple(
+                _path(p, f"paths[{i}]", prefix="tests/", suffix=".py")
+                if form.role == "test-writer"
+                else _builder_path(p, f"paths[{i}]", form.role)
+                for i, p in enumerate(_array(paths, "paths"))
+            ),
+            "paths",
+        )
+        viewed = _sources(views, "views")
+        sources = (
+            tuple(b.source for b in form.behaviors)
+            if isinstance(form, Red)
+            else form.sources
+            if isinstance(form, (Port, Repair, Moved))
+            else ()
+        )
+        if isinstance(form, (Red, Port, Repair, Moved)) and set(sources) != set(viewed):
+            raise ConfigError("views: must equal the form's distinct view sources")
+        if isinstance(form, Red):
+            for b in form.behaviors:
+                if b.replaces and b.replaces.partition("::")[0] not in declared:
+                    raise ConfigError("form.behaviors.replaces: file must be in paths")
+    except ConfigError as error:
+        return [str(error)]
+    return []
+
+
+def validate_group(group: "Group") -> list[str]:
+    """Validate form relationships without reading code, views or reports."""
+    problems = []
+    earlier = {}
+    try:
+        _line(group.id, f"groups.{group.id}")
+        _distinct(
+            tuple(_line(d, f"groups.{group.id}.after") for d in group.after),
+            f"groups.{group.id}.after",
+        )
+        if group.design:
+            _path(group.design, f"groups.{group.id}.design")
+    except ConfigError as error:
+        problems.append(str(error))
+    for step in group.steps:
+        try:
+            _line(step.id, f"steps.{step.id}")
+        except ConfigError as error:
+            problems.append(str(error))
+        where = f"steps.{step.id}.form"
+        if isinstance(step.form, Red) and group.design and step.form.origin is None:
+            problems.append(f"{where}.origin: required for a design-derived red step")
+        if isinstance(step.form, Build):
+            for i, selection in enumerate(step.form.red):
+                loc = f"{where}.red[{i}]"
+                producer = earlier.get(selection.step)
+                if (
+                    producer is None
+                    or producer.role != "test-writer"
+                    or not isinstance(producer.form, Red)
+                ):
+                    problems.append(
+                        f"{loc}.step: must name an earlier test-writer red step in this group"
+                    )
+                elif selection.files is not None and not set(selection.files) <= set(
+                    producer.paths
+                ):
+                    problems.append(f"{loc}.files: must be a subset of producer paths")
+        earlier[step.id] = step
+    for role, review in group.reviews.items():
+        loc = f"groups.{group.id}.reviews.{role}"
+        try:
+            if not isinstance(review, (DiffReview, TestReview)) or role != review.role:
+                raise ConfigError(f"{loc}: expected matching reviewer form")
+            parse(role, "review", _fields(review), where=loc)
+            if review.scope != "working-tree":
+                raise ConfigError(
+                    f"{loc}.scope: automatic group reviews require working-tree"
+                )
+        except ConfigError as error:
+            problems.append(str(error))
+    return problems

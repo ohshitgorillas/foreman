@@ -4,6 +4,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from foreman import forms
 from foreman.errors import ConfigError
 
 MAX_PATHS = 5
@@ -13,7 +14,7 @@ MAX_PATHS = 5
 class Step:
     id: str
     role: str  # the target repo's role
-    brief: str  # sent verbatim; required
+    form: forms.Form  # validated role-specific fields
     paths: list[str]  # 1 to 5
     check: list[str]  # one argv; empty means the step runs no check
     expect_code: int = 0  # the check's passing exit code
@@ -24,8 +25,11 @@ class Step:
 class Group:
     id: str
     steps: list[Step]  # dispatched in this order
-    design: str  # design file path for reviewer spec: lines
+    design: str  # documentary metadata
     after: list[str]  # group ids that land first
+    reviews: dict[str, forms.DiffReview | forms.TestReview] = field(
+        default_factory=dict
+    )
 
 
 def _str_list(where: str, key: str, value: object) -> list[str]:
@@ -54,8 +58,15 @@ def _str(where: str, key: str, value: object) -> str:
 
 def _step(path: Path, step_id: str, raw: object) -> Step:
     where = f"{path}: steps.{step_id}"
+    if isinstance(raw, dict) and "brief" in raw:
+        raise ConfigError(
+            f"{where}.brief: free-text briefs removed; use role, shape and form"
+        )
     t = _table(
-        where, raw, {"role", "brief", "paths"}, {"check", "expect_code", "views"}
+        where,
+        raw,
+        {"role", "shape", "form", "paths"},
+        {"check", "expect_code", "views"},
     )
     code = t.get("expect_code", 0)
     if isinstance(code, bool) or not isinstance(code, int):
@@ -63,7 +74,7 @@ def _step(path: Path, step_id: str, raw: object) -> Step:
     return Step(
         id=step_id,
         role=_str(where, "role", t["role"]),
-        brief=_str(where, "brief", t["brief"]),
+        form=forms.parse(t["role"], t["shape"], t["form"], where=f"{where}.form"),
         paths=_str_list(where, "paths", t["paths"]),
         check=_str_list(where, "check", t.get("check", [])),
         expect_code=code,
@@ -94,24 +105,38 @@ def load(path: Path) -> list[Group]:
     groups: list[Group] = []
     for gid, raw in group_tables.items():
         where = f"{path}: groups.{gid}"
-        t = _table(where, raw, {"steps"}, {"design", "after"})
+        t = _table(where, raw, {"steps"}, {"design", "after", "reviews"})
         ids = _str_list(where, "steps", t["steps"])
+        if not ids:
+            raise ConfigError(f"{where}.steps: must be nonempty")
         unknown = [i for i in ids if i not in steps]
         if unknown:
             raise ConfigError(f"{where}: unknown steps: {', '.join(unknown)}")
         design = _str(where, "design", t["design"]) if "design" in t else ""
+        reviews = t.get("reviews", {})
+        if not isinstance(reviews, dict):
+            raise ConfigError(f"{where}.reviews: must be a table")
+        parsed_reviews = {}
+        for role, value in reviews.items():
+            parsed_reviews[role] = forms.parse(
+                role, "review", value, where=f"{where}.reviews.{role}"
+            )
         groups.append(
             Group(
                 id=gid,
                 steps=[steps[i] for i in ids],
                 design=design,
                 after=_str_list(where, "after", t.get("after", [])),
+                reviews=parsed_reviews,
             )
         )
     grouped = {s.id for g in groups for s in g.steps}
     orphans = [sid for sid in steps if sid not in grouped]
     if orphans:
         raise ConfigError(f"{path}: steps in no group: {', '.join(orphans)}")
+    problems = lint(groups)
+    if problems:
+        raise ConfigError(f"{path}: " + "\n".join(problems))
     return groups
 
 
@@ -134,8 +159,23 @@ def lint(groups: list[Group]) -> list[str]:
                 problems.append(f"{s.id}: no paths")
             elif len(s.paths) > MAX_PATHS:
                 problems.append(f"{s.id}: {len(s.paths)} paths, more than {MAX_PATHS}")
-            if not s.brief.strip():
-                problems.append(f"{s.id}: no brief")
+            if s.role != getattr(s.form, "role", None):
+                problems.append(f"steps.{s.id}.role: does not match form role")
+            problems.extend(
+                f"steps.{s.id}.{p}"
+                for p in forms.validate_step(s.form, s.paths, s.views)
+            )
+            if not isinstance(s.check, list) or not all(
+                isinstance(arg, str) and arg and "\0" not in arg for arg in s.check
+            ):
+                problems.append(
+                    f"steps.{s.id}.check: expected one argv or an empty array"
+                )
+            if isinstance(s.expect_code, bool) or not isinstance(s.expect_code, int):
+                problems.append(f"steps.{s.id}.expect_code: must be an integer")
+        if not g.steps:
+            problems.append(f"groups.{g.id}.steps: must be nonempty")
+        problems.extend(forms.validate_group(g))
     for g in groups:
         for i, s in enumerate(g.steps):
             earlier = [p for e in g.steps[:i] for p in e.paths]
@@ -146,6 +186,17 @@ def lint(groups: list[Group]) -> list[str]:
                     problems.append(
                         f"{s.id}: view {v} not held by an earlier step of {g.id}"
                     )
+    replaced: set[str] = set()
+    for g in groups:
+        for s in g.steps:
+            if isinstance(s.form, forms.Red):
+                for b in s.form.behaviors:
+                    if b.replaces is not None:
+                        if b.replaces in replaced:
+                            problems.append(
+                                f"steps.{s.id}.form.behaviors.replaces: duplicate replacement {b.replaces}"
+                            )
+                        replaced.add(b.replaces)
     known = set(gids)
     for g in groups:
         for dep in g.after:
