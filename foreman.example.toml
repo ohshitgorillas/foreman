@@ -7,6 +7,11 @@ format_cmd = ["uv", "run", "ruff", "format"]
 backend = "claude-local" # or "codex-local"
 view_cmd = ["uv", "run", "stubgen"]
 view_root = "~/dev/foreman/views"
+# Enclosing-unit lines per finding batch: an unmeasured starting value.
+# The owner tunes this budget from dispatch records.
+batch_budget = 300
+dispatch_seconds = 600 # ten-minute agent cap
+juror_rounds = 2 # optional; attempts per failing step or group-check context
 
 # Reviewers run in this order after the group check, when the group changed a
 # path equal to or under one of `paths`. Only diff-reviewer and test-reviewer

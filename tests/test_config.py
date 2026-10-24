@@ -14,6 +14,8 @@ backend = "claude-local"
 state_dir = "/work/state"
 view_cmd = ["uv", "run", "stubgen"]
 view_root = "/work/views"
+batch_budget = 300
+dispatch_seconds = 600
 """
 
 
@@ -35,6 +37,9 @@ def test_load_good(tmp_path: Path) -> None:
         reviewers=[],
         view_cmd=["uv", "run", "stubgen"],
         view_root=Path("/work/views"),
+        batch_budget=300,
+        dispatch_seconds=600,
+        juror_rounds=2,
     )
 
 
@@ -105,6 +110,9 @@ def test_reviewers_load_in_order(tmp_path: Path) -> None:
 
 def test_example_file_loads() -> None:
     c = load(Path(__file__).parent.parent / "foreman.example.toml")
+    assert c.batch_budget == 300
+    assert c.dispatch_seconds == 600
+    assert c.juror_rounds == 2
     assert c.reviewers == [
         Reviewer("diff-reviewer", ["foreman/", "tests/"]),
         Reviewer("test-reviewer", ["tests/"]),
@@ -178,3 +186,40 @@ def test_view_keys_are_required(tmp_path: Path, key: str) -> None:
     text = "".join(ln + "\n" for ln in GOOD.splitlines() if not ln.startswith(key))
     with pytest.raises(ConfigError, match=f"missing keys: {key}"):
         load(_write(tmp_path, text))
+
+
+@pytest.mark.parametrize("key", ["batch_budget", "dispatch_seconds"])
+def test_limits_are_required(tmp_path: Path, key: str) -> None:
+    text = "".join(ln + "\n" for ln in GOOD.splitlines() if not ln.startswith(key))
+    path = _write(tmp_path, text)
+    with pytest.raises(ConfigError) as exc:
+        load(path)
+    assert str(exc.value) == f"{path}: missing keys: {key}"
+
+
+@pytest.mark.parametrize("key", ["batch_budget", "dispatch_seconds", "juror_rounds"])
+@pytest.mark.parametrize(
+    "value", ["true", "false", "1.0", '"2"', "[]", "{}", "0", "-1"]
+)
+def test_limits_require_positive_integers(tmp_path: Path, key: str, value: str) -> None:
+    text = "".join(ln + "\n" for ln in GOOD.splitlines() if not ln.startswith(key))
+    path = _write(tmp_path, text + f"{key} = {value}\n")
+    with pytest.raises(ConfigError) as exc:
+        load(path)
+    assert str(exc.value) == f"{path}: {key} must be an integer >= 1"
+
+
+@pytest.mark.parametrize("key", ["batch_budget", "dispatch_seconds", "juror_rounds"])
+@pytest.mark.parametrize("value", [1, 37])
+def test_limits_accept_positive_integers(tmp_path: Path, key: str, value: int) -> None:
+    text = "".join(ln + "\n" for ln in GOOD.splitlines() if not ln.startswith(key))
+    c = load(_write(tmp_path, text + f"{key} = {value}\n"))
+    assert getattr(c, key) == value
+    assert type(getattr(c, key)) is int
+
+
+def test_conf_file_round_trip(conf_file: Path, green_cfg: Config) -> None:
+    c = load(conf_file)
+    assert c == green_cfg
+    for key in ("batch_budget", "dispatch_seconds", "juror_rounds"):
+        assert type(getattr(c, key)) is int

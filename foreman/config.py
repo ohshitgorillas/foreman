@@ -24,10 +24,14 @@ class Config:
     reviewers: list[Reviewer]  # [[reviewers]] tables, in run order
     view_cmd: list[str]  # the stubgen argv, e.g. ["uv", "run", "stubgen"]
     view_root: Path  # outside every worktree; views live under view_root/<group id>/
+    batch_budget: int  # enclosing-unit lines per finding batch
+    dispatch_seconds: int  # backend run timeout
+    juror_rounds: int = 2  # attempts per failing step or group-check context
 
 
 _PATHS = ("target_repo", "worktree_root", "state_dir", "view_root")
 _LISTS = ("check_cmd", "format_cmd", "view_cmd")
+_REQUIRED_INTS = ("batch_budget", "dispatch_seconds")
 _REVIEWER_ROLES = ("diff-reviewer", "test-reviewer")
 
 
@@ -79,11 +83,11 @@ def load(path: Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"invalid TOML in {path}: {e}") from e
 
-    required = (*_PATHS, *_LISTS, "backend")
+    required = (*_PATHS, *_LISTS, *_REQUIRED_INTS, "backend")
     missing = [k for k in required if k not in data]
     if missing:
         raise ConfigError(f"{path}: missing keys: {', '.join(missing)}")
-    unknown = sorted(set(data) - set(required) - {"reviewers"})
+    unknown = sorted(set(data) - set(required) - {"reviewers", "juror_rounds"})
     if unknown:
         raise ConfigError(f"{path}: unknown keys: {', '.join(unknown)}")
 
@@ -94,6 +98,11 @@ def load(path: Path) -> Config:
         values[key] = Path(data[key]).expanduser()
     for key in _LISTS:
         values[key] = _str_list(key, data[key])
+    for key in (*_REQUIRED_INTS, "juror_rounds"):
+        value = data.get(key, 2) if key == "juror_rounds" else data[key]
+        if type(value) is not int or value < 1:
+            raise ConfigError(f"{path}: {key} must be an integer >= 1")
+        values[key] = value
     if not isinstance(data["backend"], str):
         raise ConfigError("backend must be a string")
     values["backend"] = data["backend"]

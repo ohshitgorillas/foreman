@@ -45,6 +45,8 @@ def cfg(tmp_path: Path, tmp_repo: Path) -> Config:
         state_dir=tmp_path / "state",
         view_cmd=["stubgen"],
         view_root=tmp_path / "views",
+        batch_budget=300,
+        dispatch_seconds=600,
     )
 
 
@@ -60,7 +62,15 @@ def conf_file(green_cfg: Config, tmp_path: Path) -> Path:
     path = tmp_path / "foreman.toml"
     path.write_text(
         "".join(
-            f"{key} = {json.dumps([str(x) for x in v] if isinstance(v, list) else str(v))}\n"
+            f"{key} = "
+            + json.dumps(
+                [str(x) for x in v]
+                if isinstance(v, list)
+                else str(v)
+                if isinstance(v, Path)
+                else v
+            )
+            + "\n"
             for key, v in vars(green_cfg).items()
             if key != "reviewers"
         )
