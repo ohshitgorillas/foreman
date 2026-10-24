@@ -15,7 +15,7 @@ from foreman.errors import (
     WrongTest,
 )
 from foreman.events import EventLog
-from foreman.run import Result
+from foreman.run import TIMEOUT_CODE, Result
 from foreman.steps import Group, Step, next_ready
 
 
@@ -42,12 +42,29 @@ def _dispatch(
     name: str,
     brief_text: str,
     role: str,
+    *,
+    load: int | None = None,
 ) -> reports.Report:
-    """Start a fresh agent, keep its output, and read it; a refusal or overload is a ruling."""
+    """Keep and record every returned dispatch; overruns and refusals stop the run."""
     log.keep(f"{name}-brief", brief_text)
-    result = backend.wait(backend.start(brief_text, wt, role))
+    job = backend.start(brief_text, wt, role)
+    result = backend.wait(job)
     path = log.keep(name, _text(result))
-    report = reports.read(result)
+    report = None if result.code == TIMEOUT_CODE else reports.read(result)
+    outcome = (
+        "overran" if report is None else "done" if report.kind == "done" else "refused"
+    )
+    log.dispatched(
+        group.id,
+        name,
+        role,
+        load=load,
+        seconds=result.seconds,
+        tokens=backend.tokens(job),
+        outcome=outcome,
+    )
+    if report is None:
+        raise _rule(log, group, wt, str(path), f"{role} timed out")
     if report.kind != "done":
         raise _rule(log, group, wt, str(path), f"{role} {report.kind}")
     return report

@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 
 import pytest
@@ -14,7 +15,7 @@ from foreman.errors import (
     WrongTest,
 )
 from foreman.events import EventLog
-from foreman.run import run_ok
+from foreman.run import TIMEOUT_CODE, run_ok
 
 RED_UNTIL_FIXED = [
     "sh",
@@ -63,6 +64,108 @@ def test_overload_is_a_ruling(green_cfg, log, fake_backend) -> None:
     g = make_group(make_step("s1", ["a.py"]))
     with pytest.raises(RulingNeeded):
         loop.run_group(green_cfg, g, log, fake_backend(outputs=["OVERLOADED: 9"]))
+
+
+@pytest.mark.parametrize("load,tokens", [(None, None), (317, 842), (1, 0)])
+@pytest.mark.parametrize(
+    "output,outcome",
+    [
+        ("FINDINGS 0\n", "done"),
+        ("REJECTED: STEERING extra fields", "refused"),
+        ("OVERLOADED: 6 files", "refused"),
+    ],
+)
+def test_dispatch_records_returned_usage_and_outcome(
+    green_cfg, log, fake_backend, load, tokens, output, outcome
+) -> None:
+    g = make_group(make_step())
+    backend = fake_backend(outputs=[output], token_counts=[tokens], seconds=[2.75])
+    if outcome == "done":
+        report = loop._dispatch(
+            g,
+            green_cfg.target_repo,
+            log,
+            backend,
+            "g1-s1",
+            "stub",
+            "core-builder",
+            load=load,
+        )
+        assert report.kind == "done"
+    else:
+        with pytest.raises(RulingNeeded):
+            loop._dispatch(
+                g,
+                green_cfg.target_repo,
+                log,
+                backend,
+                "g1-s1",
+                "stub",
+                "core-builder",
+                load=load,
+            )
+    rows = [
+        json.loads(line)
+        for line in (green_cfg.state_dir / "events.jsonl").read_text().splitlines()
+    ]
+    records = [row for row in rows if row["kind"] == "dispatch"]
+    assert len(records) == 1
+    record = records[0]
+    assert {key: value for key, value in record.items() if key != "ts"} == {
+        "kind": "dispatch",
+        "step_id": "g1",
+        "name": "g1-s1",
+        "role": "core-builder",
+        "load": load,
+        "seconds": 2.75,
+        "tokens": tokens,
+        "outcome": outcome,
+    }
+    assert log.kept("g1-s1") == output.rstrip("\n") + "\n"
+    assert log.kept("g1-s1-brief") == "stub"
+    assert rows[1]["kind"] == "kept"
+    assert rows[2]["kind"] == "dispatch"
+    if outcome == "refused":
+        assert rows[3]["kind"] == "ruling_needed"
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["FINDINGS 0\n", "REJECTED: STEERING extra fields", "OVERLOADED: 6 files"],
+)
+def test_timeout_records_overrun_and_stops_before_checks_or_next_dispatch(
+    green_cfg, log, fake_backend, monkeypatch, output
+) -> None:
+    g = make_group(make_step("s1"), make_step("s2"))
+    backend = fake_backend(
+        outputs=[output], codes=[TIMEOUT_CODE], seconds=[600.5], token_counts=[27]
+    )
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("timeout must stop before report parsing or checks")
+
+    monkeypatch.setattr(loop.reports, "read", unexpected)
+    monkeypatch.setattr(loop.verify, "check_step", unexpected)
+    monkeypatch.setattr(loop.verify, "verify", unexpected)
+    with pytest.raises(RulingNeeded, match="timed out") as stopped:
+        loop.run_group(green_cfg, g, log, backend)
+    wt = git.worktree(green_cfg, "g1")
+    assert str(wt) in str(stopped.value)
+    assert str(green_cfg.state_dir / "g1-s1.txt") in str(stopped.value)
+    assert backend.agents == ["core-builder"]
+    assert log.kept("g1-s1") == output.rstrip("\n") + "\n"
+    rows = [
+        json.loads(line)
+        for line in (green_cfg.state_dir / "events.jsonl").read_text().splitlines()
+    ]
+    records = [row for row in rows if row["kind"] == "dispatch"]
+    assert len(records) == 1
+    assert records[0]["outcome"] == "overran"
+    assert records[0]["load"] is None
+    assert records[0]["seconds"] == 600.5
+    assert records[0]["tokens"] == 27
+    assert rows[-1]["kind"] == "ruling_needed"
+    assert not log.done()
 
 
 def test_missed_step_check_is_a_ruling(green_cfg, log, fake_backend) -> None:
