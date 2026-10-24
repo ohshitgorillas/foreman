@@ -51,6 +51,18 @@ def parse(text: str) -> Report:
     )
 
 
+def failed_ids(text: str) -> list[str]:
+    """The test ids pytest's short summary reports FAILED or ERROR, in order, once each."""
+    ids: list[str] = []
+    for ln in text.splitlines():
+        head, _, rest = ln.partition(" ")
+        if head in ("FAILED", "ERROR") and rest:
+            test = rest.split(" - ", 1)[0].strip()
+            if test and test not in ids:
+                ids.append(test)
+    return ids
+
+
 def read(result: Result) -> Report:
     return parse(result.out)
 

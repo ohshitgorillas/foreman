@@ -441,3 +441,31 @@ def test_retest_makes_test_step_views_before_fix(
     assert log.kept("g1-tests-retest-views") == ""
     if not view_code:
         assert (cfg.view_root / "g1/a.pyi").exists()
+
+
+def _red_then_build(output: str) -> object:
+    red = make_step(
+        "s1",
+        ["t.py"],
+        check=["sh", "-c", f"printf '{output}'; exit 1"],
+        expect_code=1,
+    )
+    return make_group(red, make_step("s2", ["a.py"], red="s1"))
+
+
+def test_red_step_failures_end_the_build_brief(
+    green_cfg, origin, log, fake_backend
+) -> None:
+    g = _red_then_build("FAILED t.py::test_a - boom\\nERROR t.py::test_b\\n")
+    backend = fake_backend([{"t.py": "1"}, {"a.py": "1"}])
+    loop.run_group(green_cfg, g, log, backend)
+    assert backend.briefs[1] == "brief s2\nt.py::test_a\nt.py::test_b"
+    assert log.done() == {"g1"}
+
+
+def test_red_step_without_failures_is_a_ruling(green_cfg, log, fake_backend) -> None:
+    g = _red_then_build("1 failed\\n")
+    backend = fake_backend([{"t.py": "1"}, {"a.py": "1"}])
+    with pytest.raises(RulingNeeded, match="named no failing tests"):
+        loop.run_group(green_cfg, g, log, backend)
+    assert len(backend.briefs) == 1

@@ -126,3 +126,20 @@ def test_upheld_maps_roles() -> None:
 def test_upheld_unknown_line_raises() -> None:
     with pytest.raises(ConfigError):
         reports.upheld("nope", {"r": Report("done", ["yes"])})
+
+
+def test_failed_ids_reads_summary_once_in_order() -> None:
+    text = (
+        "..F\n"
+        "FAILED tests/t.py::test_a - AssertionError: x\n"
+        "ERROR tests/u.py\n"
+        "FAILED tests/t.py::test_a - again\n"
+        "FAILED tests/t.py::test_b[1-2]\n"
+        "1 failed, 1 error in 0.1s\n"
+    )
+    assert reports.failed_ids(text) == [
+        "tests/t.py::test_a",
+        "tests/u.py",
+        "tests/t.py::test_b[1-2]",
+    ]
+    assert reports.failed_ids("3 passed\nFAILED\n") == []

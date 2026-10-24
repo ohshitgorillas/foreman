@@ -18,6 +18,7 @@ class Step:
     check: list[str]  # one argv; empty means the step runs no check
     expect_code: int = 0  # the check's passing exit code
     views: list[str] = field(default_factory=list)  # .py sources viewed before the step
+    red: str = ""  # earlier step whose failing check ids end this step's brief
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,7 @@ def _str(where: str, key: str, value: object) -> str:
 def _step(path: Path, step_id: str, raw: object) -> Step:
     where = f"{path}: steps.{step_id}"
     t = _table(
-        where, raw, {"role", "brief", "paths"}, {"check", "expect_code", "views"}
+        where, raw, {"role", "brief", "paths"}, {"check", "expect_code", "views", "red"}
     )
     code = t.get("expect_code", 0)
     if isinstance(code, bool) or not isinstance(code, int):
@@ -68,6 +69,7 @@ def _step(path: Path, step_id: str, raw: object) -> Step:
         check=_str_list(where, "check", t.get("check", [])),
         expect_code=code,
         views=_str_list(where, "views", t.get("views", [])),
+        red=_str(where, "red", t.get("red", "")),
     )
 
 
@@ -141,6 +143,11 @@ def lint(groups: list[Group]) -> list[str]:
             for v in s.views:
                 if not v.endswith(".py"):
                     problems.append(f"{s.id}: view {v} is not a .py source")
+    for g in groups:
+        for i, s in enumerate(g.steps):
+            checked = {e.id for e in g.steps[:i] if e.check}
+            if s.red and s.red not in checked:
+                problems.append(f"{s.id}: red {s.red} is not an earlier checked step")
     known = set(gids)
     for g in groups:
         for dep in g.after:

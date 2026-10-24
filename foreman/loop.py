@@ -61,8 +61,20 @@ def _steps(
             if not made.green:
                 raise _rule(log, group, wt, str(path), f"step {step.id} views failed")
         log.keep(f"{group.id}-{step.id}-before", git.snapshot(wt))
+        text = step.brief
+        if step.red:
+            ids = reports.failed_ids(log.kept(f"{group.id}-{step.red}-check"))
+            if not ids:
+                raise _rule(
+                    log,
+                    group,
+                    wt,
+                    f"{group.id}-{step.red}-check.txt",
+                    f"step {step.id}: step {step.red} check named no failing tests",
+                )
+            text = "\n".join([step.brief, *ids])
         report = _dispatch(
-            group, wt, log, backend, f"{group.id}-{step.id}", step.brief, step.role
+            group, wt, log, backend, f"{group.id}-{step.id}", text, step.role
         )
         if report.test_wrong:
             test = _test_owner(group, index, report, wt, log)

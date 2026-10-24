@@ -193,3 +193,17 @@ def test_lint_views() -> None:
     assert lint([grp("g", [mk("b", views=["x.py"])])]) == []
     bad = grp("g", [first, mk("b", views=["pkg/README.md"])])
     assert any("not a .py" in p for p in lint([bad]))
+
+
+def test_lint_red_names_an_earlier_checked_step() -> None:
+    first = mk("a")
+    assert lint([grp("g", [first, mk("b", red="a")])]) == []
+    assert lint([grp("g", [mk("b", red="a"), first])]) != []
+    assert lint([grp("g", [mk("a", check=[]), mk("b", red="a")])]) != []
+
+
+def test_load_red_default_empty_and_read(tmp_path: Path) -> None:
+    text = GOOD.replace('paths = ["d.py"]', 'paths = ["d.py"]\nred = "x"')
+    groups = load(write(tmp_path, text))
+    assert groups[1].steps[0].red == "x"
+    assert groups[0].steps[0].red == ""
