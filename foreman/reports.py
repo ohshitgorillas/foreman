@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass, field
+from os.path import normpath
 from pathlib import Path
 
 from foreman import forms, steps
@@ -11,7 +12,7 @@ from foreman.steps import Group
 
 _REJECTED = "REJECTED: STEERING"
 _OVERLOADED = "OVERLOADED:"
-_PATH_LINE = re.compile(r"((?:/|\./)?[\w.-]+(?:/[\w.-]+)*):[1-9][0-9]*(?=[:\s]|$)")
+_PATH_LINE = re.compile(r"((?:/|\./)?[\w.-]+(?:/[\w.-]+)*):([1-9][0-9]*)(?=[:\s]|$)")
 
 
 @dataclass(frozen=True)
@@ -183,11 +184,12 @@ def lines(result: Result) -> list[str]:
 
 
 def _relative(path: str, wt: Path) -> str | None:
-    if not path.startswith("/"):
-        return path.removeprefix("./")
-    for base in (wt, wt.resolve()):
+    target = Path(normpath(path))
+    if not target.is_absolute():
+        return str(target) if target.parts and target.parts[0] != ".." else None
+    for base in (wt.absolute(), wt.resolve()):
         try:
-            return str(Path(path).relative_to(base))
+            return str(target.relative_to(base))
         except ValueError:
             continue
     return None
@@ -199,11 +201,12 @@ def route(
     owned: dict[str, list[str]] = {}
     unowned: list[str] = []
     for line in lines:
-        anchor = finding_anchor(line)
-        if anchor is None:
+        location = anchor(line, wt)
+        if location is None:
+            if _primary_anchor(line) is not None:
+                unowned.append(line)
             continue
-        rel = _relative(anchor, wt)
-        step = steps.owner(group, rel) if rel is not None else None
+        step = steps.owner(group, location[0])
         if step is None:
             unowned.append(line)
         else:
@@ -211,13 +214,21 @@ def route(
     return owned, unowned
 
 
-def finding_anchor(line: str) -> str | None:
-    """Return the primary path only: reviewer field two or a gate prefix."""
+def _primary_anchor(line: str) -> re.Match[str] | None:
     fields = line.split(" | ")
     match = _PATH_LINE.match(line)
     if match is None and len(fields) > 1:
         match = _PATH_LINE.fullmatch(fields[1])
-    return match.group(1) if match else None
+    return match
+
+
+def anchor(line: str, wt: Path) -> tuple[str, int] | None:
+    """Read the primary anchor relative to wt, never an incidental citation."""
+    match = _primary_anchor(line)
+    if match is None:
+        return None
+    path = _relative(match.group(1), wt)
+    return (path, int(match.group(2))) if path is not None else None
 
 
 def upheld(text: str, kept: dict[str, Report]) -> dict[str, list[str]]:

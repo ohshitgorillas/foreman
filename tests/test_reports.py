@@ -263,5 +263,58 @@ def test_route_uses_primary_finding_anchor(tmp_path: Path) -> None:
     owned, unowned = reports.route(lines, tmp_path, GROUP)
     assert owned == {"s2": [lines[0]]}
     assert unowned == lines[1:3]
-    assert reports.finding_anchor(lines[0]) == "foreman/b.py"
-    assert reports.finding_anchor(lines[3]) is None
+    assert reports.anchor(lines[0], tmp_path) == ("foreman/b.py", 7)
+    assert reports.anchor(lines[3], tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("foreman/a.py:12:3: E1 error", ("foreman/a.py", 12)),
+        ("./tests/test_a.py:4: failure", ("tests/test_a.py", 4)),
+        ("foreman/../tests/test_a.py:8: failure", ("tests/test_a.py", 8)),
+        ("docs/design.md:19", ("docs/design.md", 19)),
+        (
+            'drift | foreman/b.py:7 | reuse "foreman/a.py:2" | fails when: x',
+            ("foreman/b.py", 7),
+        ),
+        ("note mentions foreman/a.py:2", None),
+        ("note | no anchor | foreman/a.py:2", None),
+        ("drift | foreman/a.py:0 | cites foreman/b.py:3", None),
+        ("foreman/a.py:-1: error", None),
+        ("foreman/a.py:01: error", None),
+        ("foreman/a.py:2suffix: error", None),
+        ("../elsewhere/a.py:2: error", None),
+        ("foreman/../../a.py:2: error", None),
+    ],
+)
+def test_anchor_reads_only_primary_path_and_positive_line(
+    tmp_path: Path, line: str, expected: tuple[str, int] | None
+) -> None:
+    assert reports.anchor(line, tmp_path) == expected
+
+
+def test_anchor_absolute_paths_must_be_within_worktree(tmp_path: Path) -> None:
+    wt = tmp_path / "worktree"
+    assert reports.anchor(f"{wt}/foreman/a.py:42: E1", wt) == (
+        "foreman/a.py",
+        42,
+    )
+    assert reports.anchor(
+        f"drift | {wt}/tests/test_a.py:9 | defect | fails when: x", wt
+    ) == ("tests/test_a.py", 9)
+    assert reports.anchor(f"{tmp_path}/elsewhere/a.py:3: E1", wt) is None
+    assert reports.anchor(f"{wt}-other/a.py:3: E1", wt) is None
+    assert reports.anchor(f"{wt}/../a.py:3: E1", wt) is None
+
+
+def test_anchor_accepts_resolved_worktree_path(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    wt = tmp_path / "worktree"
+    wt.symlink_to(target, target_is_directory=True)
+    for base in (wt, wt.resolve()):
+        assert reports.anchor(f"{base}/foreman/a.py:5: E1", wt) == (
+            "foreman/a.py",
+            5,
+        )
