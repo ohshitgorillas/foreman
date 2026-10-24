@@ -222,8 +222,12 @@ def _step(
     verdict = verify.check_step(step, wt)
     if verdict is not None:
         path = log.keep(f"{group.id}-{step.id}-check", _text(verdict.result))
+        if verdict.result.code == TIMEOUT_CODE:
+            raise _rule(log, group, wt, str(path), f"step {step.id} check timed out")
         if not verdict.green:
-            raise _rule(log, group, wt, str(path), f"step {step.id} check missed")
+            judgment = _judgment(group, index, wt, log, failure=str(path))
+            _judge(cfg, group, step.id, judgment, wt, log, backend)
+            return
     if isinstance(step.form, forms.Red):
         name = f"{group.id}-{step.id}"
         try:
@@ -236,25 +240,40 @@ def _step(
 
 def _judgment(
     group: Group,
-    index: int,
+    index: int | None,
     wt: Path,
     log: EventLog,
+    *,
+    failure: str | None = None,
 ) -> forms.Judgment:
-    """Resolve the failed build and its selected producers from kept evidence."""
-    step = group.steps[index]
-    name = f"{group.id}-{step.id}"
-    red_ids = _red_ids(group, index, wt, log)
-    selected = (
-        {r.step for r in step.form.red} if isinstance(step.form, forms.Build) else set()
-    )
-    candidates = [
-        s for s in group.steps[: index + 1] if s.id in selected or s.id == step.id
-    ]
+    """Resolve a failed step or completed group through the same evidence path."""
+    if index is None:
+        name = f"{group.id}-group-check"
+        candidates = group.steps
+        red_ids: list[str] = []
+    else:
+        step = group.steps[index]
+        name = f"{group.id}-{step.id}"
+        red_ids = _red_ids(group, index, wt, log)
+        selected = (
+            {r.step for r in step.form.red}
+            if isinstance(step.form, forms.Build)
+            else set()
+        )
+        candidates = [
+            s for s in group.steps[: index + 1] if s.id in selected or s.id == step.id
+        ]
     blocks = []
     paths = []
     try:
         for candidate in candidates:
             key = f"{group.id}-{candidate.id}"
+            if index is None and isinstance(candidate.form, forms.Red):
+                if log.kept(f"{key}-evidence") != _producer_identity(candidate):
+                    raise ConfigError("red producer has no current successful evidence")
+                for item in _red_evidence(candidate, log.kept(key)):
+                    if item.test_id not in red_ids:
+                        red_ids.append(item.test_id)
             block = (
                 candidate.form.step
                 if isinstance(candidate.form, (forms.Build, forms.Stub))
@@ -262,6 +281,11 @@ def _judgment(
             )
             blocks.append(block)
             paths.append(str(log.keep(key, log.kept(key))))
+        if index is None:
+            for candidate_index in range(len(group.steps)):
+                _red_ids(group, candidate_index, wt, log)
+        if failure is not None:
+            paths.append(failure)
         judgment = forms.Judgment(
             group.design,
             tuple(s.id for s in candidates),
@@ -529,9 +553,13 @@ def _test_owner(
 def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) -> None:
     verdict = verify.verify(cfg, wt)
     path = log.keep(f"{group.id}-check", _text(verdict.result))
+    if verdict.result.code == TIMEOUT_CODE:
+        raise _rule(log, group, wt, str(path), "combined-tree check timed out")
     if verdict.green:
         return
-    raise _rule(log, group, wt, str(path), "combined-tree check needs judgment")
+    judgment = _judgment(group, None, wt, log, failure=str(path))
+    _judge(cfg, group, "group-check", judgment, wt, log, backend)
+    raise _rule(log, group, wt, str(path), "group-check continuation awaits step 19c")
 
 
 def _review(

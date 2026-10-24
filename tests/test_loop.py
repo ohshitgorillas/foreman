@@ -1518,3 +1518,194 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
         assert log.kept("g1-red-evidence") == ""
     assert {name: log.kept(f"g1-{name}-before") for name in snapshots} == snapshots
     assert (wt / "keep.py").read_text() == "preserve"
+
+
+@pytest.mark.parametrize("trigger", ["step", "formatter", "group"])
+@pytest.mark.parametrize("with_producers", [False, True])
+def test_judgment_check_failures_keep_context_without_finding_anchors(
+    green_cfg, log, fake_backend, trigger, with_producers
+):
+    cfg = _viewing(green_cfg)
+    failure = ["sh", "-c", "echo opaque failure >&2; exit 3"]
+    stub = make_step("stub", ["a.py"], check=failure if trigger == "step" else [])
+    group = make_group(stub, design="docs/superpowers/specs/approved.md")
+    files = [{"a.py": "original"}]
+    outputs = [""]
+    ids = ["tests/test_a.py::test_a", "tests/test_b.py::test_b"]
+    if with_producers:
+        producers = [
+            make_step(
+                name,
+                [test_id.partition("::")[0]],
+                role="test-writer",
+                form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+                views=["a.py"],
+                check=["false"],
+                expect_code=1,
+            )
+            for name, test_id in zip(["red_a", "red_b"], ids)
+        ]
+        build = make_step(
+            "build",
+            ["a.py"],
+            form=forms.Build(
+                "core-builder",
+                "Approved build",
+                (forms.RedSelection("red_a"), forms.RedSelection("red_b")),
+            ),
+            check=failure if trigger == "step" else ["true"],
+        )
+        group = make_group(
+            replace(stub, check=[]),
+            *producers,
+            build,
+            design="docs/superpowers/specs/approved.md",
+        )
+        files += [{test_id.partition("::")[0]: "red"} for test_id in ids]
+        files += [{"a.py": "built"}]
+        outputs += [_red_report(test_id) for test_id in ids] + [""]
+    if trigger == "formatter":
+        cfg = replace(cfg, format_cmd=failure)
+    elif trigger == "group":
+        cfg = replace(cfg, check_cmd=failure)
+    outputs.append(
+        "VERDICT undetermined\nACTION owner\nREASON Need owner evidence\n"
+        "EVIDENCE a.py:1 | observed implementation\nEND JUDGMENT"
+    )
+    backend = fake_backend(files, outputs)
+    with pytest.raises(WrongTest, match="Need owner evidence"):
+        loop.run_group(cfg, group, log, backend)
+    context = group.steps[-1].id if trigger == "step" else "group-check"
+    judgment = json.loads(log.kept(f"g1-{context}-judgment"))
+    expected_steps = [s.id for s in group.steps]
+    if trigger == "step" and with_producers:
+        expected_steps.remove("stub")
+    assert judgment["steps"] == expected_steps
+    assert judgment["red_ids"] == (ids if with_producers else [])
+    assert judgment["spec"] == group.design
+    assert (
+        "Approved build" in judgment["step"]
+        if with_producers
+        else "Approved step stub" in judgment["step"]
+    )
+    check_key = f"g1-{context}-check" if trigger == "step" else "g1-check"
+    report_paths = {str(log.keep(check_key, log.kept(check_key)))}
+    report_paths.update(
+        str(log.keep(f"g1-{sid}", log.kept(f"g1-{sid}"))) for sid in expected_steps
+    )
+    assert set(judgment["reports"]) == report_paths
+    assert "opaque failure" in log.kept(check_key)
+    assert backend.agents[-1] == "juror"
+    assert len(backend.agents) == len(group.steps) + 1
+    assert log.kept(f"g1-{context}-juror-1").startswith("VERDICT undetermined")
+    assert not log.done()
+
+
+def test_judgment_expected_producer_red_remains_successful_evidence(
+    green_cfg, log, fake_backend, origin
+):
+    cfg = _viewing(green_cfg)
+    test_id = "tests/test_a.py::test_a"
+    producer = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        views=["a.py"],
+        check=["false"],
+        expect_code=1,
+    )
+    build = make_step(
+        "build",
+        ["a.py"],
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red"),)
+        ),
+        check=["true"],
+    )
+    group = make_group(make_step("stub", ["a.py"]), producer, build)
+    backend = fake_backend(
+        [{"a.py": "stub"}, {"tests/test_a.py": "red"}, {"a.py": "built"}],
+        ["", _red_report(test_id), ""],
+    )
+    loop.run_group(cfg, group, log, backend)
+    assert backend.agents == ["core-builder", "test-writer", "core-builder"]
+    assert test_id in backend.briefs[-1]
+    assert log.kept("g1-red-evidence")
+    assert log.done() == {"g1"}
+
+
+@pytest.mark.parametrize("trigger", ["step", "formatter", "group"])
+def test_judgment_check_timeouts_remain_rulings(green_cfg, log, fake_backend, trigger):
+    timeout = ["sh", "-c", "echo infrastructure timeout >&2; exit 124"]
+    cfg = green_cfg
+    if trigger == "formatter":
+        cfg = replace(cfg, format_cmd=timeout)
+    elif trigger == "group":
+        cfg = replace(cfg, check_cmd=timeout)
+    group = make_group(
+        make_step("stub", ["a.py"], check=timeout if trigger == "step" else [])
+    )
+    backend = fake_backend([{"a.py": "stub"}])
+    with pytest.raises(RulingNeeded, match="timed out"):
+        loop.run_group(cfg, group, log, backend)
+    assert backend.agents == ["core-builder"]
+    assert not log.done()
+
+
+@pytest.mark.parametrize("invalid", ["missing-spec", "stale-producer"])
+def test_judgment_group_rejects_missing_spec_or_stale_evidence(
+    green_cfg, log, fake_backend, invalid
+):
+    cfg = replace(_viewing(green_cfg), check_cmd=["false"])
+    producer = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        views=["a.py"],
+        check=["false"],
+        expect_code=1,
+    )
+    group = make_group(
+        make_step("stub", ["a.py"]),
+        producer,
+        design="docs/superpowers/specs/approved.md",
+    )
+    backend = fake_backend(
+        [{"a.py": "stub"}, {"tests/test_a.py": "red"}],
+        ["", _red_report("tests/test_a.py::test_a")],
+    )
+    wt = git.make_worktree(cfg, group.id)
+    loop._steps(cfg, group, wt, log, backend, 0)
+    if invalid == "missing-spec":
+        group = replace(group, design="")
+        diagnostic = "judgment.spec"
+    else:
+        log.keep("g1-red-evidence", "stale")
+        diagnostic = "no current successful evidence"
+    with pytest.raises(RulingNeeded, match=diagnostic):
+        loop._gate(cfg, group, wt, log, backend)
+    assert backend.agents == ["core-builder", "test-writer"]
+    assert not log.done()
+
+
+def test_judgment_group_verdict_return_keeps_landing_blocked(
+    green_cfg, log, fake_backend, monkeypatch
+):
+    cfg = replace(green_cfg, check_cmd=["false"])
+    group = make_group(
+        make_step("stub", ["a.py"]), design="docs/superpowers/specs/approved.md"
+    )
+    backend = fake_backend([{"a.py": "stub"}])
+    judged = []
+
+    def return_from_judgment(cfg, group, context, judgment, wt, log, backend):
+        judged.append(context)
+
+    monkeypatch.setattr(loop, "_judge", return_from_judgment)
+    with pytest.raises(RulingNeeded, match="group-check continuation"):
+        loop.run_group(cfg, group, log, backend)
+    assert judged == ["group-check"]
+    assert git.worktree(cfg, group.id).exists()
+    assert not log.done()
