@@ -29,6 +29,27 @@ def snapshot(wt: Path) -> str:
         return _indexed(wt, index, "write-tree").strip()
 
 
+def changed_since(wt: Path, tree: str) -> list[str]:
+    """Working-file paths differing from tree, including untracked and ignored."""
+    current = snapshot(wt)
+    out = run_ok(
+        [
+            "git",
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-r",
+            "-z",
+            tree,
+            current,
+            "--",
+        ],
+        wt,
+    ).out
+    return out.rstrip("\0").split("\0") if out else []
+
+
 def restore(wt: Path, tree: str, paths: list[str]) -> None:
     """Restore only the named paths, removing files absent from the snapshot."""
     if not paths:

@@ -6,6 +6,7 @@ from foreman.config import Config
 from foreman.errors import ForemanError
 from foreman.git import (
     changed_paths,
+    changed_since,
     commit_paths,
     make_worktree,
     push,
@@ -213,3 +214,86 @@ def test_restore_invalid_tree_leaves_files_alone(cfg: Config) -> None:
     with pytest.raises(ForemanError):
         restore(wt, "not-a-tree", ["new"])
     assert (wt / "new").read_text() == "keep\n"
+
+
+def test_changed_since_uses_snapshot_instead_of_head_or_index(cfg: Config) -> None:
+    wt = make_worktree(cfg, "since")
+    (wt / "README.md").write_text("staged\n")
+    run_ok(["git", "add", "README.md"], wt)
+    (wt / "README.md").write_text("working\n")
+    (wt / ".gitignore").write_text("ignored*\n")
+    (wt / "ignored-existing").write_text("earlier step\n")
+    (wt / "untracked-existing").write_text("earlier step\n")
+    tree = snapshot(wt)
+    assert changed_since(wt, tree) == []
+
+    # Staging alone changes neither the working files nor their snapshot diff.
+    run_ok(["git", "add", "README.md"], wt)
+    assert changed_since(wt, tree) == []
+    (wt / "README.md").write_text("initial\n")
+    assert changed_since(wt, tree) == ["README.md"]
+
+
+def test_changed_since_captures_all_working_changes_without_side_effects(
+    cfg: Config,
+) -> None:
+    wt = make_worktree(cfg, "changes")
+    (wt / ".gitignore").write_text("ignored*\n")
+    (wt / "ignored-modified").write_text("before\n")
+    (wt / "ignored-deleted").write_text("before\n")
+    (wt / "renamed-from").write_text("same content\n")
+    (wt / "mode").write_text("executable\n")
+    (wt / "link").symlink_to("README.md")
+    tree = snapshot(wt)
+
+    (wt / "README.md").unlink()
+    (wt / "ignored-modified").write_text("after\n")
+    (wt / "ignored-deleted").unlink()
+    (wt / "ignored-added").write_bytes(b"\x00\xff\n")
+    (wt / "renamed-from").rename(wt / "renamed-to")
+    (wt / "mode").chmod(0o755)
+    (wt / "link").unlink()
+    (wt / "link").symlink_to("mode")
+    unusual = 'new [file]\twith\n"quotes".py'
+    (wt / unusual).write_text("new\n")
+    (wt / "staged").write_text("staged\n")
+    run_ok(["git", "add", "staged"], wt)
+    index = Path(run_ok(["git", "rev-parse", "--git-path", "index"], wt).out.strip())
+    before_index = index.read_bytes()
+    before_head = run_ok(["git", "rev-parse", "HEAD"], wt).out
+
+    paths = changed_since(wt, tree)
+
+    assert sorted(paths) == sorted(
+        [
+            "README.md",
+            "ignored-modified",
+            "ignored-deleted",
+            "ignored-added",
+            "renamed-from",
+            "renamed-to",
+            "mode",
+            "link",
+            unusual,
+            "staged",
+        ]
+    )
+    assert index.read_bytes() == before_index
+    assert run_ok(["git", "rev-parse", "HEAD"], wt).out == before_head
+    assert snapshot(wt) != tree
+    assert (wt / "ignored-added").read_bytes() == b"\x00\xff\n"
+    assert (wt / "ignored-modified").read_text() == "after\n"
+    assert not (wt / "ignored-deleted").exists()
+    assert not (wt / "README.md").exists()
+    assert not (wt / "renamed-from").exists()
+    assert (wt / "renamed-to").read_text() == "same content\n"
+    assert (wt / "mode").stat().st_mode & 0o111
+    assert (wt / "link").readlink() == Path("mode")
+    assert (wt / unusual).read_text() == "new\n"
+    assert (wt / "staged").read_text() == "staged\n"
+
+
+def test_changed_since_invalid_tree_raises(cfg: Config) -> None:
+    wt = make_worktree(cfg, "invalid-since")
+    with pytest.raises(ForemanError):
+        changed_since(wt, "not-a-tree")
