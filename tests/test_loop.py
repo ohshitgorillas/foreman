@@ -669,7 +669,7 @@ def test_test_review_uses_explicit_specs_in_order(green_cfg, origin, log, fake_b
     )
 
 
-@pytest.mark.parametrize("outside", ["a.py", "tests/test_other.py", "ignored.txt"])
+@pytest.mark.parametrize("outside", ["a.py", "tests/test_other.py", "stray.txt"])
 def test_red_output_outside_paths_stops_before_check_and_next_dispatch(
     green_cfg, log, fake_backend, outside
 ):
@@ -684,12 +684,15 @@ def test_red_output_outside_paths_stops_before_check_and_next_dispatch(
     wt = git.make_worktree(green_cfg, g.id)
     (wt / "a.py").write_text("before")
     (wt / ".gitignore").write_text("ignored.txt\n")
-    backend = fake_backend([{outside: "unexpected", "tests/test_a.py": "red"}])
+    backend = fake_backend(
+        [{outside: "unexpected", "tests/test_a.py": "red", "ignored.txt": "cache"}]
+    )
     with pytest.raises(
         RulingNeeded, match="red output outside declared paths"
     ) as error:
         loop._steps(green_cfg, g, wt, log, backend, 0)
     assert outside in str(error.value)
+    assert "ignored.txt" not in str(error.value)
     assert "g1-red.txt" in str(error.value)
     assert len(backend.briefs) == 1
     assert log.kept("g1-red-before")
@@ -711,6 +714,7 @@ def test_red_scope_uses_snapshot_and_allows_changes_to_its_existing_file(
     )
     g = make_group(red)
     wt = git.make_worktree(green_cfg, g.id)
+    (wt / ".gitignore").write_text(".ruff_cache/\n")
     (wt / "a.py").write_text("earlier stub")
     (wt / "tests").mkdir()
     (wt / "tests/test_a.py").write_text("old tests")
@@ -720,7 +724,12 @@ def test_red_scope_uses_snapshot_and_allows_changes_to_its_existing_file(
         wt,
         log,
         fake_backend(
-            [{"tests/test_a.py": "old and new tests"}],
+            [
+                {
+                    "tests/test_a.py": "old and new tests",
+                    ".ruff_cache/entry": "cache",
+                }
+            ],
             outputs=[_red_report("tests/test_a.py::test_new")],
         ),
         0,
@@ -1342,6 +1351,7 @@ def test_juror_repair_preserves_producer_and_restores_builder(
     group = make_group(red, build, design="docs/superpowers/specs/approved.md")
     wt = git.make_worktree(cfg, group.id)
     (wt / "a.py").write_text("original")
+    (wt / ".gitignore").write_text(".ruff_cache/\n")
     loop._steps(
         cfg,
         make_group(red),
@@ -1361,7 +1371,7 @@ def test_juror_repair_preserves_producer_and_restores_builder(
         repaired = repaired.replace("test_new", "test_renamed")
     elif change == "missing":
         repaired = "value = 1\n"
-    files = {"tests/test_a.py": repaired}
+    files = {"tests/test_a.py": repaired, ".ruff_cache/entry": "cache"}
     if change == "outside":
         files["other.py"] = "unexpected"
     elif change == "filtered":
@@ -1410,8 +1420,11 @@ def test_juror_repair_preserves_producer_and_restores_builder(
             "tests/test_b.py::test_new",
         ]
     else:
-        with pytest.raises(RulingNeeded):
+        with pytest.raises(RulingNeeded) as error:
             loop._step(cfg, group, 1, wt, log, backend)
+        assert ".ruff_cache" not in str(error.value)
+        if change == "outside":
+            assert "other.py" in str(error.value)
         assert len(backend.briefs) == 3
         assert (wt / "a.py").read_text() == "partial"
     assert backend.briefs[2] == (

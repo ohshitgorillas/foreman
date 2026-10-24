@@ -297,3 +297,20 @@ def test_changed_since_invalid_tree_raises(cfg: Config) -> None:
     wt = make_worktree(cfg, "invalid-since")
     with pytest.raises(ForemanError):
         changed_since(wt, "not-a-tree")
+
+
+def test_changed_since_can_exclude_gitignored_files(cfg: Config) -> None:
+    wt = make_worktree(cfg, "ignored")
+    (wt / ".gitignore").write_text(".cache/\nREADME.md\n")
+    (wt / ".cache").mkdir()
+    (wt / ".cache/deleted").write_text("before")
+    tree = snapshot(wt)
+    (wt / ".cache/deleted").unlink()
+    (wt / ".cache/new\nentry").write_text("cache")
+    (wt / "stray\nfile").write_text("unexpected")
+    (wt / "README.md").write_text("tracked changes still count")
+
+    assert changed_since(wt, tree, include_ignored=False) == [
+        "README.md",
+        "stray\nfile",
+    ]

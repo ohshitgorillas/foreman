@@ -29,8 +29,8 @@ def snapshot(wt: Path) -> str:
         return _indexed(wt, index, "write-tree").strip()
 
 
-def changed_since(wt: Path, tree: str) -> list[str]:
-    """Working-file paths differing from tree, including untracked and ignored."""
+def changed_since(wt: Path, tree: str, *, include_ignored: bool = True) -> list[str]:
+    """Working-file paths differing from tree, optionally excluding gitignored files."""
     current = snapshot(wt)
     out = run_ok(
         [
@@ -47,7 +47,20 @@ def changed_since(wt: Path, tree: str) -> list[str]:
         ],
         wt,
     ).out
-    return out.rstrip("\0").split("\0") if out else []
+    paths = out.rstrip("\0").split("\0") if out else []
+    if include_ignored or not paths:
+        return paths
+    ignored = run(
+        ["git", "check-ignore", "--stdin", "-z"],
+        wt,
+        stdin="\0".join(paths) + "\0",
+    )
+    if ignored.code not in (0, 1):
+        raise ForemanError(
+            f"{ignored.cmd} exited {ignored.code}: {ignored.err.strip()}"
+        )
+    ignored_paths = set(ignored.out.rstrip("\0").split("\0"))
+    return [path for path in paths if path not in ignored_paths]
 
 
 def restore(wt: Path, tree: str, paths: list[str]) -> None:

@@ -241,7 +241,9 @@ def _step(
     )
     if isinstance(step.form, forms.Red):
         outside = [
-            p for p in git.changed_since(wt, before) if not steps.holds(step.paths, p)
+            p
+            for p in git.changed_since(wt, before, include_ignored=False)
+            if not steps.holds(step.paths, p)
         ]
         if outside:
             raise _rule(
@@ -635,7 +637,7 @@ def _repair(
     _dispatch(group, wt, log, backend, repair_name, text, "test-writer")
     outside = [
         p
-        for p in git.changed_since(wt, before_repair)
+        for p in git.changed_since(wt, before_repair, include_ignored=False)
         if not steps.holds(producer.paths, p)
     ]
     if outside:

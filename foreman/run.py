@@ -30,6 +30,7 @@ def run(
     cwd: Path,
     timeout: float | None = None,
     env: dict[str, str] | None = None,
+    stdin: str | None = None,
 ) -> Result:
     """Run cmd in cwd. A timeout kills it and yields code TIMEOUT_CODE."""
     start = time.monotonic()
@@ -38,6 +39,7 @@ def run(
             cmd,
             cwd=cwd,
             env=env,
+            input=stdin,
             capture_output=True,
             text=True,
             timeout=timeout,
