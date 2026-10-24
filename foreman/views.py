@@ -1,4 +1,4 @@
-"""The .pyi views a step reads of code its group already wrote."""
+"""The .pyi views a step reads of code in its worktree."""
 
 import shutil
 from pathlib import Path

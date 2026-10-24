@@ -137,15 +137,10 @@ def lint(groups: list[Group]) -> list[str]:
             if not s.brief.strip():
                 problems.append(f"{s.id}: no brief")
     for g in groups:
-        for i, s in enumerate(g.steps):
-            earlier = [p for e in g.steps[:i] for p in e.paths]
+        for s in g.steps:
             for v in s.views:
                 if not v.endswith(".py"):
                     problems.append(f"{s.id}: view {v} is not a .py source")
-                elif not holds(earlier, v):
-                    problems.append(
-                        f"{s.id}: view {v} not held by an earlier step of {g.id}"
-                    )
     known = set(gids)
     for g in groups:
         for dep in g.after:
