@@ -8,7 +8,6 @@ from foreman import forms, git, loop
 from foreman.config import Config, Reviewer
 from foreman.errors import (
     ConfigError,
-    Escalated,
     FindingsToRule,
     ForemanError,
     RulingNeeded,
@@ -22,6 +21,13 @@ RED_UNTIL_FIXED = [
     "-c",
     "if grep -q fixed a.py 2>/dev/null; then exit 0; fi; echo a.py:1 bad; exit 1",
 ]
+
+
+def _undetermined(anchor="a.py:1"):
+    return (
+        "VERDICT undetermined\nACTION owner\nREASON Need owner evidence\n"
+        f"EVIDENCE {anchor} | observed failure needs clarification\nEND JUDGMENT"
+    )
 
 
 @pytest.fixture
@@ -168,10 +174,16 @@ def test_timeout_records_overrun_and_stops_before_checks_or_next_dispatch(
     assert not log.done()
 
 
-def test_missed_step_check_is_a_ruling(green_cfg, log, fake_backend) -> None:
-    g = make_group(make_step("s1", ["a.py"], check=["false"]))
-    with pytest.raises(RulingNeeded):
-        loop.run_group(green_cfg, g, log, fake_backend([{"a.py": "1"}]))
+def test_missed_step_check_reaches_juror(green_cfg, log, fake_backend) -> None:
+    g = make_group(
+        make_step("s1", ["a.py"], check=["false"]),
+        design="docs/superpowers/specs/approved.md",
+    )
+    backend = fake_backend([{"a.py": "1"}], ["", _undetermined()])
+    with pytest.raises(WrongTest, match="Need owner evidence"):
+        loop.run_group(green_cfg, g, log, backend)
+    assert backend.agents == ["core-builder", "juror"]
+    assert not log.done()
 
 
 def test_step_check_matching_expect_code_passes(
@@ -182,43 +194,61 @@ def test_step_check_matching_expect_code_passes(
     assert log.done() == {"g1"}
 
 
-def test_red_gate_keeps_evidence_and_stops_before_fix_dispatch(
-    green_cfg, log, fake_backend
+@pytest.mark.parametrize(
+    "check_cmd,output",
+    [
+        (RED_UNTIL_FIXED, "a.py:1 bad\n"),
+        (["sh", "-c", "echo other.py:3 bad; exit 1"], "other.py:3 bad\n"),
+        (["sh", "-c", "echo broken; exit 1"], "broken\n"),
+    ],
+)
+def test_red_gate_keeps_evidence_and_reaches_juror_before_fix_dispatch(
+    green_cfg, log, fake_backend, check_cmd, output
 ) -> None:
-    cfg = replace(green_cfg, check_cmd=RED_UNTIL_FIXED)
-    g = make_group(make_step("s1", ["a.py"]), make_step("s2", ["b.py"]))
-    backend = fake_backend([{"a.py": "1"}, {"b.py": "2"}, {"a.py": "fixed"}])
-    with pytest.raises(RulingNeeded, match="combined-tree check needs judgment"):
+    cfg = replace(green_cfg, check_cmd=check_cmd)
+    g = make_group(
+        make_step("s1", ["a.py"]),
+        make_step("s2", ["b.py"]),
+        design="docs/superpowers/specs/approved.md",
+    )
+    backend = fake_backend([{"a.py": "1"}, {"b.py": "2"}], ["", "", _undetermined()])
+    with pytest.raises(WrongTest, match="Need owner evidence"):
         loop.run_group(cfg, g, log, backend)
-    assert len(backend.briefs) == 2
-    assert log.kept("g1-check") == "a.py:1 bad\n"
-    assert git.worktree(cfg, g.id).exists()
+    assert backend.agents == ["core-builder", "core-builder", "juror"]
+    assert log.kept("g1-check") == output
+    judgment = json.loads(log.kept("g1-group-check-judgment"))
+    assert judgment["steps"] == ["s1", "s2"]
+    assert judgment["red_ids"] == []
+    assert set(judgment["reports"]) == {
+        str(cfg.state_dir / f"g1-{key}.txt") for key in ("s1", "s2", "check")
+    }
+    wt = git.worktree(cfg, g.id)
+    assert wt.exists()
+    assert (wt / "a.py").read_text() == "1"
     assert not log.done()
 
 
-def test_red_twice_escalates_and_keeps_worktree(
+def test_red_gate_juror_cap_notifies_owner_and_keeps_worktree(
     green_cfg, log, fake_backend, capsys
 ) -> None:
-    cfg = replace(green_cfg, check_cmd=RED_UNTIL_FIXED)
-    g = make_group(make_step("s1", ["a.py"]))
-    with pytest.raises(Escalated):
-        loop.run_group(cfg, g, log, fake_backend([{"a.py": "1"}, {"a.py": "2"}]))
-    assert "[red_twice] g1:" in capsys.readouterr().err
-    assert (cfg.worktree_root / "g1").exists()
-
-
-def test_red_line_outside_group_is_a_ruling(green_cfg, log, fake_backend) -> None:
-    cfg = replace(green_cfg, check_cmd=["sh", "-c", "echo other.py:3 bad; exit 1"])
-    g = make_group(make_step("s1", ["a.py"]))
-    with pytest.raises(RulingNeeded):
-        loop.run_group(cfg, g, log, fake_backend([{"a.py": "1"}]))
-
-
-def test_red_without_path_is_a_ruling(green_cfg, log, fake_backend) -> None:
-    cfg = replace(green_cfg, check_cmd=["sh", "-c", "echo broken; exit 1"])
-    g = make_group(make_step("s1", ["a.py"]))
-    with pytest.raises(RulingNeeded):
-        loop.run_group(cfg, g, log, fake_backend([{"a.py": "1"}]))
+    cfg = replace(green_cfg, check_cmd=RED_UNTIL_FIXED, juror_rounds=1)
+    g = make_group(
+        make_step("s1", ["a.py"]), design="docs/superpowers/specs/approved.md"
+    )
+    backend = fake_backend([{"a.py": "1"}], ["", "malformed verdict"])
+    with pytest.raises(RulingNeeded, match="verdict"):
+        loop.run_group(cfg, g, log, backend)
+    assert backend.agents == ["core-builder", "juror"]
+    assert log.kept("g1-group-check-juror-1").strip() == "malformed verdict"
+    wt = git.worktree(cfg, g.id)
+    resumed = fake_backend()
+    with pytest.raises(WrongTest, match="juror rounds exhausted"):
+        loop._gate(cfg, g, wt, EventLog(cfg), resumed)
+    assert resumed.agents == []
+    assert "[test_wrong] g1:" in capsys.readouterr().err
+    assert wt.exists()
+    assert log.kept("g1-check") == "a.py:1 bad\n"
+    assert not log.done()
 
 
 def test_nothing_changed_is_a_ruling(green_cfg, log, fake_backend) -> None:
@@ -985,12 +1015,14 @@ def test_upheld_batches_share_role_across_steps_and_keep_sources_separate(
         make_step("c", ["gauntlet/core/c.py"]),
         make_step("s", ["gauntlet/seams/s.py"], role="seam-builder"),
         make_step("t", ["tests/test_a.py"], role="test-writer"),
+        design="docs/superpowers/specs/approved.md",
     )
     wt = git.make_worktree(cfg, g.id)
     for step in g.steps:
         path = wt / step.paths[0]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("value = 1\n")
+    loop._steps(cfg, g, wt, log, fake_backend(), 0)
     (wt / "gauntlet/core/c.py").write_text(
         "def c():\n    value = 1\n    return value\n"
     )
@@ -1008,15 +1040,21 @@ def test_upheld_batches_share_role_across_steps_and_keep_sources_separate(
     log.keep(diff_key, diff_report)
     log.keep(test_key, test_report)
     upheld = f"{core_a}\n{core_b}\n{core_c}\n{seam}\n{test}"
-    backend = fake_backend(token_counts=[11, 12, 13, 14])
-    with pytest.raises(RulingNeeded, match="needs judgment"):
+    owner_verdict = _undetermined("gauntlet/core/a.py:1")
+    backend = fake_backend(
+        outputs=["", "", "", "", owner_verdict],
+        token_counts=[11, 12, 13, 14, 15],
+    )
+    with pytest.raises(WrongTest, match="Need owner evidence"):
         loop.run_upheld(cfg, g, upheld, log, backend)
-    assert backend.briefs == [f"{core_a}\n{core_b}", core_c, seam, test]
+    assert backend.briefs[:4] == [f"{core_a}\n{core_b}", core_c, seam, test]
+    assert backend.briefs[4].startswith("judgment\n")
     assert backend.agents == [
         "core-builder",
         "core-builder",
         "seam-builder",
         "test-writer",
+        "juror",
     ]
     assert log.kept(f"{diff_key}-handled") == diff_report
     assert log.kept(f"{test_key}-handled") == test_report
@@ -1027,14 +1065,17 @@ def test_upheld_batches_share_role_across_steps_and_keep_sources_separate(
         json.loads(line)
         for line in (cfg.state_dir / "events.jsonl").read_text().splitlines()
     ]
-    records = [row for row in rows if row["kind"] == "dispatch"]
-    assert [row["load"] for row in records] == [2, 3, 1, 1]
-    assert [row["tokens"] for row in records] == [11, 12, 13, 14]
+    records = [
+        row for row in rows if row["kind"] == "dispatch" and row["tokens"] is not None
+    ]
+    assert [row["load"] for row in records] == [2, 3, 1, 1, None]
+    assert [row["tokens"] for row in records] == [11, 12, 13, 14, 15]
     # A continuation after the gate stop must not replay the handled rounds.
-    resumed = fake_backend()
-    with pytest.raises(RulingNeeded, match="needs judgment"):
+    resumed = fake_backend(outputs=[owner_verdict])
+    with pytest.raises(WrongTest, match="Need owner evidence"):
         loop.run_upheld(cfg, g, upheld, EventLog(cfg), resumed)
-    assert resumed.briefs == []
+    assert resumed.agents == ["juror"]
+    assert log.kept("g1-group-check-juror-2").strip() == owner_verdict
     assert not log.done()
 
 
@@ -1495,12 +1536,14 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
     if outcome == "bad-check":
         (wt / "bad-check").touch()
     backend = Spy(
-        [
-            {"tests/test_a.py": "approved"},
-            {"a.py": "first fresh"},
-            {"a.py": "second fresh"},
-        ],
-        ["invalid evidence" if outcome == "bad-report" else _red_report(new_id)],
+        [{"tests/test_a.py": "approved"}]
+        + (
+            [{"a.py": "first fresh"}, {"a.py": "second fresh"}]
+            if outcome == "success"
+            else []
+        ),
+        ["invalid evidence" if outcome == "bad-report" else _red_report(new_id)]
+        + ([_undetermined()] if outcome == "bad-check" else []),
     )
     if outcome == "success":
         loop._follow_verdict(cfg, group, judgment, wt, log, backend, verdict)
@@ -1512,10 +1555,23 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
         assert (wt / "a.py").read_text() == "second fresh"
         assert loop._red_ids(group, 4, wt, EventLog(cfg)) == [new_id]
     else:
-        with pytest.raises(RulingNeeded):
+        expected = WrongTest if outcome == "bad-check" else RulingNeeded
+        with pytest.raises(expected):
             loop._follow_verdict(cfg, group, judgment, wt, log, backend, verdict)
-        assert backend.briefs == [original_brief]
+        assert backend.briefs[0] == original_brief
+        if outcome == "bad-check":
+            assert backend.agents == ["test-writer", "juror"]
+            assert backend.briefs[1].startswith("judgment\n")
+            failed = json.loads(log.kept("g1-red-judgment"))
+            assert failed["steps"] == ["red"]
+            assert str(cfg.state_dir / "g1-red-check.txt") in failed["reports"]
+        else:
+            assert backend.briefs == [original_brief]
         assert log.kept("g1-red-evidence") == ""
+        assert (wt / "a.py").read_text() == "original"
+        for index in (1, 3, 4):
+            with pytest.raises(RulingNeeded, match="no current successful evidence"):
+                loop._red_ids(group, index, wt, EventLog(cfg))
     assert {name: log.kept(f"g1-{name}-before") for name in snapshots} == snapshots
     assert (wt / "keep.py").read_text() == "preserve"
 
