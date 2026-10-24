@@ -1,0 +1,223 @@
+# Gauntlet M2, Order steps 1-3g, in validated role/shape/form format.
+# Build selectors resolve from each referenced red producer report.
+
+[groups.g1]
+steps = ["1", "2", "3"]
+design = "docs/superpowers/specs/m2-launcher-kinds-design.md"
+after = []
+
+[steps.1]
+role = "core-builder"
+shape = "stub"
+paths = ["gauntlet/core/errors.py"]
+
+[steps.1.form]
+step = """1 stub | core-builder | gauntlet/core/errors.py | New typed constructors raise only.
+class ProcessError(GauntletError):
+    operation: str
+    status: int | None
+    reason: str
+
+    def __init__(self, operation: str, status: int | None, reason: str) -> None: ...
+
+
+class LaunchError(GauntletError):
+    component: str
+    reason: str
+
+    def __init__(self, component: str, reason: str) -> None: ..."""
+
+[steps.2]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_core_errors.py"]
+views = ["gauntlet/core/errors.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_core_errors.py"]
+expect_code = 1
+
+[steps.2.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-design.md", steps = ["2"] }
+
+[[steps.2.form.behaviors]]
+text = "New errors preserve safe data and hierarchy."
+source = "gauntlet/core/errors.py"
+
+[[steps.2.form.behaviors]]
+text = "Errors carry safe operation identifiers and bounded reasons, not credentials, request bodies, inherited environments or arbitrary process output."
+source = "gauntlet/core/errors.py"
+
+[steps.3]
+role = "core-builder"
+shape = "build"
+paths = ["gauntlet/core/errors.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_core_errors.py"]
+
+[steps.3.form]
+step = """docs/superpowers/specs/m2-launcher-kinds-design.md, Order step 3
+3 build | core-builder | gauntlet/core/errors.py | Typed-error constructor and hierarchy tests must pass."""
+red = [{ step = "2" }]
+
+[groups.g2]
+steps = ["3a", "3b", "3c"]
+design = "docs/superpowers/specs/m2-launcher-kinds-design.md"
+after = ["g1"]
+
+[steps.3a]
+role = "seam-builder"
+shape = "stub"
+paths = ["gauntlet/seams/readiness.py"]
+
+[steps.3a.form]
+step = """3a stub | seam-builder | gauntlet/seams/readiness.py | Complete Clock/Readiness interfaces before process consumers.
+type Ready = Callable[[float | None], bool]
+
+
+class Clock(Protocol):
+    def wait(self, ready: Ready, seconds: float | None) -> bool: ...
+
+
+class SystemClock:
+    def wait(self, ready: Ready, seconds: float | None) -> bool: ...
+
+
+SYSTEM: Clock
+
+
+class Readiness(Protocol):
+    def unix(
+        self, path: Path, *, seconds: int, start: Callable[[float], None]
+    ) -> None: ...
+    def tcp(
+        self, host: str, port: int, *, seconds: int, start: Callable[[float], None]
+    ) -> None: ...
+
+
+class SocketReadiness:
+    def __init__(self, *, clock: Clock = SYSTEM) -> None: ...
+    def unix(
+        self, path: Path, *, seconds: int, start: Callable[[float], None]
+    ) -> None: ...
+    def tcp(
+        self, host: str, port: int, *, seconds: int, start: Callable[[float], None]
+    ) -> None: ..."""
+
+[steps.3b]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_seams_readiness.py"]
+views = ["gauntlet/seams/readiness.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_readiness.py"]
+expect_code = 1
+
+[steps.3b.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-design.md", steps = ["3b"] }
+
+[[steps.3b.form.behaviors]]
+text = "The start callback and socket events share one deadline."
+source = "gauntlet/seams/readiness.py"
+
+[[steps.3b.form.behaviors]]
+text = "Expiry and cleanup fail against stubs using VirtualClock."
+source = "gauntlet/seams/readiness.py"
+
+[steps.3c]
+role = "seam-builder"
+shape = "build"
+paths = ["gauntlet/seams/readiness.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_readiness.py"]
+
+[steps.3c.form]
+step = """docs/superpowers/specs/m2-launcher-kinds-design.md, Order step 3c
+3c build | seam-builder | gauntlet/seams/readiness.py | Shared startup-budget, socket-event, expiry and probe-cleanup tests must pass."""
+red = [{ step = "3b" }]
+
+[groups.g3]
+steps = ["3d", "3e-core-config", "3e-core-codec", "3e-seams-config", "3f", "3g"]
+design = "docs/superpowers/specs/m2-launcher-kinds-design.md"
+after = ["g1"]
+
+[steps.3d]
+role = "core-builder"
+shape = "stub"
+paths = ["gauntlet/core/records.py"]
+
+[steps.3d.form]
+step = """3d declaration | core-builder | gauntlet/core/records.py | Add ProxyLimits, ProxyRoute, DEFAULT_PROXY_ROUTES, the ten-second readiness default and all three Config fields."""
+
+[steps.3e-core-config]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_core_config.py"]
+views = ["gauntlet/core/records.py", "gauntlet/core/config.py"]
+check = ["uv", "run", "pytest", "-q", "--continue-on-collection-errors", "tests/test_core_config.py"]
+expect_code = 1
+
+[steps.3e-core-config.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-design.md", steps = ["3e"] }
+
+[[steps.3e-core-config.form.behaviors]]
+text = "readiness_timeout_seconds and every proxy limit are positive integers, excluding bool. Reject zero, negative, noninteger and boolean values at $.readiness_timeout_seconds or $.proxy_limits.<field>; reject unknown mapping members and a nonobject mapping. config_problems reports the same constraints for direct records."
+source = "gauntlet/core/config.py"
+
+[[steps.3e-core-config.form.behaviors]]
+text = "Require uppercase HTTP-token methods and exact origin-form paths without query, fragment, wildcard, credentials, traversal or ambiguous encoding. Query names are nonempty literal names without URI delimiters or controls. Reject unknown fields, invalid types and duplicate method/path entries within the extension list at $.proxy_extra_routes[index].<field>. config_problems applies the same constraints to direct records."
+source = "gauntlet/core/config.py"
+
+[[steps.3e-core-config.form.behaviors]]
+text = "Missing values use the canonical defaults."
+source = "gauntlet/core/records.py"
+
+[steps.3e-core-codec]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_core_codec.py"]
+views = ["gauntlet/core/codec.py"]
+check = ["uv", "run", "pytest", "-q", "--continue-on-collection-errors", "tests/test_core_codec.py"]
+expect_code = 1
+
+[steps.3e-core-codec.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-design.md", steps = ["3e"] }
+
+[[steps.3e-core-codec.form.behaviors]]
+text = "Round-trip readiness_timeout_seconds, proxy_limits and proxy_extra_routes with State.config through the existing dataclass codec. Existing schema/version and missing-field rules remain; these settings add no separate config wire format."
+source = "gauntlet/core/codec.py"
+
+[steps.3e-seams-config]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_seams_config.py"]
+views = ["gauntlet/seams/config.py"]
+check = ["uv", "run", "pytest", "-q", "--continue-on-collection-errors", "tests/test_seams_config.py"]
+expect_code = 1
+
+[steps.3e-seams-config.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-design.md", steps = ["3e"] }
+
+[[steps.3e-seams-config.form.behaviors]]
+text = "gauntlet.yaml accepts readiness_timeout_seconds, shared by proxy and relay startup, and an optional proxy_limits mapping. Missing mapping members retain 64 KiB headers, 32 MiB streamed request bodies and eight concurrent requests per sidecar."
+source = "gauntlet/seams/config.py"
+
+[[steps.3e-seams-config.form.behaviors]]
+text = "gauntlet.yaml also accepts proxy_extra_routes, an optional list of objects with required method and path and optional query_parameters. Omission adds no routes."
+source = "gauntlet/seams/config.py"
+
+[steps.3f]
+role = "core-builder"
+shape = "build"
+paths = ["gauntlet/core/config.py", "gauntlet/core/codec.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_core_config.py", "tests/test_core_codec.py", "tests/test_seams_config.py"]
+
+[steps.3f.form]
+step = """3f build | core-builder | gauntlet/core/config.py, gauntlet/core/codec.py | All three config settings and both proxy records pass catalog/validation tests through canonical defaults, proxy_limits_from_json and proxy_routes_from_json."""
+red = [{ step = "3e-core-config", files = ["tests/test_core_config.py"] }, { step = "3e-core-codec", files = ["tests/test_core_codec.py"] }]
+
+[steps.3g]
+role = "test-writer"
+shape = "port"
+paths = ["tests/support/answers.py", "tests/test_support_answers.py"]
+views = ["gauntlet/core/records.py", "gauntlet/core/causes.py", "gauntlet/core/design.py", "gauntlet/core/verdicts.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_support_answers.py"]
+
+[steps.3g.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-design.md", steps = ["3g"] }
+sources = ["gauntlet/core/records.py", "gauntlet/core/causes.py", "gauntlet/core/design.py", "gauntlet/core/verdicts.py"]

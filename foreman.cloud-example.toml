@@ -1,0 +1,18 @@
+target_repo = "~/dev/gauntlet/.claude/worktrees/m1-build"
+worktree_root = "~/dev/foreman-worktrees"
+state_dir = "~/dev/foreman/state"
+check_cmd = ["make", "check"]
+format_cmd = ["uv", "run", "ruff", "format"]
+backend = "codex-local"
+view_cmd = ["uv", "run", "stubgen"]
+view_root = "~/dev/foreman-views"
+batch_budget = 300
+dispatch_seconds = 600
+
+[[reviewers]]
+role = "diff-reviewer"
+paths = ["gauntlet", "gates", "pyproject.toml", "uv.lock", "Makefile", ".pre-commit-config.yaml", ".gitignore", "conftest.py", "tests/support"]
+
+[[reviewers]]
+role = "test-reviewer"
+paths = ["tests"]
