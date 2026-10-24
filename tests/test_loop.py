@@ -1789,21 +1789,310 @@ def test_judgment_group_rejects_missing_spec_or_stale_evidence(
 
 
 def test_judgment_group_verdict_return_keeps_landing_blocked(
-    green_cfg, log, fake_backend, monkeypatch
+    green_cfg, log, fake_backend, capsys
 ):
-    cfg = replace(green_cfg, check_cmd=["false"])
+    cfg = replace(green_cfg, check_cmd=["false"], juror_rounds=2)
     group = make_group(
-        make_step("stub", ["a.py"]), design="docs/superpowers/specs/approved.md"
+        make_step("build", ["a.py"], form=forms.Build("core-builder", "Build it", ())),
+        design="docs/superpowers/specs/approved.md",
     )
-    backend = fake_backend([{"a.py": "stub"}])
-    judged = []
-
-    def return_from_judgment(cfg, group, context, judgment, wt, log, backend):
-        judged.append(context)
-
-    monkeypatch.setattr(loop, "_judge", return_from_judgment)
-    with pytest.raises(RulingNeeded, match="group-check continuation"):
+    verdict = (
+        "VERDICT build wrong\nACTION retry\nSTEP build\nREASON Fix implementation\n"
+        "EVIDENCE a.py:1 | still broken\nEND JUDGMENT"
+    )
+    backend = fake_backend(
+        [
+            {"a.py": "broken"},
+            {},
+            {"a.py": "still broken"},
+            {},
+            {"a.py": "broken again"},
+        ],
+        ["", verdict, "", verdict],
+    )
+    with pytest.raises(WrongTest, match="juror rounds exhausted"):
         loop.run_group(cfg, group, log, backend)
-    assert judged == ["group-check"]
+    assert backend.agents == [
+        "core-builder",
+        "juror",
+        "core-builder",
+        "juror",
+        "core-builder",
+    ]
+    assert log.kept("g1-group-check-juror-2").rstrip() == verdict
+    resumed = fake_backend()
+    with pytest.raises(WrongTest, match="juror rounds exhausted"):
+        loop._gate(cfg, group, git.worktree(cfg, group.id), EventLog(cfg), resumed)
+    assert resumed.agents == []
+    assert "[test_wrong] g1:" in capsys.readouterr().err
     assert git.worktree(cfg, group.id).exists()
     assert not log.done()
+
+
+def test_group_retry_replays_dependent_writes_and_preserves_unrelated(
+    green_cfg, origin, log, fake_backend
+):
+    cfg = replace(green_cfg, check_cmd=["sh", "-c", 'test "$(cat a.py)" = final'])
+    group = make_group(
+        make_step(
+            "build",
+            ["a.py"],
+            form=forms.Build("core-builder", "Build first", ()),
+            check=["true"],
+        ),
+        make_step("unrelated", ["keep.py"]),
+        make_step(
+            "dependent",
+            ["a.py", "extra.py"],
+            form=forms.Build("core-builder", "Build later", ()),
+            check=["true"],
+        ),
+        design="docs/superpowers/specs/approved.md",
+    )
+    verdict = (
+        "VERDICT build wrong\nACTION retry\nSTEP build\nREASON Fix implementation\n"
+        "EVIDENCE a.py:1 | initial build was wrong\nEND JUDGMENT"
+    )
+
+    class Spy(fake_backend):
+        def start(self, text, worktree, agent):
+            if len(self.briefs) == 4:
+                assert not (worktree / "a.py").exists()
+                assert not (worktree / "extra.py").exists()
+                assert (worktree / "keep.py").read_text() == "keep"
+            if len(self.briefs) == 5:
+                assert (worktree / "a.py").read_text() == "fixed first"
+            return super().start(text, worktree, agent)
+
+    backend = Spy(
+        [
+            {"a.py": "first"},
+            {"keep.py": "keep"},
+            {"a.py": "broken", "extra.py": "stale"},
+            {},
+            {"a.py": "fixed first"},
+            {"a.py": "final", "extra.py": "fresh"},
+        ],
+        ["", "", "", verdict],
+    )
+    commit = loop.run_group(cfg, group, log, backend)
+    assert backend.agents == [
+        "core-builder",
+        "core-builder",
+        "core-builder",
+        "juror",
+        "core-builder",
+        "core-builder",
+    ]
+    assert backend.briefs[-1] == backend.briefs[2]
+    assert "Fix implementation" in backend.briefs[-2]
+    assert run_ok(["git", "show", f"{commit}:keep.py"], origin).out == "keep"
+    assert run_ok(["git", "show", f"{commit}:extra.py"], origin).out == "fresh"
+    assert log.done() == {"g1"}
+
+
+@pytest.mark.parametrize("action", ["repair", "redo red"])
+def test_group_test_fix_resumes_affected_checks_only(
+    green_cfg, origin, log, fake_backend, monkeypatch, action
+):
+    cfg = replace(
+        _viewing(green_cfg),
+        check_cmd=["sh", "-c", "grep -q 'value = 2' tests/test_a.py"],
+    )
+    old_id = "tests/test_a.py::test_value"
+    new_id = old_id if action == "repair" else "tests/test_a.py::test_new_value"
+    original = "def test_value():\n    value = 1\n    assert value == 2\n"
+    repaired = original.replace("value = 1", "value = 2")
+    if action == "redo red":
+        repaired = repaired.replace("test_value", "test_new_value")
+    producer = make_step(
+        "red",
+        ["tests/test_a.py"],
+        views=["a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        check=["false"],
+        expect_code=1,
+    )
+
+    def build(name, source):
+        return make_step(
+            name,
+            [source],
+            form=forms.Build(
+                "core-builder", f"Build {name}", (forms.RedSelection("red"),)
+            ),
+            check=["true"],
+        )
+
+    group = make_group(
+        make_step("stub", ["a.py"]),
+        producer,
+        build("first", "a.py"),
+        build("second", "b.py"),
+        make_step(
+            "unrelated",
+            ["keep.py"],
+            form=forms.Build("core-builder", "Unrelated", ()),
+            check=["true"],
+        ),
+        design="docs/superpowers/specs/approved.md",
+    )
+    verdict = (
+        f"VERDICT tests wrong\nACTION {action}\nSTEP red\nREASON Fix approved tests\n"
+        "EVIDENCE tests/test_a.py:2 | wrong test input\n"
+        + ("FAILURE wrong fixture value\n" if action == "repair" else "")
+        + "END JUDGMENT"
+    )
+    files = [
+        {"a.py": "stub"},
+        {"tests/test_a.py": original},
+        {"a.py": "first"},
+        {"b.py": "second"},
+        {"keep.py": "preserve"},
+        {},
+        {"tests/test_a.py": repaired},
+    ]
+    outputs = [
+        "",
+        _red_report(old_id),
+        "",
+        "",
+        "",
+        verdict,
+        "RUN after all green" if action == "repair" else _red_report(new_id),
+    ]
+    if action == "redo red":
+        files += [{"a.py": "fresh first"}, {"b.py": "fresh second"}]
+    backend = fake_backend(files, outputs)
+    checked = []
+    original_check = loop.verify.check_step
+
+    def check(step, worktree):
+        checked.append(step.id)
+        return original_check(step, worktree)
+
+    monkeypatch.setattr(loop.verify, "check_step", check)
+    commit = loop.run_group(cfg, group, log, backend)
+    assert checked == ["stub", "red", "first", "second", "unrelated"] + (
+        ["red"] if action == "redo red" else []
+    ) + ["first", "second"]
+    assert backend.agents == [
+        "core-builder",
+        "test-writer",
+        "core-builder",
+        "core-builder",
+        "core-builder",
+        "juror",
+        "test-writer",
+    ] + (["core-builder", "core-builder"] if action == "redo red" else [])
+    if action == "redo red":
+        assert all(
+            new_id in text and old_id not in text for text in backend.briefs[-2:]
+        )
+    else:
+        assert log.kept("g1-red").rstrip() == _red_report(old_id)
+    assert run_ok(["git", "show", f"{commit}:keep.py"], origin).out == "preserve"
+    assert log.done() == {"g1"}
+
+
+@pytest.mark.parametrize("action", ["repair", "redo red"])
+def test_group_test_fix_keeps_transitive_completed_dependents(
+    green_cfg, origin, log, fake_backend, action
+):
+    cfg = replace(
+        green_cfg,
+        view_cmd=["sh", "-c", 'mkdir -p "$2" && touch "$2/a.pyi" "$2/b.pyi"', "sh"],
+        check_cmd=["sh", "-c", "grep -q 'value = 2' tests/test_a.py"],
+    )
+    test_id = "tests/test_a.py::test_value"
+    original = "def test_value():\n    value = 1\n    assert value == 2\n"
+    producer = make_step(
+        "red",
+        ["tests/test_a.py"],
+        views=["a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        check=["false"],
+        expect_code=1,
+    )
+    build = make_step(
+        "build",
+        ["a.py"],
+        form=forms.Build(
+            "core-builder", "Build implementation", (forms.RedSelection("red"),)
+        ),
+        check=["sh", "-c", "grep -q 'value = 1' tests/test_a.py || grep -q fixed a.py"],
+    )
+    dependent = make_step(
+        "dependent",
+        ["b.py"],
+        views=["a.py"],
+        form=forms.Build("core-builder", "Build dependent", ()),
+        check=["true"],
+    )
+    transitive = make_step(
+        "transitive",
+        ["c.py"],
+        views=["b.py"],
+        form=forms.Build("core-builder", "Build transitive", ()),
+        check=["true"],
+    )
+    group = make_group(
+        make_step("stub", ["a.py"]),
+        producer,
+        build,
+        dependent,
+        transitive,
+        make_step("unrelated", ["keep.py"]),
+        design="docs/superpowers/specs/approved.md",
+    )
+    verdict = (
+        f"VERDICT tests wrong\nACTION {action}\nSTEP red\nREASON Fix tests\nEVIDENCE tests/test_a.py:2 | fixture wrong\n"
+        + ("FAILURE wrong fixture\n" if action == "repair" else "")
+        + "END JUDGMENT"
+    )
+    retry = "VERDICT build wrong\nACTION retry\nSTEP build\nREASON Fix implementation\nEVIDENCE a.py:1 | implementation wrong\nEND JUDGMENT"
+    files = [
+        {"a.py": "stub"},
+        {"tests/test_a.py": original},
+        {"a.py": "initial"},
+        {"b.py": "old"},
+        {"c.py": "old"},
+        {"keep.py": "preserve"},
+        {},
+        {"tests/test_a.py": original.replace("value = 1", "value = 2")},
+    ]
+    outputs = [
+        "",
+        _red_report(test_id),
+        "",
+        "",
+        "",
+        "",
+        verdict,
+        "RUN after all green" if action == "repair" else _red_report(test_id),
+    ]
+    if action == "repair":
+        files.append({})
+        outputs.append(retry)
+    files += [{"a.py": "fixed"}, {"b.py": "fresh"}, {"c.py": "fresh"}]
+    backend = fake_backend(files, outputs)
+    commit = loop.run_group(cfg, group, log, backend)
+    assert backend.agents == [
+        "core-builder",
+        "test-writer",
+        "core-builder",
+        "core-builder",
+        "core-builder",
+        "core-builder",
+        "juror",
+        "test-writer",
+    ] + (["juror"] if action == "repair" else []) + [
+        "core-builder",
+        "core-builder",
+        "core-builder",
+    ]
+    assert run_ok(["git", "show", f"{commit}:b.py"], origin).out == "fresh"
+    assert run_ok(["git", "show", f"{commit}:c.py"], origin).out == "fresh"
+    assert run_ok(["git", "show", f"{commit}:keep.py"], origin).out == "preserve"

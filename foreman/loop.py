@@ -219,15 +219,8 @@ def _step(
         judgment = _judgment(group, index, wt, log)
         _judge(cfg, group, step.id, judgment, wt, log, backend)
         return
-    verdict = verify.check_step(step, wt)
-    if verdict is not None:
-        path = log.keep(f"{group.id}-{step.id}-check", _text(verdict.result))
-        if verdict.result.code == TIMEOUT_CODE:
-            raise _rule(log, group, wt, str(path), f"step {step.id} check timed out")
-        if not verdict.green:
-            judgment = _judgment(group, index, wt, log, failure=str(path))
-            _judge(cfg, group, step.id, judgment, wt, log, backend)
-            return
+    if not _check_step(cfg, group, index, wt, log, backend):
+        return
     if isinstance(step.form, forms.Red):
         name = f"{group.id}-{step.id}"
         try:
@@ -236,6 +229,30 @@ def _step(
             raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
         log.keep(f"{name}-evidence", _producer_identity(step))
         log.keep(f"{name}-repair-evidence", "")
+
+
+def _check_step(
+    cfg: Config,
+    group: Group,
+    index: int,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+    *,
+    completed: bool = False,
+) -> bool:
+    """Check a dispatched or repaired build through the same judgment path."""
+    step = group.steps[index]
+    verdict = verify.check_step(step, wt)
+    if verdict is not None:
+        path = log.keep(f"{group.id}-{step.id}-check", _text(verdict.result))
+        if verdict.result.code == TIMEOUT_CODE:
+            raise _rule(log, group, wt, str(path), f"step {step.id} check timed out")
+        if not verdict.green:
+            judgment = _judgment(group, index, wt, log, failure=str(path))
+            _judge(cfg, group, step.id, judgment, wt, log, backend, completed=completed)
+            return False
+    return True
 
 
 def _judgment(
@@ -318,6 +335,8 @@ def _judge(
     wt: Path,
     log: EventLog,
     backend: Backend,
+    *,
+    completed: bool = False,
 ) -> None:
     """Reserve attempts before launch so restarts cannot reset the cap."""
     number = 1
@@ -337,7 +356,16 @@ def _judge(
         verdict = reports.verdict(log.kept(name))
     except ConfigError as error:
         raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
-    _follow_verdict(cfg, group, judgment, wt, log, backend, verdict)
+    _follow_verdict(
+        cfg,
+        group,
+        judgment,
+        wt,
+        log,
+        backend,
+        verdict,
+        completed=completed or context == "group-check",
+    )
 
 
 def _follow_verdict(
@@ -348,6 +376,8 @@ def _follow_verdict(
     log: EventLog,
     backend: Backend,
     verdict: reports.Verdict,
+    *,
+    completed: bool = False,
 ) -> None:
     """Follow a decoded verdict; never substitute a local fault decision."""
     for evidence in verdict.evidence:
@@ -388,20 +418,38 @@ def _follow_verdict(
                 ", ".join(judgment.reports),
                 "retry target is not a build",
             )
+        replay = _dependent_steps(group, target) if completed else [target]
+        snapshots = []
         try:
-            before = log.kept(f"{group.id}-{step.id}-before")
+            for index in replay:
+                snapshots.append(log.kept(f"{group.id}-{group.steps[index].id}-before"))
         except ConfigError as error:
             raise _rule(
                 log, group, wt, ", ".join(judgment.reports), str(error)
             ) from error
-        git.restore(wt, before, step.paths)
-        _step(cfg, group, target, wt, log, backend, juror_reasons=verdict.reasons)
+        for index in replay:
+            if isinstance(group.steps[index].form, forms.Red):
+                log.keep(f"{group.id}-{group.steps[index].id}-evidence", "")
+        for index, snapshot in reversed(list(zip(replay, snapshots))):
+            git.restore(wt, snapshot, group.steps[index].paths)
+        for index in replay:
+            _step(
+                cfg,
+                group,
+                index,
+                wt,
+                log,
+                backend,
+                juror_reasons=verdict.reasons if index == target else (),
+            )
         return
     if verdict.kind == "tests wrong" and verdict.action == "repair":
-        _repair(cfg, group, target, judgment, wt, log, backend, verdict)
+        _repair(
+            cfg, group, target, judgment, wt, log, backend, verdict, completed=completed
+        )
         return
     if verdict.kind == "tests wrong" and verdict.action == "redo red":
-        _redo_red(cfg, group, target, judgment, wt, log, backend)
+        _redo_red(cfg, group, target, judgment, wt, log, backend, completed=completed)
         return
     raise _rule(
         log,
@@ -412,6 +460,28 @@ def _follow_verdict(
     )
 
 
+def _dependent_steps(group: Group, target: int) -> list[int]:
+    """Follow declared input and output dependencies in group order."""
+    replay = [target]
+    affected_paths = list(group.steps[target].paths)
+    affected_ids = {group.steps[target].id}
+    for index in range(target + 1, len(group.steps)):
+        later = group.steps[index]
+        dependencies = later.paths + later.views
+        # Compare both directions for directory-sized path declarations.
+        overlaps = any(
+            steps.holds(affected_paths, path) for path in dependencies
+        ) or any(steps.holds(dependencies, path) for path in affected_paths)
+        consumes = isinstance(later.form, forms.Build) and any(
+            selection.step in affected_ids for selection in later.form.red
+        )
+        if overlaps or consumes:
+            replay.append(index)
+            affected_paths.extend(later.paths)
+            affected_ids.add(later.id)
+    return replay
+
+
 def _redo_red(
     cfg: Config,
     group: Group,
@@ -420,6 +490,8 @@ def _redo_red(
     wt: Path,
     log: EventLog,
     backend: Backend,
+    *,
+    completed: bool = False,
 ) -> None:
     """Replace producer evidence and replay its started dependent builds."""
     producer = group.steps[target]
@@ -432,11 +504,13 @@ def _redo_red(
     except ConfigError as error:
         raise _rule(log, group, wt, kept, str(error)) from error
     dependents = []
+    affected = set(_dependent_steps(group, target)) if completed else set()
     for index in range(target + 1, len(group.steps)):
         step = group.steps[index]
-        if not isinstance(step.form, forms.Build) or not any(
+        consumes = isinstance(step.form, forms.Build) and any(
             selection.step == producer.id for selection in step.form.red
-        ):
+        )
+        if index not in affected and not consumes:
             continue
         try:
             snapshot = log.kept(f"{group.id}-{step.id}-before")
@@ -448,6 +522,9 @@ def _redo_red(
     # restoration, view generation, dispatch, report validation or red check.
     log.keep(f"{name}-evidence", "")
     log.keep(f"{name}-repair-evidence", "")
+    for index, _ in dependents:
+        if isinstance(group.steps[index].form, forms.Red):
+            log.keep(f"{group.id}-{group.steps[index].id}-evidence", "")
     for index, snapshot in reversed(dependents):
         git.restore(wt, snapshot, group.steps[index].paths)
     git.restore(wt, before, producer.paths)
@@ -465,6 +542,8 @@ def _repair(
     log: EventLog,
     backend: Backend,
     verdict: reports.Verdict,
+    *,
+    completed: bool = False,
 ) -> None:
     """Repair machinery against preserved producer evidence, then retry its build."""
     producer = group.steps[target]
@@ -481,14 +560,16 @@ def _repair(
         ),
         None,
     )
-    if stopped is None:
+    if stopped is None and not completed:
         raise _rule(log, group, wt, kept, "repair has no stopped build")
-    build = group.steps[stopped]
     try:
         if log.kept(f"{name}-evidence") != _producer_identity(producer):
             raise ConfigError("repair producer has no current successful evidence")
         ids = tuple(item.test_id for item in _red_evidence(producer, log.kept(name)))
-        before_build = log.kept(f"{group.id}-{build.id}-before")
+        if not completed:
+            assert stopped is not None
+            build = group.steps[stopped]
+            before_build = log.kept(f"{group.id}-{build.id}-before")
         original = verify.capture_repair(wt, ids)
         fingerprint = json.dumps(asdict(original), sort_keys=True)
         try:
@@ -529,8 +610,16 @@ def _repair(
         verify.validate_repair(original, wt)
     except RulingNeeded as error:
         raise _rule(log, group, wt, f"{repair_name}.txt", str(error)) from error
-    git.restore(wt, before_build, build.paths)
-    _step(cfg, group, stopped, wt, log, backend)
+    if completed:
+        for index, step in enumerate(group.steps):
+            if isinstance(step.form, forms.Build) and any(
+                selection.step == producer.id for selection in step.form.red
+            ):
+                _check_step(cfg, group, index, wt, log, backend, completed=True)
+    else:
+        assert stopped is not None
+        git.restore(wt, before_build, build.paths)
+        _step(cfg, group, stopped, wt, log, backend)
 
 
 def _test_owner(
@@ -551,15 +640,15 @@ def _test_owner(
 
 
 def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) -> None:
-    verdict = verify.verify(cfg, wt)
-    path = log.keep(f"{group.id}-check", _text(verdict.result))
-    if verdict.result.code == TIMEOUT_CODE:
-        raise _rule(log, group, wt, str(path), "combined-tree check timed out")
-    if verdict.green:
-        return
-    judgment = _judgment(group, None, wt, log, failure=str(path))
-    _judge(cfg, group, "group-check", judgment, wt, log, backend)
-    raise _rule(log, group, wt, str(path), "group-check continuation awaits step 19c")
+    while True:
+        verdict = verify.verify(cfg, wt)
+        path = log.keep(f"{group.id}-check", _text(verdict.result))
+        if verdict.result.code == TIMEOUT_CODE:
+            raise _rule(log, group, wt, str(path), "combined-tree check timed out")
+        if verdict.green:
+            return
+        judgment = _judgment(group, None, wt, log, failure=str(path))
+        _judge(cfg, group, "group-check", judgment, wt, log, backend)
 
 
 def _review(
