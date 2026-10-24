@@ -25,12 +25,16 @@ def _rule(log: EventLog, group: Group, wt: Path, kept: str, why: str) -> RulingN
     return RulingNeeded(text)
 
 
-def _text(result: Result) -> str:
-    """Output, then any stderr after a blank line so it never joins a findings block."""
-    out = (
+def _stdout(result: Result) -> str:
+    """Keep stdout with a terminal newline when nonempty."""
+    return (
         result.out if result.out.endswith("\n") or not result.out else result.out + "\n"
     )
-    return out + (("\n" + result.err) if result.err else "")
+
+
+def _text(result: Result) -> str:
+    """Output, then any stderr after a blank line so it never joins a findings block."""
+    return _stdout(result) + (("\n" + result.err) if result.err else "")
 
 
 def _dispatch(
@@ -48,7 +52,8 @@ def _dispatch(
     log.keep(f"{name}-brief", brief_text)
     job = backend.start(brief_text, wt, role)
     result = backend.wait(job)
-    path = log.keep(name, _text(result))
+    path = log.keep(name, _stdout(result))
+    log.keep(f"{name}-stderr", result.err)
     report = None if result.code == TIMEOUT_CODE else reports.read(result)
     outcome = (
         "overran" if report is None else "done" if report.kind == "done" else "refused"

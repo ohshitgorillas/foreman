@@ -82,10 +82,13 @@ def test_overload_is_a_ruling(green_cfg, log, fake_backend) -> None:
     ],
 )
 def test_dispatch_records_returned_usage_and_outcome(
-    green_cfg, log, fake_backend, load, tokens, output, outcome
+    green_cfg, log, fake_backend, monkeypatch, load, tokens, output, outcome
 ) -> None:
     g = make_group(make_step())
     backend = fake_backend(outputs=[output], token_counts=[tokens], seconds=[2.75])
+    wait = backend.wait
+    diagnostic = "Reading additional input from stdin...\n"
+    monkeypatch.setattr(backend, "wait", lambda job: replace(wait(job), err=diagnostic))
     if outcome == "done":
         report = loop._dispatch(
             g,
@@ -128,11 +131,29 @@ def test_dispatch_records_returned_usage_and_outcome(
         "outcome": outcome,
     }
     assert log.kept("g1-s1") == output.rstrip("\n") + "\n"
+    assert log.kept("g1-s1-stderr") == diagnostic
     assert log.kept("g1-s1-brief") == "stub"
-    assert rows[1]["kind"] == "kept"
-    assert rows[2]["kind"] == "dispatch"
+    assert all(row["kind"] == "kept" for row in rows[:3])
+    assert rows[3]["kind"] == "dispatch"
     if outcome == "refused":
-        assert rows[3]["kind"] == "ruling_needed"
+        assert rows[4]["kind"] == "ruling_needed"
+
+
+def test_dispatch_refreshes_diagnostics_when_reusing_report_name(
+    green_cfg, log, fake_backend, monkeypatch
+):
+    group = make_group(make_step())
+    backend = fake_backend(outputs=["FINDINGS 0", "FINDINGS 0"])
+    wait = backend.wait
+    diagnostics = iter(["old diagnostic\n", ""])
+    monkeypatch.setattr(
+        backend, "wait", lambda job: replace(wait(job), err=next(diagnostics))
+    )
+    for expected in ("old diagnostic\n", ""):
+        loop._dispatch(
+            group, green_cfg.target_repo, log, backend, "g1-s1", "stub", "core-builder"
+        )
+        assert log.kept("g1-s1-stderr") == expected
 
 
 @pytest.mark.parametrize(
@@ -145,6 +166,10 @@ def test_timeout_records_overrun_and_stops_before_checks_or_next_dispatch(
     g = make_group(make_step("s1"), make_step("s2"))
     backend = fake_backend(
         outputs=[output], codes=[TIMEOUT_CODE], seconds=[600.5], token_counts=[27]
+    )
+    wait = backend.wait
+    monkeypatch.setattr(
+        backend, "wait", lambda job: replace(wait(job), err="timeout diagnostic\n")
     )
 
     def unexpected(*args, **kwargs):
@@ -160,6 +185,7 @@ def test_timeout_records_overrun_and_stops_before_checks_or_next_dispatch(
     assert str(green_cfg.state_dir / "g1-s1.txt") in str(stopped.value)
     assert backend.agents == ["core-builder"]
     assert log.kept("g1-s1") == output.rstrip("\n") + "\n"
+    assert log.kept("g1-s1-stderr") == "timeout diagnostic\n"
     rows = [
         json.loads(line)
         for line in (green_cfg.state_dir / "events.jsonl").read_text().splitlines()
@@ -618,7 +644,7 @@ def test_retest_requires_kept_owner_stop(green_cfg, log, fake_backend):
 
 
 def test_red_renders_generated_view_and_keeps_exact_dispatch(
-    green_cfg, log, fake_backend
+    green_cfg, log, fake_backend, monkeypatch
 ):
     cfg = _viewing(green_cfg)
     red = make_step(
@@ -634,11 +660,15 @@ def test_red_renders_generated_view_and_keeps_exact_dispatch(
     backend = fake_backend(
         [{"a.py": "stub"}, {"tests/test_a.py": "red"}], outputs=["", report]
     )
+    wait = backend.wait
+    diagnostic = "Reading additional input from stdin...\n"
+    monkeypatch.setattr(backend, "wait", lambda job: replace(wait(job), err=diagnostic))
     loop._steps(cfg, g, wt, log, backend, 0)
     expected = f"red\nbehavior: Preserve safe data.\nview: {cfg.view_root}/g1/a.pyi"
     assert backend.briefs[1] == expected
     assert log.kept("g1-red-brief") == expected
     assert log.kept("g1-red") == report + "\n"
+    assert log.kept("g1-red-stderr") == diagnostic
 
 
 @pytest.mark.parametrize("role", ["diff-reviewer", "test-reviewer"])
