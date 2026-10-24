@@ -4,14 +4,137 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from foreman import steps
+from foreman import forms, steps
 from foreman.errors import ConfigError
 from foreman.run import Result
 from foreman.steps import Group
 
 _REJECTED = "REJECTED: STEERING"
 _OVERLOADED = "OVERLOADED:"
-_PATH_LINE = re.compile(r"(?<![\w./-])((?:/|\./)?[\w.-]+(?:/[\w.-]+)*):\d+")
+_PATH_LINE = re.compile(r"((?:/|\./)?[\w.-]+(?:/[\w.-]+)*):[1-9][0-9]*(?=[:\s]|$)")
+
+
+@dataclass(frozen=True)
+class RedRun:
+    outcome: str
+    summary: str
+
+
+@dataclass(frozen=True)
+class RedEvidence:
+    test_id: str
+    behavior: int
+    red: RedRun
+    rerun: RedRun
+
+
+def _envelope(lines: list[str]) -> list[str]:
+    """Exclude quoted brief text and the diff/command payloads."""
+    out = []
+    in_brief = False
+    for line in lines:
+        key = line.partition(" ")[0]
+        if key in {"DIFF", "COMMANDS"}:
+            break
+        if key == "BRIEF":
+            in_brief = True
+            continue
+        if in_brief:
+            if key != "VIEWS":
+                continue
+            in_brief = False
+        out.append(line)
+    return out
+
+
+def red(text: str) -> tuple[RedEvidence, ...]:
+    """Read complete red evidence in BEHAVIOR order; fail closed on ambiguity.
+
+    ConfigError describes malformed producer evidence. The dispatch loop owns
+    turning that error into a stop naming the kept report.
+    """
+    raw = text.splitlines()
+    if not raw or raw[0] != "SHAPE red" or raw[-1] != "END TESTS":
+        raise ConfigError("red report: requires SHAPE red and terminal END TESTS")
+    envelope = _envelope(raw)
+    for key in ("SHAPE", "VIEWS", "BLOCKED", "GATE", "CHANGED", "STATUS"):
+        records = [line for line in envelope if line.partition(" ")[0] == key]
+        if len(records) != 1 or not records[0].startswith(key + " "):
+            raise ConfigError(f"red report: requires exactly one {key} record")
+    # These delimiters must exist in order, even though their payload is opaque.
+    keys = [line.partition(" ")[0] for line in raw]
+    if (
+        "BRIEF" not in keys
+        or "DIFF" not in keys
+        or "COMMANDS" not in keys
+        or not keys.index("BRIEF")
+        < keys.index("VIEWS")
+        < keys.index("DIFF")
+        < keys.index("COMMANDS")
+    ):
+        raise ConfigError("red report: incomplete report envelope")
+    if "BLOCKED none" not in envelope or any(
+        line.partition(" ")[0]
+        in {"LEFT", "UNTESTABLE", "CONTRADICTS", "REJECTED:", "OVERLOADED:"}
+        for line in envelope
+    ):
+        raise ConfigError("red report: blocked or incomplete red behaviors")
+    if not any(re.fullmatch(r"CHANGED [0-9]+", line) for line in envelope):
+        raise ConfigError("red report: invalid CHANGED count")
+
+    behaviors: dict[str, int] = {}
+    runs: dict[tuple[str, str], RedRun] = {}
+    for line in envelope:
+        key = line.partition(" ")[0]
+        if key == "BEHAVIOR":
+            match = re.fullmatch(
+                r"BEHAVIOR ([1-9][0-9]*) \| (.+?) \| docs: (.+?) \| breaks when: (.+)",
+                line,
+            )
+            if not match:
+                raise ConfigError("red report: malformed BEHAVIOR record")
+            number, test_id, _, _ = match.groups()
+            forms._test_id(test_id, "red report BEHAVIOR")
+            if test_id in behaviors:
+                raise ConfigError(f"red report: duplicate BEHAVIOR {test_id}")
+            behaviors[test_id] = int(number)
+        elif key == "RUN":
+            match = re.fullmatch(
+                r'RUN (red|rerun) \| (.+?) \| ([\w-]+) \| "(.+)"', line
+            )
+            if not match:
+                raise ConfigError("red report: malformed RUN record")
+            phase, test_id, outcome, summary = match.groups()
+            forms._test_id(test_id, "red report RUN")
+            if outcome not in {
+                "assertion",
+                "not-implemented",
+                "collection",
+                "test-error",
+                "passed",
+                "no-run",
+            }:
+                raise ConfigError("red report: unknown RUN outcome")
+            if (phase, test_id) in runs:
+                raise ConfigError(f"red report: duplicate RUN {phase} {test_id}")
+            runs[phase, test_id] = RedRun(outcome, summary)
+    if not behaviors:
+        raise ConfigError("red report: no new test evidence")
+    evidence = []
+    for test_id, number in behaviors.items():
+        first, second = runs.get(("red", test_id)), runs.get(("rerun", test_id))
+        if (
+            first is None
+            or second is None
+            or first.outcome not in {"assertion", "not-implemented"}
+            or second.outcome not in {"assertion", "not-implemented"}
+            or first.summary != second.summary
+        ):
+            raise ConfigError(
+                f"red report: missing or unstable red evidence for {test_id}"
+            )
+        evidence.append(RedEvidence(test_id, number, first, second))
+    return tuple(evidence)
 
 
 @dataclass(frozen=True)
@@ -37,7 +160,7 @@ def _block(lines: list[str], header: str) -> list[str]:
 
 
 def parse(text: str) -> Report:
-    lines = text.splitlines()
+    lines = _envelope(text.splitlines())
     if any(ln.startswith(_REJECTED) for ln in lines):
         kind = "rejected"
     elif any(ln.startswith(_OVERLOADED) for ln in lines):
@@ -76,22 +199,25 @@ def route(
     owned: dict[str, list[str]] = {}
     unowned: list[str] = []
     for line in lines:
-        found = [_relative(m.group(1), wt) for m in _PATH_LINE.finditer(line)]
-        if not found:
+        anchor = finding_anchor(line)
+        if anchor is None:
             continue
-        step = next(
-            (
-                s
-                for rel in found
-                if rel is not None and (s := steps.owner(group, rel)) is not None
-            ),
-            None,
-        )
+        rel = _relative(anchor, wt)
+        step = steps.owner(group, rel) if rel is not None else None
         if step is None:
             unowned.append(line)
         else:
             owned.setdefault(step.id, []).append(line)
     return owned, unowned
+
+
+def finding_anchor(line: str) -> str | None:
+    """Return the primary path only: reviewer field two or a gate prefix."""
+    fields = line.split(" | ")
+    match = _PATH_LINE.match(line)
+    if match is None and len(fields) > 1:
+        match = _PATH_LINE.fullmatch(fields[1])
+    return match.group(1) if match else None
 
 
 def upheld(text: str, kept: dict[str, Report]) -> dict[str, list[str]]:
