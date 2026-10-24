@@ -4,12 +4,11 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from foreman import backends, brief, forms, git, reports, steps, verify, views
+from foreman import backends, batches, brief, forms, git, reports, steps, verify, views
 from foreman.backends import Backend
 from foreman.config import Config, Reviewer
 from foreman.errors import (
     ConfigError,
-    Escalated,
     FindingsToRule,
     RulingNeeded,
     WrongTest,
@@ -233,30 +232,7 @@ def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) 
     path = log.keep(f"{group.id}-check", _text(verdict.result))
     if verdict.green:
         return
-    owned, unowned = reports.route(reports.lines(verdict.result), wt, group)
-    if unowned:
-        raise _rule(
-            log, group, wt, str(path), f"{len(unowned)} red lines name no group path"
-        )
-    if not owned:
-        raise _rule(log, group, wt, str(path), "red output names no path")
-    for step in group.steps:
-        if step.id in owned:
-            _dispatch(
-                group,
-                wt,
-                log,
-                backend,
-                f"{group.id}-{step.id}-finding",
-                brief.finding(owned[step.id]),
-                step.role,
-            )
-    verdict = verify.verify(cfg, wt)
-    path = log.keep(f"{group.id}-check-2", _text(verdict.result))
-    if not verdict.green:
-        text = f"red twice; kept {path}; worktree {wt}"
-        log.notify_dispatcher("red_twice", group.id, text)
-        raise Escalated(text)
+    raise _rule(log, group, wt, str(path), "combined-tree check needs judgment")
 
 
 def _review(
@@ -277,6 +253,7 @@ def _review(
                 where=f"groups.{group.id}.reviews.{reviewer.role}",
             )
         text = brief.render(form, paths=[], view_paths={}, red_ids=[])
+        log.keep(f"{name}-handled", "")
         report = _dispatch(group, wt, log, backend, name, text, reviewer.role)
         if report.findings:
             kept.append(name)
@@ -337,29 +314,53 @@ def run_upheld(
     upheld = reports.upheld(text, kept)
     if not upheld:
         return _land(cfg, group, wt, log)
+    pending = []
     for role, lines in upheld.items():
-        owned, unowned = reports.route(lines, wt, group)
-        placed = {ln for ls in owned.values() for ln in ls} | set(unowned)
-        stray = unowned + [ln for ln in lines if ln not in placed]
-        if stray:
+        name = f"{group.id}-review-{role}"
+        source = forms.ReviewerSource(role, name)
+        raw = log.kept(name)
+        try:
+            handled = log.kept(f"{name}-handled")
+        except ConfigError:
+            handled = ""
+        if handled == raw:
+            continue
+        cut, unowned = batches.cut(lines, source, group, wt, cfg.batch_budget)
+        if unowned:
             raise _rule(
                 log,
                 group,
                 wt,
-                f"{group.id}-review-{role}",
-                f"{len(stray)} upheld lines name no group path",
+                name,
+                f"{len(unowned)} upheld lines name no group path",
             )
-        for step in group.steps:
-            if step.id in owned:
-                _dispatch(
-                    group,
-                    wt,
-                    log,
-                    backend,
-                    f"{group.id}-{step.id}-upheld-{role}",
-                    brief.finding(owned[step.id]),
-                    step.role,
+        prepared = []
+        for number, batch in enumerate(cut, 1):
+            key = f"{name}-batch-{number}"
+            if batch.source != source or any(
+                line not in kept[role].findings or line not in lines
+                for line in batch.lines
+            ):
+                raise _rule(log, group, wt, name, "batch is outside its upheld source")
+            try:
+                form = forms.parse(
+                    batch.role,
+                    "finding",
+                    {
+                        "source": {"kind": source.kind, **asdict(source)},
+                        "lines": list(batch.lines),
+                    },
+                    where=key,
                 )
+            except ConfigError as error:
+                raise _rule(log, group, wt, name, str(error)) from error
+            text = brief.render(form, paths=[], view_paths={}, red_ids=[])
+            prepared.append((key, batch, text))
+        pending.append((name, raw, prepared))
+    for name, raw, prepared in pending:
+        for key, batch, text in prepared:
+            _dispatch(group, wt, log, backend, key, text, batch.role, load=batch.load)
+        log.keep(f"{name}-handled", raw)
     return _check_review_land(cfg, group, wt, log, backend)
 
 

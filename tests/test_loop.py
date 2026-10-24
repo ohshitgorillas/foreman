@@ -182,16 +182,18 @@ def test_step_check_matching_expect_code_passes(
     assert log.done() == {"g1"}
 
 
-def test_red_gate_sends_finding_to_owning_step(
-    green_cfg, origin, log, fake_backend
+def test_red_gate_keeps_evidence_and_stops_before_fix_dispatch(
+    green_cfg, log, fake_backend
 ) -> None:
     cfg = replace(green_cfg, check_cmd=RED_UNTIL_FIXED)
     g = make_group(make_step("s1", ["a.py"]), make_step("s2", ["b.py"]))
     backend = fake_backend([{"a.py": "1"}, {"b.py": "2"}, {"a.py": "fixed"}])
-    loop.run_group(cfg, g, log, backend)
-    assert backend.briefs[2] == "a.py:1 bad"
-    assert backend.agents[2] == "core-builder"
-    assert log.done() == {"g1"}
+    with pytest.raises(RulingNeeded, match="combined-tree check needs judgment"):
+        loop.run_group(cfg, g, log, backend)
+    assert len(backend.briefs) == 2
+    assert log.kept("g1-check") == "a.py:1 bad\n"
+    assert git.worktree(cfg, g.id).exists()
+    assert not log.done()
 
 
 def test_red_twice_escalates_and_keeps_worktree(
@@ -265,9 +267,15 @@ def test_reviewer_skipped_when_paths_unchanged(
 
 
 def _stopped_for_findings(green_cfg, log, fake_backend) -> Config:
-    cfg = _reviewed(green_cfg)
-    g = make_group(make_step("s1", ["a.py"]))
-    backend = fake_backend([{"a.py": "1"}], ["", "FINDINGS 1\n  a.py:1 wrong\n"])
+    cfg = replace(green_cfg, reviewers=[Reviewer("diff-reviewer", ["gauntlet/core"])])
+    g = make_group(make_step("s1", ["gauntlet/core/a.py"]))
+    backend = fake_backend(
+        [{"gauntlet/core/a.py": "1"}],
+        [
+            "",
+            "FINDINGS 1\n  misplaced | gauntlet/core/a.py:1 | wrong | fails when: called\n",
+        ],
+    )
     with pytest.raises(FindingsToRule):
         loop.run_group(cfg, g, log, backend)
     return cfg
@@ -275,10 +283,19 @@ def _stopped_for_findings(green_cfg, log, fake_backend) -> Config:
 
 def test_upheld_sends_lines_then_lands(green_cfg, origin, log, fake_backend) -> None:
     cfg = _stopped_for_findings(green_cfg, log, fake_backend)
-    g = make_group(make_step("s1", ["a.py"]))
-    backend = fake_backend([{"a.py": "2"}], ["", "FINDINGS 0\n"])
-    commit = loop.run_upheld(cfg, g, "a.py:1 wrong\n", log, backend)
-    assert backend.briefs[0] == "a.py:1 wrong"
+    g = make_group(make_step("s1", ["gauntlet/core/a.py"]))
+    backend = fake_backend([{"gauntlet/core/a.py": "2"}], ["", "FINDINGS 0\n"])
+    commit = loop.run_upheld(
+        cfg,
+        g,
+        "misplaced | gauntlet/core/a.py:1 | wrong | fails when: called\n",
+        log,
+        backend,
+    )
+    assert (
+        backend.briefs[0]
+        == "misplaced | gauntlet/core/a.py:1 | wrong | fails when: called"
+    )
     assert run_ok(["git", "rev-parse", "foreman/g1"], origin).out.strip() == commit
     assert log.done() == {"g1"}
     assert not (cfg.worktree_root / "g1").exists()
@@ -286,7 +303,7 @@ def test_upheld_sends_lines_then_lands(green_cfg, origin, log, fake_backend) -> 
 
 def test_upheld_nothing_lands_directly(green_cfg, origin, log, fake_backend) -> None:
     cfg = _stopped_for_findings(green_cfg, log, fake_backend)
-    g = make_group(make_step("s1", ["a.py"]))
+    g = make_group(make_step("s1", ["gauntlet/core/a.py"]))
     backend = fake_backend()
     loop.run_upheld(cfg, g, "", log, backend)
     assert backend.briefs == []
@@ -295,7 +312,7 @@ def test_upheld_nothing_lands_directly(green_cfg, origin, log, fake_backend) -> 
 
 def test_upheld_line_in_no_review_raises(green_cfg, log, fake_backend) -> None:
     cfg = _stopped_for_findings(green_cfg, log, fake_backend)
-    g = make_group(make_step("s1", ["a.py"]))
+    g = make_group(make_step("s1", ["gauntlet/core/a.py"]))
     with pytest.raises(ForemanError):
         loop.run_upheld(cfg, g, "a.py:9 invented\n", log, fake_backend())
 
@@ -947,4 +964,127 @@ def test_missing_red_report_stops_before_builder(green_cfg, log, fake_backend):
     backend = fake_backend()
     with pytest.raises(RulingNeeded, match="g1-red.txt"):
         loop._steps(green_cfg, make_group(red, build), wt, log, backend, 1)
+    assert backend.briefs == []
+
+
+def test_upheld_batches_share_role_across_steps_and_keep_sources_separate(
+    green_cfg, log, fake_backend
+):
+    cfg = replace(
+        green_cfg,
+        batch_budget=3,
+        check_cmd=["false"],
+        reviewers=[
+            Reviewer("diff-reviewer", ["gauntlet"]),
+            Reviewer("test-reviewer", ["tests"]),
+        ],
+    )
+    g = make_group(
+        make_step("a", ["gauntlet/core/a.py"]),
+        make_step("b", ["gauntlet/core/b.py"]),
+        make_step("c", ["gauntlet/core/c.py"]),
+        make_step("s", ["gauntlet/seams/s.py"], role="seam-builder"),
+        make_step("t", ["tests/test_a.py"], role="test-writer"),
+    )
+    wt = git.make_worktree(cfg, g.id)
+    for step in g.steps:
+        path = wt / step.paths[0]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("value = 1\n")
+    (wt / "gauntlet/core/c.py").write_text(
+        "def c():\n    value = 1\n    return value\n"
+    )
+    core_a = "misplaced | gauntlet/core/a.py:1 | wrong | fails when: called"
+    core_b = "drift | gauntlet/core/b.py:1 | wrong | fails when: called"
+    core_c = "shortcut | gauntlet/core/c.py:2 | wrong | fails when: called"
+    seam = "leftover | gauntlet/seams/s.py:1 | wrong | fails when: called"
+    test = "tests/test_a.py:1 wrong"
+    diff_key = "g1-review-diff-reviewer"
+    test_key = "g1-review-test-reviewer"
+    diff_report = "FINDINGS 4\n  " + "\n  ".join([core_a, core_c, core_b, seam]) + "\n"
+    test_report = f"FINDINGS 1\n  {test}\n"
+    log.keep(diff_key, diff_report)
+    log.keep(test_key, test_report)
+    upheld = "\n".join([core_a, core_b, core_c, seam, test])
+    backend = fake_backend(token_counts=[11, 12, 13, 14])
+    with pytest.raises(RulingNeeded, match="needs judgment"):
+        loop.run_upheld(cfg, g, upheld, log, backend)
+    assert backend.briefs == [f"{core_a}\n{core_b}", core_c, seam, test]
+    assert backend.agents == [
+        "core-builder",
+        "core-builder",
+        "seam-builder",
+        "test-writer",
+    ]
+    assert log.kept(f"{diff_key}-handled") == diff_report
+    assert log.kept(f"{test_key}-handled") == test_report
+    for number, text in enumerate(backend.briefs[:3], 1):
+        assert log.kept(f"{diff_key}-batch-{number}-brief") == text
+    assert log.kept(f"{test_key}-batch-1-brief") == test
+    rows = [
+        json.loads(line)
+        for line in (cfg.state_dir / "events.jsonl").read_text().splitlines()
+    ]
+    records = [row for row in rows if row["kind"] == "dispatch"]
+    assert [row["load"] for row in records] == [2, 3, 1, 1]
+    assert [row["tokens"] for row in records] == [11, 12, 13, 14]
+    # A continuation after the gate stop must not replay the handled rounds.
+    resumed = fake_backend()
+    with pytest.raises(RulingNeeded, match="needs judgment"):
+        loop.run_upheld(cfg, g, upheld, EventLog(cfg), resumed)
+    assert resumed.briefs == []
+    assert not log.done()
+
+
+@pytest.mark.parametrize("output", ["OVERLOADED: 6", "REJECTED: STEERING", "timeout"])
+def test_upheld_round_is_not_handled_until_every_batch_returns(
+    green_cfg, log, fake_backend, output
+):
+    cfg = replace(
+        green_cfg,
+        batch_budget=1,
+        reviewers=[Reviewer("diff-reviewer", ["gauntlet/core"])],
+    )
+    g = make_group(make_step("s1", ["gauntlet/core/a.py", "gauntlet/core/b.py"]))
+    wt = git.make_worktree(cfg, g.id)
+    (wt / "gauntlet/core").mkdir(parents=True)
+    for path in g.steps[0].paths:
+        (wt / path).write_text("value = 1\n")
+    lines = [
+        f"misplaced | {path}:1 | wrong | fails when: called"
+        for path in g.steps[0].paths
+    ]
+    key = "g1-review-diff-reviewer"
+    log.keep(key, "FINDINGS 2\n  " + "\n  ".join(lines) + "\n")
+    backend = fake_backend(
+        outputs=["", output], codes=[0, TIMEOUT_CODE if output == "timeout" else 0]
+    )
+    with pytest.raises(RulingNeeded):
+        loop.run_upheld(cfg, g, "\n".join(lines), log, backend)
+    assert backend.briefs == lines
+    with pytest.raises(ConfigError):
+        log.kept(f"{key}-handled")
+    assert not log.done()
+    assert wt.exists()
+
+
+def test_upheld_invalid_typed_finding_stops_before_any_batch(
+    green_cfg, log, fake_backend
+):
+    cfg = replace(
+        green_cfg,
+        batch_budget=1,
+        reviewers=[Reviewer("diff-reviewer", ["gauntlet/core"])],
+    )
+    g = make_group(make_step("s1", ["gauntlet/core/a.py", "gauntlet/core/b.py"]))
+    wt = git.make_worktree(cfg, g.id)
+    (wt / "gauntlet/core").mkdir(parents=True)
+    for path in g.steps[0].paths:
+        (wt / path).write_text("value = 1\n")
+    valid = "misplaced | gauntlet/core/a.py:1 | wrong | fails when: called"
+    invalid = "unsupported | gauntlet/core/b.py:1 | wrong | fails when: called"
+    log.keep("g1-review-diff-reviewer", f"FINDINGS 2\n  {valid}\n  {invalid}\n")
+    backend = fake_backend()
+    with pytest.raises(RulingNeeded, match="unsupported builder finding category"):
+        loop.run_upheld(cfg, g, f"{valid}\n{invalid}", log, backend)
     assert backend.briefs == []
