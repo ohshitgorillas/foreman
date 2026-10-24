@@ -376,6 +376,9 @@ def _follow_verdict(
     if verdict.kind == "tests wrong" and verdict.action == "repair":
         _repair(cfg, group, target, judgment, wt, log, backend, verdict)
         return
+    if verdict.kind == "tests wrong" and verdict.action == "redo red":
+        _redo_red(cfg, group, target, judgment, wt, log, backend)
+        return
     raise _rule(
         log,
         group,
@@ -383,6 +386,50 @@ def _follow_verdict(
         ", ".join(judgment.reports),
         "tests-wrong transitions await step 19a",
     )
+
+
+def _redo_red(
+    cfg: Config,
+    group: Group,
+    target: int,
+    judgment: forms.Judgment,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+) -> None:
+    """Replace producer evidence and replay its started dependent builds."""
+    producer = group.steps[target]
+    name = f"{group.id}-{producer.id}"
+    kept = ", ".join(judgment.reports)
+    if producer.role != "test-writer" or not isinstance(producer.form, forms.Red):
+        raise _rule(log, group, wt, kept, "redo red target is not a red producer")
+    try:
+        before = log.kept(f"{name}-before")
+    except ConfigError as error:
+        raise _rule(log, group, wt, kept, str(error)) from error
+    dependents = []
+    for index in range(target + 1, len(group.steps)):
+        step = group.steps[index]
+        if not isinstance(step.form, forms.Build) or not any(
+            selection.step == producer.id for selection in step.form.red
+        ):
+            continue
+        try:
+            snapshot = log.kept(f"{group.id}-{step.id}-before")
+        except ConfigError:
+            # A dependent not yet dispatched remains in normal group order.
+            continue
+        dependents.append((index, snapshot))
+    # All build resolutions consult this marker; no stale ids survive a failed
+    # restoration, view generation, dispatch, report validation or red check.
+    log.keep(f"{name}-evidence", "")
+    log.keep(f"{name}-repair-evidence", "")
+    for index, snapshot in reversed(dependents):
+        git.restore(wt, snapshot, group.steps[index].paths)
+    git.restore(wt, before, producer.paths)
+    _step(cfg, group, target, wt, log, backend)
+    for index, _ in dependents:
+        _step(cfg, group, index, wt, log, backend)
 
 
 def _repair(

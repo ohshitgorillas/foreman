@@ -1415,3 +1415,106 @@ def test_juror_repair_preserves_producer_and_restores_builder(
                 loop.reports.verdict(verdict),
             )
         assert resumed.briefs == []
+
+
+@pytest.mark.parametrize("outcome", ["success", "bad-report", "bad-check"])
+def test_redo_red_restores_original_snapshots_and_replaces_evidence(
+    green_cfg, log, fake_backend, outcome
+):
+    cfg = _viewing(green_cfg)
+    old_id = "tests/test_a.py::test_wrong"
+    new_id = "tests/test_a.py::test_approved"
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        views=["a.py"],
+        form=forms.Red((forms.Behavior("Keep the approved claim", "a.py"),)),
+        check=["sh", "-c", "test ! -f bad-check"],
+        expect_code=0,
+    )
+    builds = [
+        make_step(
+            name,
+            ["a.py", f"{name}.py"],
+            form=forms.Build(
+                "core-builder", f"Approved {name}", (forms.RedSelection("red"),)
+            ),
+        )
+        for name in ("first", "second", "future")
+    ]
+    unrelated = make_step("unrelated", ["keep.py"])
+    group = make_group(
+        red,
+        builds[0],
+        unrelated,
+        builds[1],
+        builds[2],
+        design="docs/superpowers/specs/approved.md",
+    )
+    wt = git.make_worktree(cfg, group.id)
+    (wt / "a.py").write_text("original")
+    initial = fake_backend(
+        [
+            {"tests/test_a.py": "wrong"},
+            {"a.py": "first", "first.py": "old"},
+            {"keep.py": "preserve"},
+            {"a.py": "second", "second.py": "old"},
+        ],
+        [_red_report(old_id)],
+    )
+    for index in range(4):
+        loop._step(cfg, group, index, wt, log, initial)
+    original_brief = log.kept("g1-red-brief")
+    snapshots = {
+        name: log.kept(f"g1-{name}-before") for name in ("red", "first", "second")
+    }
+    judgment = loop._judgment(group, 3, wt, log)
+    verdict = loop.reports.verdict(
+        "VERDICT tests wrong\nACTION redo red\nSTEP red\n"
+        "REASON Assertions contradict approved behavior\n"
+        "EVIDENCE tests/test_a.py:1 | assertion is wrong\nEND JUDGMENT"
+    )
+
+    class Spy(fake_backend):
+        def start(self, text, worktree, agent):
+            if not self.briefs:
+                assert (worktree / "a.py").read_text() == "original"
+                assert not (worktree / "tests/test_a.py").exists()
+                assert not (worktree / "first.py").exists()
+                assert not (worktree / "second.py").exists()
+                assert (worktree / "keep.py").read_text() == "preserve"
+                assert log.kept("g1-red-evidence") == ""
+                for index in (1, 3, 4):
+                    with pytest.raises(
+                        RulingNeeded, match="no current successful evidence"
+                    ):
+                        loop._red_ids(group, index, worktree, EventLog(cfg))
+            return super().start(text, worktree, agent)
+
+    if outcome == "bad-check":
+        (wt / "bad-check").touch()
+    backend = Spy(
+        [
+            {"tests/test_a.py": "approved"},
+            {"a.py": "first fresh"},
+            {"a.py": "second fresh"},
+        ],
+        ["invalid evidence" if outcome == "bad-report" else _red_report(new_id)],
+    )
+    if outcome == "success":
+        loop._follow_verdict(cfg, group, judgment, wt, log, backend, verdict)
+        assert backend.briefs == [
+            original_brief,
+            f"Approved first\na.py\nfirst.py\n{new_id}",
+            f"Approved second\na.py\nsecond.py\n{new_id}",
+        ]
+        assert (wt / "a.py").read_text() == "second fresh"
+        assert loop._red_ids(group, 4, wt, EventLog(cfg)) == [new_id]
+    else:
+        with pytest.raises(RulingNeeded):
+            loop._follow_verdict(cfg, group, judgment, wt, log, backend, verdict)
+        assert backend.briefs == [original_brief]
+        assert log.kept("g1-red-evidence") == ""
+    assert {name: log.kept(f"g1-{name}-before") for name in snapshots} == snapshots
+    assert (wt / "keep.py").read_text() == "preserve"
