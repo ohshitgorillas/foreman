@@ -146,68 +146,231 @@ def _steps(
         if isinstance(producer.form, forms.Red):
             log.keep(f"{group.id}-{producer.id}-evidence", "")
     for index in range(first, len(group.steps)):
-        step = group.steps[index]
-        if step.views:
-            made = views.make(cfg, group.id, step, wt)
-            path = log.keep(f"{group.id}-{step.id}-views", _text(made.result))
-            if not made.green:
-                raise _rule(log, group, wt, str(path), f"step {step.id} views failed")
-        view_paths = {}
-        for source in step.views:
-            view = views.path(cfg, group.id, source)
-            value = str(view)
-            if not view.is_file() or any(c in value for c in "\r\n\0"):
-                raise _rule(
-                    log,
-                    group,
-                    wt,
-                    f"{group.id}-{step.id}-views.txt",
-                    f"step {step.id} generated view missing or not a single line: {value!r}",
-                )
-            view_paths[source] = value
-        red_ids = _red_ids(group, index, wt, log)
-        before = git.snapshot(wt)
-        log.keep(f"{group.id}-{step.id}-before", before)
-        text = brief.render(
-            step.form, paths=step.paths, view_paths=view_paths, red_ids=red_ids
-        )
-        report = _dispatch(
-            group, wt, log, backend, f"{group.id}-{step.id}", text, step.role
-        )
-        if isinstance(step.form, forms.Red):
-            outside = [
-                p
-                for p in git.changed_since(wt, before)
-                if not steps.holds(step.paths, p)
-            ]
-            if outside:
-                raise _rule(
-                    log,
-                    group,
-                    wt,
-                    f"{group.id}-{step.id}.txt",
-                    f"step {step.id} red output outside declared paths: {', '.join(outside)}",
-                )
-        if report.test_wrong:
-            test = _test_owner(group, index, report, wt, log)
-            text = (
-                f"kept {group.id}-{step.id}.txt; stopped step {step.id}; "
-                f"test step {test.id}; worktree {wt}"
+        _step(cfg, group, index, wt, log, backend)
+
+
+def _step(
+    cfg: Config,
+    group: Group,
+    index: int,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+    *,
+    juror_reasons: tuple[str, ...] = (),
+) -> None:
+    """Execute one step without replacing its original restoration point."""
+    step = group.steps[index]
+    if step.views:
+        made = views.make(cfg, group.id, step, wt)
+        path = log.keep(f"{group.id}-{step.id}-views", _text(made.result))
+        if not made.green:
+            raise _rule(log, group, wt, str(path), f"step {step.id} views failed")
+    view_paths = {}
+    for source in step.views:
+        view = views.path(cfg, group.id, source)
+        value = str(view)
+        if not view.is_file() or any(c in value for c in "\r\n\0"):
+            raise _rule(
+                log,
+                group,
+                wt,
+                f"{group.id}-{step.id}-views.txt",
+                f"step {step.id} generated view missing or not a single line: {value!r}",
             )
-            log.notify_dispatcher("test_wrong", group.id, text)
-            raise WrongTest(text)
-        verdict = verify.check_step(step, wt)
-        if verdict is not None:
-            path = log.keep(f"{group.id}-{step.id}-check", _text(verdict.result))
-            if not verdict.green:
-                raise _rule(log, group, wt, str(path), f"step {step.id} check missed")
-        if isinstance(step.form, forms.Red):
-            name = f"{group.id}-{step.id}"
-            try:
-                _red_evidence(step, log.kept(name))
-            except ConfigError as error:
-                raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
-            log.keep(f"{name}-evidence", _producer_identity(step))
+        view_paths[source] = value
+    red_ids = _red_ids(group, index, wt, log)
+    before = git.snapshot(wt)
+    try:
+        log.kept(f"{group.id}-{step.id}-before")
+    except ConfigError:
+        log.keep(f"{group.id}-{step.id}-before", before)
+    text = brief.render(
+        step.form,
+        paths=step.paths,
+        view_paths=view_paths,
+        red_ids=red_ids,
+        juror_reasons=juror_reasons,
+    )
+    report = _dispatch(
+        group, wt, log, backend, f"{group.id}-{step.id}", text, step.role
+    )
+    if isinstance(step.form, forms.Red):
+        outside = [
+            p for p in git.changed_since(wt, before) if not steps.holds(step.paths, p)
+        ]
+        if outside:
+            raise _rule(
+                log,
+                group,
+                wt,
+                f"{group.id}-{step.id}.txt",
+                f"step {step.id} red output outside declared paths: {', '.join(outside)}",
+            )
+    if report.test_wrong:
+        judgment = _judgment(group, index, wt, log)
+        _judge(cfg, group, step.id, judgment, wt, log, backend)
+        return
+    verdict = verify.check_step(step, wt)
+    if verdict is not None:
+        path = log.keep(f"{group.id}-{step.id}-check", _text(verdict.result))
+        if not verdict.green:
+            raise _rule(log, group, wt, str(path), f"step {step.id} check missed")
+    if isinstance(step.form, forms.Red):
+        name = f"{group.id}-{step.id}"
+        try:
+            _red_evidence(step, log.kept(name))
+        except ConfigError as error:
+            raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+        log.keep(f"{name}-evidence", _producer_identity(step))
+
+
+def _judgment(
+    group: Group,
+    index: int,
+    wt: Path,
+    log: EventLog,
+) -> forms.Judgment:
+    """Resolve the failed build and its selected producers from kept evidence."""
+    step = group.steps[index]
+    name = f"{group.id}-{step.id}"
+    red_ids = _red_ids(group, index, wt, log)
+    selected = (
+        {r.step for r in step.form.red} if isinstance(step.form, forms.Build) else set()
+    )
+    candidates = [
+        s for s in group.steps[: index + 1] if s.id in selected or s.id == step.id
+    ]
+    blocks = []
+    paths = []
+    try:
+        for candidate in candidates:
+            key = f"{group.id}-{candidate.id}"
+            block = (
+                candidate.form.step
+                if isinstance(candidate.form, (forms.Build, forms.Stub))
+                else log.kept(f"{key}-brief")
+            )
+            blocks.append(block)
+            paths.append(str(log.keep(key, log.kept(key))))
+        judgment = forms.Judgment(
+            group.design,
+            tuple(s.id for s in candidates),
+            "\n".join(blocks),
+            tuple(red_ids),
+            tuple(paths),
+        )
+        problems = forms.validate_judgment(judgment)
+        if problems:
+            raise ConfigError("; ".join(problems))
+    except ConfigError as error:
+        raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+    log.keep(f"{name}-judgment", json.dumps(asdict(judgment)))
+    return judgment
+
+
+def _owner_stop(
+    group: Group, judgment: forms.Judgment, wt: Path, log: EventLog, why: str
+) -> WrongTest:
+    text = f"{why}; kept {', '.join(judgment.reports)}; worktree {wt}"
+    log.notify_owner("test_wrong", group.id, text)
+    return WrongTest(text)
+
+
+def _judge(
+    cfg: Config,
+    group: Group,
+    context: str,
+    judgment: forms.Judgment,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+) -> None:
+    """Reserve attempts before launch so restarts cannot reset the cap."""
+    number = 1
+    while True:
+        name = f"{group.id}-{context}-juror-{number}"
+        try:
+            log.kept(name)
+        except ConfigError:
+            break
+        number += 1
+    if number > cfg.juror_rounds:
+        raise _owner_stop(group, judgment, wt, log, "juror rounds exhausted")
+    text = brief.render(judgment, paths=[], view_paths={}, red_ids=[])
+    log.keep(name, "")
+    _dispatch(group, wt, log, backend, name, text, "juror")
+    try:
+        verdict = reports.verdict(log.kept(name))
+    except ConfigError as error:
+        raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+    _follow_verdict(cfg, group, judgment, wt, log, backend, verdict)
+
+
+def _follow_verdict(
+    cfg: Config,
+    group: Group,
+    judgment: forms.Judgment,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+    verdict: reports.Verdict,
+) -> None:
+    """Follow a decoded verdict; never substitute a local fault decision."""
+    for evidence in verdict.evidence:
+        path = evidence.partition(" | ")[0].rpartition(":")[0]
+        if path.startswith("/") and path not in judgment.reports:
+            raise _rule(
+                log,
+                group,
+                wt,
+                ", ".join(judgment.reports),
+                "verdict evidence is not a judgment report",
+            )
+    if verdict.action == "owner":
+        raise _owner_stop(group, judgment, wt, log, "; ".join(verdict.reasons))
+    target = next(
+        (
+            i
+            for i, s in enumerate(group.steps)
+            if s.id == verdict.step and s.id in judgment.steps
+        ),
+        None,
+    )
+    if target is None:
+        raise _rule(
+            log,
+            group,
+            wt,
+            ", ".join(judgment.reports),
+            "verdict target is not a judgment candidate",
+        )
+    step = group.steps[target]
+    if verdict.kind == "build wrong" and verdict.action == "retry":
+        if not isinstance(step.form, forms.Build):
+            raise _rule(
+                log,
+                group,
+                wt,
+                ", ".join(judgment.reports),
+                "retry target is not a build",
+            )
+        try:
+            before = log.kept(f"{group.id}-{step.id}-before")
+        except ConfigError as error:
+            raise _rule(
+                log, group, wt, ", ".join(judgment.reports), str(error)
+            ) from error
+        git.restore(wt, before, step.paths)
+        _step(cfg, group, target, wt, log, backend, juror_reasons=verdict.reasons)
+        return
+    raise _rule(
+        log,
+        group,
+        wt,
+        ", ".join(judgment.reports),
+        "tests-wrong transitions await step 19a",
+    )
 
 
 def _test_owner(

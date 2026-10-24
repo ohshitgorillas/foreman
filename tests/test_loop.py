@@ -1090,3 +1090,161 @@ def test_upheld_invalid_typed_finding_stops_before_any_batch(
     with pytest.raises(RulingNeeded, match="unsupported builder finding category"):
         loop.run_upheld(cfg, g, f"{valid}\n{invalid}", log, backend)
     assert backend.briefs == []
+
+
+@pytest.mark.parametrize(
+    "kind,action,target,expected",
+    [
+        ("spec wrong", "owner", None, WrongTest),
+        ("undetermined", "owner", None, WrongTest),
+        ("build wrong", "retry", "build", None),
+        ("build wrong", "retry", "red", RulingNeeded),
+        ("build wrong", "retry", "stub", RulingNeeded),
+        ("build wrong", "retry", "absent", RulingNeeded),
+    ],
+)
+def test_juror_follows_owner_and_build_verdicts(
+    green_cfg,
+    log,
+    fake_backend,
+    origin,
+    capsys,
+    monkeypatch,
+    kind,
+    action,
+    target,
+    expected,
+):
+    cfg = _viewing(green_cfg)
+    test_id = "tests/test_a.py::test_new"
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        views=["a.py"],
+        check=["false"],
+        expect_code=1,
+    )
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red"),)
+        ),
+        check=["true"],
+    )
+    group = make_group(
+        make_step("stub", ["a.py", "gauntlet/core/a.py"]),
+        red,
+        build,
+        make_step("later", ["later.py"]),
+        design="docs/superpowers/specs/approved.md",
+    )
+    verdict = f"VERDICT {kind}\nACTION {action}\n"
+    if target is not None:
+        verdict += f"STEP {target}\n"
+    verdict += "REASON Preserve the approved behavior\nEVIDENCE a.py:1 | implementation contradicts behavior\nEND JUDGMENT"
+    backend = fake_backend(
+        [
+            {"a.py": "stub", "gauntlet/core/a.py": "original"},
+            {"tests/test_a.py": "red"},
+            {"gauntlet/core/a.py": "partial"},
+            {},
+            {"gauntlet/core/a.py": "fixed"},
+            {"later.py": "later"},
+        ],
+        ["", _red_report(test_id), f"TEST WRONG 1:\n  {test_id} | mismatch\n", verdict],
+    )
+    restored = []
+    restore = git.restore
+
+    def observe_restore(wt, tree, paths):
+        restore(wt, tree, paths)
+        restored.append((tree, (wt / "gauntlet/core/a.py").read_text()))
+
+    monkeypatch.setattr(git, "restore", observe_restore)
+    if expected is not None:
+        with pytest.raises(expected):
+            loop.run_group(cfg, group, log, backend)
+        assert not log.done()
+        assert git.worktree(cfg, "g1").is_dir()
+        assert backend.agents == [
+            "core-builder",
+            "test-writer",
+            "core-builder",
+            "juror",
+        ]
+        assert restored == []
+        if expected is WrongTest:
+            assert "[test_wrong] g1:" in capsys.readouterr().err
+    else:
+        loop.run_group(cfg, group, log, backend)
+        assert log.done() == {"g1"}
+        assert restored == [(log.kept("g1-build-before"), "original")]
+        assert backend.agents == [
+            "core-builder",
+            "test-writer",
+            "core-builder",
+            "juror",
+            "core-builder",
+            "core-builder",
+        ]
+        assert (
+            backend.briefs[4]
+            == f"Approved build\ngauntlet/core/a.py\n{test_id}\nPreserve the approved behavior"
+        )
+        assert "later.py" in backend.briefs[5]
+    judgment = json.loads(log.kept("g1-build-judgment"))
+    assert judgment["steps"] == ["red", "build"]
+    assert judgment["red_ids"] == [test_id]
+    assert judgment["step"].endswith("Approved build")
+    assert all(
+        path.endswith(("g1-red.txt", "g1-build.txt")) for path in judgment["reports"]
+    )
+    assert backend.briefs[3].startswith(
+        "judgment\nspec: docs/superpowers/specs/approved.md\nstep: red\nstep: build\n"
+    )
+    assert log.kept("g1-build-juror-1").strip() == verdict
+
+
+@pytest.mark.parametrize(
+    "output,code",
+    [
+        ("malformed verdict", 0),
+        ("REJECTED: STEERING missing evidence", 0),
+        ("OVERLOADED: 6 paths", 0),
+        ("partial", TIMEOUT_CODE),
+    ],
+)
+def test_juror_attempts_survive_restart_and_stop_at_configured_cap(
+    green_cfg,
+    log,
+    fake_backend,
+    output,
+    code,
+    capsys,
+):
+    cfg = replace(green_cfg, juror_rounds=2)
+    group = make_group(make_step("build"))
+    wt = git.make_worktree(cfg, group.id)
+    path = log.keep("g1-build", "failure")
+    judgment = forms.Judgment(
+        "docs/superpowers/specs/approved.md",
+        ("build",),
+        "Approved build",
+        (),
+        (str(path),),
+    )
+    # Include a prior reservation without a completed dispatch.
+    log.keep("g1-build-juror-1", "")
+    backend = fake_backend(outputs=[output], codes=[code])
+    with pytest.raises(RulingNeeded):
+        loop._judge(cfg, group, "build", judgment, wt, EventLog(cfg), backend)
+    assert backend.agents == ["juror"]
+    assert log.kept("g1-build-juror-2").strip() == output
+    fresh = fake_backend()
+    with pytest.raises(WrongTest, match="juror rounds exhausted"):
+        loop._judge(cfg, group, "build", judgment, wt, EventLog(cfg), fresh)
+    assert fresh.agents == []
+    assert str(wt) in capsys.readouterr().err
+    assert not log.done()
