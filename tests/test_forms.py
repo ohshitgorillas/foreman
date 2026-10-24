@@ -7,6 +7,9 @@ import pytest
 from foreman.errors import ConfigError
 from foreman.forms import (
     Behavior,
+    Build,
+    BuilderFinding,
+    DiffReview,
     DocumentChange,
     Finding,
     GateSource,
@@ -14,9 +17,15 @@ from foreman.forms import (
     Origin,
     Port,
     Red,
+    RedSelection,
     Repair,
     ReviewerSource,
+    Rewrite,
+    Stub,
     parse,
+)
+from foreman.forms import (
+    TestReview as ReviewTests,
 )
 
 DESIGN = "docs/superpowers/specs/feature.md"
@@ -282,3 +291,282 @@ def test_moved_rejects_ambiguous_quoting_and_bad_anchors(key, value):
             "test-writer", "moved", {"changes": [change], "sources": []}, where="q.form"
         )
     assert f"changes[0].{key}" in str(exc.value)
+
+
+@pytest.mark.parametrize("role", ["core-builder", "seam-builder"])
+def test_builder_shapes_preserve_blocks_selections_and_exclusions(role):
+    layer = "core" if role == "core-builder" else "seams"
+    excluded = f"gauntlet/{layer}/other.py"
+    step = "Approved Order row.\n\n    def interface(): ..."
+    selections = [
+        {"step": "red-2", "files": ["tests/test_b.py", "tests/test_a.py"]},
+        {"step": "red-1"},
+    ]
+    fields = {"step": step, "red": selections, "exclude": [excluded]}
+    form = parse(role, "build", fields, where="q.form")
+    selections[0]["files"].append("tests/test_c.py")
+    assert form == Build(
+        role,
+        step,
+        (
+            RedSelection("red-2", ("tests/test_b.py", "tests/test_a.py")),
+            RedSelection("red-1"),
+        ),
+        (excluded,),
+    )
+    assert parse(role, "stub", {"step": step}, where="q.form") == Stub(role, step)
+    line = f"REWRITE gauntlet/{layer}/x.py:3 | delete equivalent branch"
+    assert parse(role, "rewrite", {"line": line}, where="q.form") == Rewrite(role, line)
+    with pytest.raises(FrozenInstanceError):
+        form.step = "changed"
+    with pytest.raises(FrozenInstanceError):
+        form.red[0].step = "changed"
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        "shortcut",
+        "gate-gaming",
+        "misplaced",
+        "hand-rolled",
+        "drift",
+        "shell-text parsing",
+        "leftover",
+    ],
+)
+@pytest.mark.parametrize(
+    "role,anchor",
+    [
+        ("core-builder", "gauntlet/core/x.py:12"),
+        ("core-builder", "gauntlet/__init__.py:1"),
+        ("seam-builder", "gauntlet/seams/x.py:12"),
+    ],
+)
+def test_builder_reviewer_findings_keep_primary_anchor_and_verbatim_evidence(
+    category, role, anchor
+):
+    line = f'{category} | {anchor} | duplicates "gauntlet/core/shared.py:2" | fails when: data arrives'
+    source = {"kind": "reviewer", "role": "diff-reviewer", "round": "future-round"}
+    form = parse(role, "finding", {"source": source, "lines": [line]}, where="q.form")
+    assert form == BuilderFinding(
+        role, ReviewerSource("diff-reviewer", "future-round"), (line,)
+    )
+
+
+def test_gate_batch_keeps_order_and_single_run_provenance():
+    lines = [
+        "gauntlet/core/b.py:4: F821 undefined name",
+        "gauntlet/core/a.py:8: F401 unused import",
+    ]
+    form = parse(
+        "core-builder",
+        "finding",
+        {
+            "source": {"kind": "gate", "run": "future-check"},
+            "lines": lines,
+        },
+        where="q.form",
+    )
+    lines.reverse()
+    assert form.source == GateSource("future-check")
+    assert form.lines[0].startswith("gauntlet/core/b.py:4")
+
+
+@pytest.mark.parametrize(
+    "shape,fields,field",
+    [
+        ("build", {"step": "row", "red": []}, "red"),
+        ("build", {"step": "row", "red": ["2"]}, "red[0]"),
+        ("build", {"step": "row", "red": [{"step": True}]}, "step"),
+        ("build", {"step": "row", "red": [{"step": "2", "files": []}]}, "files"),
+        (
+            "build",
+            {"step": "row", "red": [{"step": "2", "files": ["tests/x.py::test_x"]}]},
+            "files",
+        ),
+        (
+            "build",
+            {
+                "step": "row",
+                "red": [{"step": "2", "files": ["tests/x.py", "tests/x.py"]}],
+            },
+            "files",
+        ),
+        ("build", {"step": "row", "red": [{"step": "2"}, {"step": "2"}]}, "red"),
+        ("build", {"step": "row", "red": [{"step": "2", "report": "x"}]}, "report"),
+        ("stub", {"step": "row", "red": []}, "red"),
+        ("rewrite", {"line": "REWRITE x", "red": []}, "red"),
+        ("rewrite", {"line": "rewrite x"}, "line"),
+        ("rewrite", {"line": "REWRITE"}, "line"),
+        ("rewrite", {"line": "REWRITE x\nextra"}, "line"),
+        ("stub", {"step": "row", "exclude": []}, "exclude"),
+        ("stub", {"step": "row", "exclude": ["tests/x.py"]}, "exclude"),
+        ("stub", {"step": "row", "exclude": ["gauntlet/seams/x.py"]}, "exclude"),
+        ("stub", {"step": "row", "exclude": ["gauntlet/core/../x.py"]}, "exclude"),
+        (
+            "stub",
+            {"step": "row", "exclude": ["gauntlet/core/x.py", "gauntlet/core/x.py"]},
+            "exclude",
+        ),
+        ("stub", {"step": "row", "suffix": "extra"}, "suffix"),
+    ],
+)
+def test_builder_rejects_wrong_fields_and_selections(shape, fields, field):
+    with pytest.raises(ConfigError) as exc:
+        parse("core-builder", shape, fields, where="queue.toml: steps.3.form")
+    assert "queue.toml: steps.3.form" in str(exc.value)
+    assert field in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "block", ["", "\nrow", "row\n", "row\rtext", "row\0text", False]
+)
+def test_approved_blocks_reject_invalid_bytes_without_cleanup(block):
+    with pytest.raises(ConfigError, match=r"q.form.step"):
+        parse("core-builder", "stub", {"step": block}, where="q.form")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "shortcut | gauntlet/core/x.py:1 | defect | fails when: scenario | fix: edit",
+        "unknown | gauntlet/core/x.py:1 | defect | fails when: scenario",
+        "shortcut | gauntlet/seams/x.py:1 | defect | fails when: scenario",
+        "shortcut | tests/test_x.py:1 | defect | fails when: scenario",
+        "shortcut | gauntlet/core/x.py:0 | defect | fails when: scenario",
+        "shortcut | gauntlet/core/x.py:1 |  | fails when: scenario",
+        "shortcut | gauntlet/core/x.py:1 | defect | fails when:",
+        "shortcut | gauntlet/core/x.py:1 | defect | scenario",
+    ],
+)
+def test_builder_reviewer_findings_fail_closed(line):
+    with pytest.raises(ConfigError, match=r"q.form.lines\[0\]"):
+        parse(
+            "core-builder",
+            "finding",
+            {
+                "source": {"kind": "reviewer", "role": "diff-reviewer", "round": "r"},
+                "lines": [line],
+            },
+            where="q.form",
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        [{"kind": "gate", "run": "a"}, {"kind": "gate", "run": "b"}],
+        {"kind": "gate", "run": ["a", "b"]},
+        {"kind": "gate", "run": "a", "round": "b"},
+        {"kind": "reviewer", "role": "diff-reviewer", "round": ["a", "b"]},
+        {"kind": "reviewer", "role": "diff-reviewer", "round": "a", "run": "b"},
+        {"kind": "reviewer", "role": "test-reviewer", "round": "a"},
+    ],
+)
+def test_builder_batch_cannot_mix_sources_or_review_rounds(source):
+    with pytest.raises(ConfigError, match="q.form.source"):
+        parse(
+            "core-builder",
+            "finding",
+            {"source": source, "lines": ["x"]},
+            where="q.form",
+        )
+
+
+@pytest.mark.parametrize(
+    "role,expected",
+    [
+        ("diff-reviewer", DiffReview("working-tree")),
+        ("test-reviewer", ReviewTests("working-tree")),
+    ],
+)
+def test_review_contract_has_explicit_scope(role, expected):
+    form = parse(role, "review", {"scope": "working-tree"}, where="q.review")
+    assert form == expected
+    assert form.role == role
+    with pytest.raises(FrozenInstanceError):
+        form.scope = "range"
+
+
+@pytest.mark.parametrize(
+    "revision_range", ["HEAD~2..HEAD", "v1.2...topic.v3", "refs/heads/main..abc123"]
+)
+def test_review_ranges_and_ordered_specs_are_preserved(revision_range):
+    specs = [DESIGN, "docs/superpowers/specs/earlier.md"]
+    form = parse(
+        "test-reviewer",
+        "review",
+        {
+            "scope": "range",
+            "range": revision_range,
+            "specs": specs,
+        },
+        where="q.review",
+    )
+    specs.reverse()
+    assert form == ReviewTests(
+        "range", revision_range, (DESIGN, "docs/superpowers/specs/earlier.md")
+    )
+    assert parse(
+        "diff-reviewer",
+        "review",
+        {"scope": "range", "range": revision_range},
+        where="q.review",
+    ) == DiffReview("range", revision_range)
+
+
+@pytest.mark.parametrize(
+    "revision_range",
+    [
+        "",
+        "A",
+        "A.B",
+        "A....B",
+        "A..B..C",
+        "..B",
+        "A...",
+        "-A..B",
+        "A..-B",
+        "A ..B",
+        "A..B\nextra",
+        "A..B\x1b",
+        True,
+    ],
+)
+def test_invalid_review_ranges_are_rejected(revision_range):
+    with pytest.raises(ConfigError, match="q.review.range"):
+        parse(
+            "diff-reviewer",
+            "review",
+            {"scope": "range", "range": revision_range},
+            where="q.review",
+        )
+
+
+@pytest.mark.parametrize(
+    "role,fields,field",
+    [
+        ("diff-reviewer", {}, "scope"),
+        ("diff-reviewer", {"scope": "other"}, "scope"),
+        ("diff-reviewer", {"scope": "range"}, "range"),
+        ("diff-reviewer", {"scope": "working-tree", "range": "A..B"}, "range"),
+        ("diff-reviewer", {"scope": "working-tree", "specs": []}, "specs"),
+        ("diff-reviewer", {"scope": "working-tree", "spec": False}, "spec"),
+        (
+            "test-reviewer",
+            {"scope": "working-tree", "specs": [DESIGN, DESIGN]},
+            "specs",
+        ),
+        (
+            "test-reviewer",
+            {"scope": "working-tree", "specs": ["docs/other.md"]},
+            "specs",
+        ),
+        ("test-reviewer", {"scope": "working-tree", "specs": False}, "specs"),
+    ],
+)
+def test_review_contract_rejects_extra_or_incompatible_fields(role, fields, field):
+    with pytest.raises(ConfigError) as exc:
+        parse(role, "review", fields, where="q.review")
+    assert f"q.review.{field}" in str(exc.value)
