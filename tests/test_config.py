@@ -88,41 +88,79 @@ ROSTER = """
 [[reviewers]]
 role = "diff-reviewer"
 paths = ["foreman/", "tests/"]
-spec = false
 
 [[reviewers]]
-role = "spec-reviewer"
-paths = ["foreman/"]
-spec = true
+role = "test-reviewer"
+paths = ["tests/"]
 """
 
 
 def test_reviewers_load_in_order(tmp_path: Path) -> None:
     c = load(_write(tmp_path, GOOD + ROSTER))
     assert c.reviewers == [
-        Reviewer("diff-reviewer", ["foreman/", "tests/"], False),
-        Reviewer("spec-reviewer", ["foreman/"], True),
+        Reviewer("diff-reviewer", ["foreman/", "tests/"]),
+        Reviewer("test-reviewer", ["tests/"]),
     ]
 
 
 def test_example_file_loads() -> None:
     c = load(Path(__file__).parent.parent / "foreman.example.toml")
-    assert [r.role for r in c.reviewers] == ["diff-reviewer", "spec-reviewer"]
+    assert c.reviewers == [
+        Reviewer("diff-reviewer", ["foreman/", "tests/"]),
+        Reviewer("test-reviewer", ["tests/"]),
+    ]
 
 
 @pytest.mark.parametrize(
     "table,match",
     [
-        ('role = "r"\npaths = ["a"]', "missing keys: spec"),
-        ('role = "r"\npaths = ["a"]\nspec = 1', "spec must be a boolean"),
-        ('role = "r"\npaths = "a"\nspec = true', "paths must be a list"),
-        ('role = 3\npaths = ["a"]\nspec = true', "role must be"),
-        ('role = "r"\npaths = ["a"]\nspec = true\nx = 1', "unknown keys: x"),
+        ('paths = ["a"]', "missing keys: role"),
+        ('role = "diff-reviewer"', "missing keys: paths"),
+        ('role = "diff-reviewer"\npaths = "a"', "paths must be a list"),
+        ('role = "diff-reviewer"\npaths = [1]', "paths must be a list"),
+        ('role = 3\npaths = ["a"]', "role must be"),
+        ('role = ""\npaths = ["a"]', "role must be"),
+        ('role = "diff-reviewer"\npaths = ["a"]\nx = 1', "unknown keys: x"),
+        ('role = "diff-reviewer"\npaths = ["a"]\nspecs = []', "unknown keys: specs"),
     ],
 )
 def test_bad_reviewer(tmp_path: Path, table: str, match: str) -> None:
-    with pytest.raises(ConfigError, match=match):
-        load(_write(tmp_path, GOOD + "\n[[reviewers]]\n" + table + "\n"))
+    path = _write(tmp_path, GOOD + "\n[[reviewers]]\n" + table + "\n")
+    with pytest.raises(ConfigError, match=match) as exc:
+        load(path)
+    assert f"{path}: reviewers.0" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["false", "true", "1", '""', "[]"])
+def test_reviewer_spec_is_removed_even_when_false(tmp_path: Path, value: str) -> None:
+    path = _write(tmp_path, GOOD + ROSTER + f"spec = {value}\n")
+    with pytest.raises(ConfigError) as exc:
+        load(path)
+    assert str(exc.value) == (
+        f"{path}: reviewers.1.spec: removed; put explicit specs in the group's "
+        "test-reviewer review form"
+    )
+
+
+@pytest.mark.parametrize(
+    "role", ["spec-reviewer", "gatesmith", "unknown", " test-reviewer"]
+)
+def test_unsupported_reviewer_role(tmp_path: Path, role: str) -> None:
+    path = _write(
+        tmp_path, GOOD + f'\n[[reviewers]]\nrole = "{role}"\npaths = ["tests/"]\n'
+    )
+    with pytest.raises(ConfigError) as exc:
+        load(path)
+    assert str(exc.value) == (
+        f"{path}: reviewers.0.role: unsupported reviewer role {role!r}; "
+        "expected one of: diff-reviewer, test-reviewer"
+    )
+
+
+def test_reviewer_is_frozen(tmp_path: Path) -> None:
+    reviewer = load(_write(tmp_path, GOOD + ROSTER)).reviewers[0]
+    with pytest.raises(AttributeError):
+        reviewer.role = "test-reviewer"  # type: ignore[misc]
 
 
 def test_reviewers_must_be_tables(tmp_path: Path) -> None:

@@ -9,13 +9,20 @@ view_cmd = ["uv", "run", "stubgen"]
 view_root = "~/dev/foreman/views"
 
 # Reviewers run in this order after the group check, when the group changed a
-# path equal to or under one of `paths`. `spec = true` adds "spec: <design>".
+# path equal to or under one of `paths`. Only diff-reviewer and test-reviewer
+# have supported contracts. Roster entries contain only role and paths.
 [[reviewers]]
 role = "diff-reviewer"
 paths = ["foreman/", "tests/"]
-spec = false
 
 [[reviewers]]
-role = "spec-reviewer"
-paths = ["foreman/"]
-spec = true
+role = "test-reviewer"
+paths = ["tests/"]
+
+# Review content belongs in the step file, separately from this roster.
+# To request explicit test-reviewer specs for group g1, add there:
+# [groups.g1.reviews.test-reviewer]
+# scope = "working-tree"
+# specs = ["docs/superpowers/specs/brief-forms-design.md"]
+# Without a form, each reviewer uses its working-tree default. Group design
+# metadata never adds specs; diff-reviewer does not accept specs.
