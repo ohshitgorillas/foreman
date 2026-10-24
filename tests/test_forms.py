@@ -1,6 +1,6 @@
 """Structural form validation before a queue can dispatch any text."""
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -13,6 +13,7 @@ from foreman.forms import (
     DocumentChange,
     Finding,
     GateSource,
+    Judgment,
     Moved,
     Origin,
     Port,
@@ -23,6 +24,8 @@ from foreman.forms import (
     Rewrite,
     Stub,
     parse,
+    validate_judgment,
+    validate_step,
 )
 from foreman.forms import (
     TestReview as ReviewTests,
@@ -570,3 +573,86 @@ def test_review_contract_rejects_extra_or_incompatible_fields(role, fields, fiel
     with pytest.raises(ConfigError) as exc:
         parse(role, "review", fields, where="q.review")
     assert f"q.review.{field}" in str(exc.value)
+
+
+def test_judgment_is_frozen_runtime_data_and_keeps_order():
+    form = Judgment(
+        DESIGN,
+        ("2", "3"),
+        "2 red | approved\n\n    declaration\n3 build | approved",
+        ("tests/test_x.py::test_x[two words::é]", "tests/test_y.py::test_y"),
+        ("/state/g-check.txt", "state/g-producer.txt"),
+    )
+    assert validate_judgment(form) == []
+    assert (form.role, form.shape) == ("juror", "judgment")
+    assert form.steps == ("2", "3")
+    with pytest.raises(FrozenInstanceError):
+        form.step = "changed"
+    with pytest.raises(ConfigError, match="unsupported role/shape"):
+        parse("juror", "judgment", {}, where="queue.form")
+    assert validate_step(form, ["tests/test_x.py"], []) == [
+        "form: expected a writable step form"
+    ]
+
+
+def test_judgment_allows_failure_without_test_selectors():
+    form = Judgment(DESIGN, ("3",), "3 build | approved", (), ("/state/check.txt",))
+    assert validate_judgment(form) == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("spec", ""),
+        ("spec", "docs/requirements.md"),
+        ("spec", "/docs/superpowers/specs/a.md"),
+        ("spec", "docs/superpowers/specs/../a.md"),
+        ("steps", ()),
+        ("steps", ["3"]),
+        ("steps", ("3", "3")),
+        ("steps", ("",)),
+        ("steps", ("3\nreport: fake",)),
+        ("steps", (True,)),
+        ("step", ""),
+        ("step", "\n3 build | approved"),
+        ("step", "3 build | approved\n"),
+        ("step", "row\rtext"),
+        ("step", "row\0text"),
+        ("step", False),
+        ("red_ids", []),
+        ("red_ids", ("tests/test_x.py::test_x", "tests/test_x.py::test_x")),
+        ("red_ids", ("tests/test_x.py",)),
+        ("red_ids", ("tests/test_x.py::test_x\nreport: fake",)),
+        ("reports", ()),
+        ("reports", ["state/check.txt"]),
+        ("reports", ("",)),
+        ("reports", ("/state/check.txt\nend judgment",)),
+        ("reports", ("../check.txt",)),
+        ("reports", ("/state/../check.txt",)),
+        ("reports", ("//state/check.txt",)),
+        ("reports", ("state/check.txt\0",)),
+        ("reports", (False,)),
+    ],
+)
+def test_judgment_rejects_invalid_framing_and_references(field, value):
+    form = Judgment(DESIGN, ("3",), "3 build | approved", (), ("/state/check.txt",))
+    problems = validate_judgment(replace(form, **{field: value}))
+    assert len(problems) == 1
+    assert f"judgment.{field}" in problems[0]
+
+
+def test_judgment_validator_rejects_other_form_values():
+    assert validate_judgment(Stub("core-builder", "approved")) == [
+        "judgment: expected a Judgment value"
+    ]
+
+
+@pytest.mark.parametrize("key", ["juror_reasons", "reasons", "suffix"])
+def test_build_queue_form_cannot_supply_runtime_retry_reasons(key):
+    with pytest.raises(ConfigError, match=key):
+        parse(
+            "core-builder",
+            "build",
+            {"step": "approved", "red": [{"step": "2"}], key: ["Reason."]},
+            where="queue.form",
+        )

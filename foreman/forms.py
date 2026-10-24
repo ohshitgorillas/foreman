@@ -144,6 +144,17 @@ class TestReview:
     shape: ClassVar[str] = "review"
 
 
+@dataclass(frozen=True)
+class Judgment:
+    spec: str
+    steps: tuple[str, ...]
+    step: str
+    red_ids: tuple[str, ...]
+    reports: tuple[str, ...]
+    role: ClassVar[str] = "juror"
+    shape: ClassVar[str] = "judgment"
+
+
 Form = (
     Red
     | Port
@@ -156,6 +167,7 @@ Form = (
     | BuilderFinding
     | DiffReview
     | TestReview
+    | Judgment
 )
 
 
@@ -360,6 +372,42 @@ def _block(value: object, where: str) -> str:
             f"{where}: expected nonempty approved-step block without CR, NUL or leading/trailing LF"
         )
     return value
+
+
+def validate_judgment(form: Judgment) -> list[str]:
+    """Validate runtime judgment framing without loading files or queue forms."""
+    try:
+        if not isinstance(form, Judgment):
+            raise ConfigError("judgment: expected a Judgment value")
+        _path(
+            form.spec,
+            "judgment.spec",
+            prefix="docs/superpowers/specs/",
+            suffix=".md",
+        )
+        for name in ("steps", "red_ids", "reports"):
+            values = getattr(form, name)
+            if not isinstance(values, tuple) or (not values and name != "red_ids"):
+                raise ConfigError(
+                    f"judgment.{name}: expected {'a' if name == 'red_ids' else 'a nonempty'} tuple"
+                )
+            for i, value in enumerate(values):
+                where = f"judgment.{name}[{i}]"
+                if name == "red_ids":
+                    _test_id(value, where)
+                elif name == "reports":
+                    report = _line(value, where)
+                    # EventLog's state directory may be absolute. Preserve the
+                    # reference verbatim; validate its components without I/O.
+                    _path(report.removeprefix("/"), where)
+                else:
+                    _line(value, where)
+            if name != "reports":
+                _distinct(values, f"judgment.{name}")
+        _block(form.step, "judgment.step")
+    except ConfigError as error:
+        return [str(error)]
+    return []
 
 
 def _builder_path(value: object, where: str, role: str) -> str:

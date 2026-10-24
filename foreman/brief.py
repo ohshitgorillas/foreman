@@ -4,6 +4,7 @@ from typing import assert_never
 
 from foreman import forms
 from foreman.config import Reviewer
+from foreman.errors import ConfigError
 from foreman.steps import Group
 
 
@@ -13,8 +14,11 @@ def render(
     paths: list[str],
     view_paths: dict[str, str],
     red_ids: list[str],
+    juror_reasons: tuple[str, ...] = (),
 ) -> str:
     """Render validated data verbatim; view identity and evidence resolve upstream."""
+    if juror_reasons and not isinstance(form, forms.Build):
+        raise ConfigError("juror_reasons: allowed only for a build retry")
     parts: list[str] = []
     match form:
         case forms.Red():
@@ -48,9 +52,17 @@ def render(
         case forms.Stub():
             parts.extend(("stub", form.step, *paths))
         case forms.Build():
-            parts.extend((form.step, *paths, *red_ids))
+            parts.extend((form.step, *paths, *red_ids, *juror_reasons))
         case forms.Rewrite():
             parts.append(form.line)
+        case forms.Judgment():
+            parts.extend(("judgment", f"spec: {form.spec}"))
+            parts.extend(f"step: {step}" for step in form.steps)
+            line_count = form.step.count("\n") + 1
+            parts.extend((f"step-lines: {line_count}", form.step))
+            parts.extend(f"red: {test_id}" for test_id in form.red_ids)
+            parts.extend(f"report: {report}" for report in form.reports)
+            parts.append("end judgment")
         case forms.DiffReview() | forms.TestReview():
             if form.scope == "range":
                 assert form.range is not None

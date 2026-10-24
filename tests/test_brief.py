@@ -5,7 +5,8 @@ from conftest import make_group
 
 from foreman.brief import finding, render, review
 from foreman.config import Reviewer
-from foreman.forms import parse
+from foreman.errors import ConfigError
+from foreman.forms import Judgment, parse, validate_judgment
 
 GROUP = make_group(gid="g1", design="docs/d.md")
 
@@ -226,3 +227,82 @@ def test_test_reviewer_findings_are_verbatim() -> None:
 def test_review_contracts_have_exact_bytes(role, fields, expected) -> None:
     form = parse(role, "review", fields, where="review")
     assert render(form, paths=["ignored.py"], view_paths={}, red_ids=[]) == expected
+
+
+@pytest.mark.parametrize("red_ids", [(), ("tests/test_x.py::test_x[two words::é]",)])
+def test_judgment_frames_approved_text_and_only_supplied_evidence(red_ids):
+    block = (
+        "2 red | approved\n\n    report: literal $text\nend judgment\n3 build | café  "
+    )
+    form = Judgment(
+        "docs/superpowers/specs/a.md",
+        ("2", "3"),
+        block,
+        red_ids,
+        ("/state/g-check.txt", "state/g-producer.txt"),
+    )
+    assert validate_judgment(form) == []
+    expected = (
+        "judgment\nspec: docs/superpowers/specs/a.md\nstep: 2\nstep: 3\n"
+        f"step-lines: 5\n{block}\n"
+        + "".join(f"red: {test_id}\n" for test_id in red_ids)
+        + "report: /state/g-check.txt\nreport: state/g-producer.txt\nend judgment"
+    )
+    assert render(
+        form,
+        paths=["ignored.py"],
+        view_paths={"ignored.py": "/ignored.pyi"},
+        red_ids=["tests/test_unrelated.py::test_old"],
+    ).encode("utf-8") == expected.encode("utf-8")
+
+
+def test_judgment_single_line_block_has_positive_decimal_length():
+    form = Judgment(
+        "docs/superpowers/specs/a.md", ("3",), "approved", (), ("/state/check.txt",)
+    )
+    assert render(form, paths=[], view_paths={}, red_ids=[]) == (
+        "judgment\nspec: docs/superpowers/specs/a.md\nstep: 3\n"
+        "step-lines: 1\napproved\nreport: /state/check.txt\nend judgment"
+    )
+
+
+@pytest.mark.parametrize(
+    "role,layer", [("core-builder", "core"), ("seam-builder", "seams")]
+)
+def test_build_retry_reasons_follow_red_ids_before_exclusions(role, layer):
+    form = parse(
+        role,
+        "build",
+        {
+            "step": "approved\n    signature",
+            "red": [{"step": "2"}],
+            "exclude": [f"gauntlet/{layer}/other.py"],
+        },
+        where="build",
+    )
+    assert render(
+        form,
+        paths=[f"gauntlet/{layer}/a.py"],
+        view_paths={},
+        red_ids=["tests/test_a.py::test_a", "tests/test_b.py::test_b"],
+        juror_reasons=("Preserve '$text' and café.", "Second reason."),
+    ) == (
+        f"approved\n    signature\ngauntlet/{layer}/a.py\n"
+        "tests/test_a.py::test_a\ntests/test_b.py::test_b\n"
+        "Preserve '$text' and café.\nSecond reason.\n"
+        f"exclude: gauntlet/{layer}/other.py"
+    )
+
+
+@pytest.mark.parametrize(
+    "role,shape,fields",
+    [
+        ("core-builder", "stub", {"step": "approved"}),
+        ("diff-reviewer", "review", {"scope": "working-tree"}),
+        ("test-writer", "repair", {"sources": [], "failures": ["observed failure"]}),
+    ],
+)
+def test_runtime_reasons_are_rejected_outside_build_retry(role, shape, fields):
+    form = parse(role, shape, fields, where="form")
+    with pytest.raises(ConfigError, match="only for a build retry"):
+        render(form, paths=[], view_paths={}, red_ids=[], juror_reasons=("Reason.",))
