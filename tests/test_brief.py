@@ -45,17 +45,20 @@ def test_red_preserves_behavior_order_and_repeated_views(steps, label) -> None:
         },
         where="red",
     )
-    assert render(
-        form,
-        paths=["tests/test_a.py"],
-        view_paths={"gauntlet/core/a.py": "/scratch/g1/custom.pyi"},
-        red_ids=["tests/test_unrelated.py::test_old"],
-    ).encode("utf-8") == (
-        f"red\ndesign: docs/superpowers/specs/a.md, Order {label}\n"
-        "behavior: Keeps $data and café.\nview: /scratch/g1/custom.pyi\n"
-        "behavior: Keeps selectors.\nview: /scratch/g1/custom.pyi\n"
-        "replaces: tests/test_a.py::TestA::test_a[two words]"
-    ).encode()
+    assert (
+        render(
+            form,
+            paths=["tests/test_a.py"],
+            view_paths={"gauntlet/core/a.py": "/scratch/g1/custom.pyi"},
+            red_ids=["tests/test_unrelated.py::test_old"],
+        ).encode("utf-8")
+        == (
+            f"red\ndesign: docs/superpowers/specs/a.md, Order {label}\n"
+            "behavior: Keeps $data and café.\nview: /scratch/g1/custom.pyi\n"
+            "behavior: Keeps selectors.\nview: /scratch/g1/custom.pyi\n"
+            "replaces: tests/test_a.py::TestA::test_a[two words]"
+        ).encode()
+    )
 
 
 def test_red_without_origin_adds_no_design() -> None:
@@ -93,8 +96,10 @@ def test_red_without_origin_adds_no_design() -> None:
                     {"anchor": "docs/b.md:3", "before": "Before", "after": "After"},
                 ]
             },
-            'moved\nlines: docs/a.md:12 | before: "Old $rule" | after: "New rule"\n'
-            'lines: docs/b.md:3 | before: "Before" | after: "After"',
+            (
+                'moved\nlines: docs/a.md:12 | before: "Old $rule" | after: "New rule"\n'
+                'lines: docs/b.md:3 | before: "Before" | after: "After"'
+            ),
         ),
     ],
 )

@@ -61,9 +61,11 @@ def render(
                 parts.extend(f"spec: {spec}" for spec in form.specs)
         case _:
             assert_never(form)
-    if isinstance(form, (forms.Stub, forms.Build, forms.Rewrite, forms.BuilderFinding)):
-        if form.exclude:
-            parts.append("exclude: " + " ".join(form.exclude))
+    if (
+        isinstance(form, (forms.Stub, forms.Build, forms.Rewrite, forms.BuilderFinding))
+        and form.exclude
+    ):
+        parts.append("exclude: " + " ".join(form.exclude))
     return "\n".join(parts)
 
 
