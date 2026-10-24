@@ -473,12 +473,15 @@ def test_red_renders_generated_view_and_keeps_exact_dispatch(
     )
     g = make_group(make_step("stub", ["a.py"]), red)
     wt = git.make_worktree(cfg, g.id)
-    backend = fake_backend([{"a.py": "stub"}, {"tests/test_a.py": "red"}])
+    report = _red_report("tests/test_a.py::test_new")
+    backend = fake_backend(
+        [{"a.py": "stub"}, {"tests/test_a.py": "red"}], outputs=["", report]
+    )
     loop._steps(cfg, g, wt, log, backend, 0)
     expected = f"red\nbehavior: Preserve safe data.\nview: {cfg.view_root}/g1/a.pyi"
     assert backend.briefs[1] == expected
     assert log.kept("g1-red-brief") == expected
-    assert log.kept("g1-red") == ""
+    assert log.kept("g1-red") == report + "\n"
 
 
 @pytest.mark.parametrize("role", ["diff-reviewer", "test-reviewer"])
@@ -541,11 +544,13 @@ def test_red_output_outside_paths_stops_before_check_and_next_dispatch(
 def test_red_scope_uses_snapshot_and_allows_changes_to_its_existing_file(
     green_cfg, log, fake_backend
 ):
+    green_cfg = _viewing(green_cfg)
     red = make_step(
         "red",
         ["tests/test_a.py"],
         role="test-writer",
-        form=forms.Red(()),
+        views=["a.py"],
+        form=forms.Red((forms.Behavior("A behavior", "a.py"),)),
     )
     g = make_group(red)
     wt = git.make_worktree(green_cfg, g.id)
@@ -557,7 +562,10 @@ def test_red_scope_uses_snapshot_and_allows_changes_to_its_existing_file(
         g,
         wt,
         log,
-        fake_backend([{"tests/test_a.py": "old and new tests"}]),
+        fake_backend(
+            [{"tests/test_a.py": "old and new tests"}],
+            outputs=[_red_report("tests/test_a.py::test_new")],
+        ),
         0,
     )
     assert (wt / "a.py").read_text() == "earlier stub"
@@ -571,4 +579,269 @@ def test_generated_view_path_must_fit_single_line(green_cfg, log, fake_backend):
     backend = fake_backend()
     with pytest.raises(RulingNeeded, match="not a single line"):
         loop._steps(cfg, g, wt, log, backend, 0)
+    assert backend.briefs == []
+
+
+def _red_report(*ids: str, behavior: int = 1) -> str:
+    records = [
+        "SHAPE red",
+        "BRIEF red",
+        "VIEWS none",
+        "BLOCKED none",
+        "GATE not run",
+        "CHANGED 1",
+        "STATUS done",
+    ]
+    for test_id in ids:
+        records.extend(
+            [
+                f"BEHAVIOR {behavior} | {test_id} | docs: spec:1 | breaks when: missing",
+                f'RUN red | {test_id} | assertion | "missing"',
+                f'RUN rerun | {test_id} | assertion | "missing"',
+            ]
+        )
+    records.extend(
+        [
+            'RUN red | tests/test_a.py::test_existing | passed | "ok"',
+            'RUN rerun | tests/test_a.py::test_existing | passed | "ok"',
+            "DIFF none",
+            "COMMANDS none",
+            "END TESTS",
+        ]
+    )
+    return "\n".join(records)
+
+
+def test_build_resolves_filtered_multiple_producers_after_log_reload(
+    green_cfg, log, fake_backend
+):
+    green_cfg = _viewing(green_cfg)
+    red_a = make_step(
+        "red-a",
+        ["tests/test_a.py", "tests/test_b.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("A behavior", "a.py"),)),
+        views=["a.py"],
+        check=["false"],
+        expect_code=1,
+    )
+    red_b = replace(red_a, id="red-b", paths=["tests/test_c.py"])
+    first = "tests/test_a.py::TestA::test_new[with spaces]"
+    second = "tests/test_a.py::test_another"
+    other = "tests/test_c.py::test_new"
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder",
+            "Approved build",
+            (
+                forms.RedSelection("red-b"),
+                forms.RedSelection("red-a", ("tests/test_a.py",)),
+            ),
+        ),
+    )
+    producers = make_group(red_a, red_b)
+    wt = git.make_worktree(green_cfg, producers.id)
+    (wt / "a.py").write_text("stub")
+    reports = [
+        _red_report(first, "tests/test_b.py::test_excluded", second),
+        _red_report(other),
+    ]
+    loop._steps(green_cfg, producers, wt, log, fake_backend(outputs=reports), 0)
+    backend = fake_backend()
+    loop._steps(
+        green_cfg, make_group(red_a, red_b, build), wt, EventLog(green_cfg), backend, 2
+    )
+    assert backend.briefs == [
+        f"Approved build\ngauntlet/core/a.py\n{other}\n{first}\n{second}"
+    ]
+    assert log.kept("g1-red-a") == reports[0] + "\n"
+    assert log.kept("g1-build-brief") == backend.briefs[0]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "partial",
+        "behavior",
+        "scope",
+        "duplicate",
+        "excluded-invalid",
+        "empty-selection",
+    ],
+)
+def test_invalid_red_evidence_stops_before_builder(green_cfg, log, fake_backend, case):
+    green_cfg = _viewing(green_cfg)
+    red = make_step(
+        "red",
+        ["tests/test_a.py", "tests/test_b.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("A behavior", "a.py"),)),
+        views=["a.py"],
+    )
+    test_id = "tests/test_a.py::test_new"
+    report = _red_report(test_id)
+    if case == "partial":
+        report = report.removesuffix("END TESTS")
+    elif case == "behavior":
+        report = _red_report(test_id, behavior=2)
+    elif case == "scope":
+        report = _red_report("tests/test_other.py::test_new")
+    elif case == "duplicate":
+        report = _red_report(test_id, test_id)
+    elif case == "excluded-invalid":
+        report = _red_report(test_id, "tests/test_b.py::test_bad").replace(
+            "RUN rerun | tests/test_b.py::test_bad | assertion",
+            "RUN rerun | tests/test_b.py::test_bad | passed",
+        )
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder",
+            "Approved build",
+            (
+                forms.RedSelection(
+                    "red",
+                    (
+                        "tests/test_b.py"
+                        if case == "empty-selection"
+                        else "tests/test_a.py",
+                    ),
+                ),
+            ),
+        ),
+    )
+    g = make_group(red, build)
+    wt = git.make_worktree(green_cfg, g.id)
+    (wt / "a.py").write_text("stub")
+    backend = fake_backend(outputs=[report])
+    with pytest.raises(RulingNeeded, match="g1-red.txt"):
+        loop._steps(green_cfg, g, wt, log, backend, 0)
+    assert backend.agents == ["test-writer"]
+    assert log.kept("g1-red") == report.rstrip("\n") + "\n"
+
+
+@pytest.mark.parametrize("failure", ["rejected", "partial", "check", "views"])
+def test_failed_red_rerun_invalidates_earlier_success(
+    green_cfg, log, fake_backend, failure
+):
+    green_cfg = _viewing(green_cfg)
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("A behavior", "a.py"),)),
+        views=["a.py"],
+    )
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red"),)
+        ),
+    )
+    wt = git.make_worktree(green_cfg, "g1")
+    (wt / "a.py").write_text("stub")
+    loop._steps(
+        green_cfg,
+        make_group(red),
+        wt,
+        log,
+        fake_backend(outputs=[_red_report("tests/test_a.py::test_new")]),
+        0,
+    )
+    cfg = green_cfg
+    output = _red_report("tests/test_a.py::test_new")
+    if failure == "rejected":
+        output = "REJECTED: STEERING invalid"
+    elif failure == "partial":
+        output = "SHAPE red"
+    elif failure == "check":
+        red = replace(red, check=["false"])
+    else:
+        red = replace(red, views=["a.py"])
+        cfg = replace(green_cfg, view_cmd=["false"])
+    with pytest.raises(RulingNeeded):
+        loop._steps(cfg, make_group(red), wt, log, fake_backend(outputs=[output]), 0)
+    backend = fake_backend()
+    with pytest.raises(RulingNeeded, match="g1-red.txt"):
+        loop._steps(cfg, make_group(red, build), wt, EventLog(cfg), backend, 1)
+    assert backend.briefs == []
+
+
+def test_red_rerun_replaces_ids_and_overlapping_producers_stop(
+    green_cfg, log, fake_backend
+):
+    green_cfg = _viewing(green_cfg)
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("A behavior", "a.py"),)),
+        views=["a.py"],
+    )
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder",
+            "Approved build",
+            (forms.RedSelection("red"),),
+        ),
+    )
+    wt = git.make_worktree(green_cfg, "g1")
+    (wt / "a.py").write_text("stub")
+    for name in ("old", "new"):
+        loop._steps(
+            green_cfg,
+            make_group(red),
+            wt,
+            log,
+            fake_backend(outputs=[_red_report(f"tests/test_a.py::test_{name}")]),
+            0,
+        )
+    backend = fake_backend()
+    loop._steps(green_cfg, make_group(red, build), wt, log, backend, 1)
+    assert backend.briefs == [
+        "Approved build\ngauntlet/core/a.py\ntests/test_a.py::test_new"
+    ]
+    other = replace(red, id="other")
+    loop._steps(
+        green_cfg,
+        make_group(other),
+        wt,
+        log,
+        fake_backend(outputs=[_red_report("tests/test_a.py::test_new")]),
+        0,
+    )
+    build = replace(
+        build,
+        form=replace(
+            build.form, red=(forms.RedSelection("red"), forms.RedSelection("other"))
+        ),
+    )
+    backend = fake_backend()
+    with pytest.raises(RulingNeeded, match="overlapping red test ids"):
+        loop._steps(green_cfg, make_group(red, other, build), wt, log, backend, 2)
+    assert backend.briefs == []
+
+
+def test_missing_red_report_stops_before_builder(green_cfg, log, fake_backend):
+    green_cfg = _viewing(green_cfg)
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("A behavior", "a.py"),)),
+        views=["a.py"],
+    )
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red"),)
+        ),
+    )
+    wt = git.make_worktree(green_cfg, "g1")
+    (wt / "a.py").write_text("stub")
+    backend = fake_backend()
+    with pytest.raises(RulingNeeded, match="g1-red.txt"):
+        loop._steps(green_cfg, make_group(red, build), wt, log, backend, 1)
     assert backend.briefs == []

@@ -1,5 +1,7 @@
 """Runs groups: dispatch order, checks, reviews, commit and cleanup."""
 
+import json
+from dataclasses import asdict
 from pathlib import Path
 
 from foreman import backends, brief, forms, git, reports, steps, verify, views
@@ -51,9 +53,82 @@ def _dispatch(
     return report
 
 
+def _producer_identity(step: Step) -> str:
+    """Canonical producer definition; evidence never migrates to another form."""
+    return json.dumps(
+        {
+            "role": step.role,
+            "shape": step.form.shape,
+            "form": asdict(step.form),
+            "paths": step.paths,
+            "views": step.views,
+        },
+        sort_keys=True,
+    )
+
+
+def _red_evidence(step: Step, text: str) -> tuple[reports.RedEvidence, ...]:
+    evidence = reports.red(text)
+    assert isinstance(step.form, forms.Red)
+    for item in evidence:
+        if not 1 <= item.behavior <= len(step.form.behaviors):
+            raise ConfigError(
+                f"red behavior index outside producer form: {item.behavior}"
+            )
+        if item.test_id.partition("::")[0] not in step.paths:
+            raise ConfigError(f"red test outside producer paths: {item.test_id}")
+    return evidence
+
+
+def _red_ids(group: Group, index: int, wt: Path, log: EventLog) -> list[str]:
+    step = group.steps[index]
+    if not isinstance(step.form, forms.Build):
+        return []
+    ids: list[str] = []
+    for selection in step.form.red:
+        name = f"{group.id}-{selection.step}"
+        try:
+            producer = next(
+                (s for s in group.steps[:index] if s.id == selection.step), None
+            )
+            if (
+                producer is None
+                or producer.role != "test-writer"
+                or not isinstance(producer.form, forms.Red)
+            ):
+                raise ConfigError("reference is not an earlier red producer")
+            if selection.files is not None and (
+                not selection.files
+                or len(set(selection.files)) != len(selection.files)
+                or not set(selection.files) <= set(producer.paths)
+            ):
+                raise ConfigError("invalid red file filter")
+            if log.kept(f"{name}-evidence") != _producer_identity(producer):
+                raise ConfigError("red producer has no current successful evidence")
+            evidence = _red_evidence(producer, log.kept(name))
+            selected = [
+                item.test_id
+                for item in evidence
+                if selection.files is None
+                or item.test_id.partition("::")[0] in selection.files
+            ]
+            if not selected:
+                raise ConfigError("red selection contains no new ids")
+            if set(ids).intersection(selected):
+                raise ConfigError("overlapping red test ids")
+            ids.extend(selected)
+        except ConfigError as error:
+            raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+    return ids
+
+
 def _steps(
     cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend, first: int
 ) -> None:
+    # Invalidate before any views, dispatch or check can fail on a rerun.
+    for producer in group.steps[first:]:
+        if isinstance(producer.form, forms.Red):
+            log.keep(f"{group.id}-{producer.id}-evidence", "")
     for index in range(first, len(group.steps)):
         step = group.steps[index]
         if step.views:
@@ -74,10 +149,11 @@ def _steps(
                     f"step {step.id} generated view missing or not a single line: {value!r}",
                 )
             view_paths[source] = value
+        red_ids = _red_ids(group, index, wt, log)
         before = git.snapshot(wt)
         log.keep(f"{group.id}-{step.id}-before", before)
         text = brief.render(
-            step.form, paths=step.paths, view_paths=view_paths, red_ids=[]
+            step.form, paths=step.paths, view_paths=view_paths, red_ids=red_ids
         )
         report = _dispatch(
             group, wt, log, backend, f"{group.id}-{step.id}", text, step.role
@@ -109,6 +185,13 @@ def _steps(
             path = log.keep(f"{group.id}-{step.id}-check", _text(verdict.result))
             if not verdict.green:
                 raise _rule(log, group, wt, str(path), f"step {step.id} check missed")
+        if isinstance(step.form, forms.Red):
+            name = f"{group.id}-{step.id}"
+            try:
+                _red_evidence(step, log.kept(name))
+            except ConfigError as error:
+                raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+            log.keep(f"{name}-evidence", _producer_identity(step))
 
 
 def _test_owner(
