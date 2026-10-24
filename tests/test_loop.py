@@ -1001,11 +1001,13 @@ def test_upheld_batches_share_role_across_steps_and_keep_sources_separate(
     test = "tests/test_a.py:1 wrong"
     diff_key = "g1-review-diff-reviewer"
     test_key = "g1-review-test-reviewer"
-    diff_report = "FINDINGS 4\n  " + "\n  ".join([core_a, core_c, core_b, seam]) + "\n"
+    diff_report = (
+        "FINDINGS 4\n  " + f"{core_a}\n  {core_c}\n  {core_b}\n  {seam}" + "\n"
+    )
     test_report = f"FINDINGS 1\n  {test}\n"
     log.keep(diff_key, diff_report)
     log.keep(test_key, test_report)
-    upheld = "\n".join([core_a, core_b, core_c, seam, test])
+    upheld = f"{core_a}\n{core_b}\n{core_c}\n{seam}\n{test}"
     backend = fake_backend(token_counts=[11, 12, 13, 14])
     with pytest.raises(RulingNeeded, match="needs judgment"):
         loop.run_upheld(cfg, g, upheld, log, backend)
