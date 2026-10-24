@@ -3,7 +3,7 @@ from dataclasses import replace
 import pytest
 from conftest import make_group, make_step
 
-from foreman import git, loop
+from foreman import forms, git, loop
 from foreman.config import Config, Reviewer
 from foreman.errors import (
     ConfigError,
@@ -39,7 +39,10 @@ def test_run_group_commits_pushes_and_cleans(
     assert subject == "Group g1: steps s1, s2"
     files = run_ok(["git", "show", "--name-only", "--format=", commit], origin)
     assert sorted(files.out.split()) == ["a.py", "b.py"]
-    assert backend.briefs == ["brief s1", "brief s2"]
+    assert backend.briefs == [
+        "stub\nApproved step s1\na.py",
+        "stub\nApproved step s2\nb.py",
+    ]
     assert not (green_cfg.worktree_root / "g1").exists()
     assert log.done() == {"g1"}
     assert log.kept("g1-s1") == ""
@@ -84,7 +87,7 @@ def test_red_gate_sends_finding_to_owning_step(
     backend = fake_backend([{"a.py": "1"}, {"b.py": "2"}, {"a.py": "fixed"}])
     loop.run_group(cfg, g, log, backend)
     assert backend.briefs[2] == "a.py:1 bad"
-    assert backend.agents[2] == "builder"
+    assert backend.agents[2] == "core-builder"
     assert log.done() == {"g1"}
 
 
@@ -121,7 +124,7 @@ def test_nothing_changed_is_a_ruling(green_cfg, log, fake_backend) -> None:
 
 
 def _reviewed(cfg: Config) -> Config:
-    return replace(cfg, reviewers=[Reviewer("diff-reviewer", ["a.py"], True)])
+    return replace(cfg, reviewers=[Reviewer("diff-reviewer", ["a.py"])])
 
 
 def test_reviewer_findings_raise_and_are_kept(
@@ -132,7 +135,7 @@ def test_reviewer_findings_raise_and_are_kept(
     backend = fake_backend([{"a.py": "1"}], ["", "FINDINGS 1\n  a.py:1 wrong\n"])
     with pytest.raises(FindingsToRule):
         loop.run_group(cfg, g, log, backend)
-    assert backend.briefs[1] == "working tree against HEAD\nspec: design.md"
+    assert backend.briefs[1] == ""
     assert backend.agents[1] == "diff-reviewer"
     assert "a.py:1 wrong" in log.kept("g1-review-diff-reviewer")
     err = capsys.readouterr().err
@@ -151,7 +154,7 @@ def test_clean_review_lands(green_cfg, origin, log, fake_backend) -> None:
 def test_reviewer_skipped_when_paths_unchanged(
     green_cfg, origin, log, fake_backend
 ) -> None:
-    cfg = replace(green_cfg, reviewers=[Reviewer("r", ["docs"], False)])
+    cfg = replace(green_cfg, reviewers=[Reviewer("diff-reviewer", ["docs"])])
     g = make_group(make_step("s1", ["a.py"]))
     backend = fake_backend([{"a.py": "1"}])
     loop.run_group(cfg, g, log, backend)
@@ -219,7 +222,10 @@ def test_run_section_runs_in_order_and_notifies_owner(
     backend = fake_backend([{"a.py": "1"}, {"b.py": "2"}])
     commits = loop.run_section(green_cfg, [g2, g1], log, backend)
     assert len(commits) == 2
-    assert backend.briefs == ["brief s1", "brief s2"]
+    assert backend.briefs == [
+        "stub\nApproved step s1\na.py",
+        "stub\nApproved step s2\nb.py",
+    ]
     assert log.done() == {"g1", "g2"}
     assert "[milestone_done]" in capsys.readouterr().err
 
@@ -293,7 +299,10 @@ def test_wrong_test_stops_before_check_and_gate(
     )
     with pytest.raises(WrongTest):
         loop.run_group(cfg, g, log, backend)
-    assert backend.briefs == ["brief tests", "brief build"]
+    assert backend.briefs == [
+        "stub\nApproved step tests\ntests",
+        "stub\nApproved step build\na.py",
+    ]
     assert log.kept("g1-build") == output
     assert log.kept("g1-build-before").strip()
     wt = git.worktree(cfg, "g1")
@@ -353,7 +362,7 @@ def test_retest_restores_paths_then_runs_remaining_steps_and_lands(
 
     class Spy(fake_backend):
         def start(self, brief, worktree, agent):
-            if brief == "brief build":
+            if brief == "stub\nApproved step build\na.py\nnew.py":
                 seen.append(
                     (
                         (worktree / "a.py").read_text(),
@@ -371,8 +380,14 @@ def test_retest_restores_paths_then_runs_remaining_steps_and_lands(
     resumed = Spy(files)
     commit = loop.run_retest(green_cfg, g, fix, log, resumed)
     assert seen == [("before", False, "preserve", "fixed" if fix else "original")]
-    assert resumed.briefs == ([fix] if fix else []) + ["brief build", "brief later"]
-    assert resumed.agents == (["test-writer"] if fix else []) + ["builder", "builder"]
+    assert resumed.briefs == ([fix] if fix else []) + [
+        "stub\nApproved step build\na.py\nnew.py",
+        "stub\nApproved step later\nb.py",
+    ]
+    assert resumed.agents == (["test-writer"] if fix else []) + [
+        "core-builder",
+        "core-builder",
+    ]
     if fix:
         assert log.kept("g1-tests-retest-check") == ""
     assert run_ok(["git", "show", f"{commit}:a.py"], origin).out == "finished"
@@ -414,7 +429,7 @@ def test_retest_can_stop_again_for_wrong_test(green_cfg, log, fake_backend):
     backend = fake_backend(outputs=[output])
     with pytest.raises(WrongTest):
         loop.run_retest(green_cfg, g, "", log, backend)
-    assert backend.briefs == ["brief build"]
+    assert backend.briefs == ["stub\nApproved step build\na.py"]
 
 
 @pytest.mark.parametrize("view_code", [0, 1])
@@ -437,7 +452,123 @@ def test_retest_makes_test_step_views_before_fix(
     backend = fake_backend(outputs=["", output])
     with pytest.raises(RulingNeeded if view_code else WrongTest):
         loop.run_retest(cfg, g, "fix", log, backend)
-    assert backend.briefs == ([] if view_code else ["fix", "brief build"])
+    assert backend.briefs == (
+        [] if view_code else ["fix", "stub\nApproved step build\nb.py"]
+    )
     assert log.kept("g1-tests-retest-views") == ""
     if not view_code:
         assert (cfg.view_root / "g1/a.pyi").exists()
+
+
+def test_red_renders_generated_view_and_keeps_exact_dispatch(
+    green_cfg, log, fake_backend
+):
+    cfg = _viewing(green_cfg)
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        views=["a.py"],
+        form=forms.Red((forms.Behavior("Preserve safe data.", "a.py"),)),
+    )
+    g = make_group(make_step("stub", ["a.py"]), red)
+    wt = git.make_worktree(cfg, g.id)
+    backend = fake_backend([{"a.py": "stub"}, {"tests/test_a.py": "red"}])
+    loop._steps(cfg, g, wt, log, backend, 0)
+    expected = f"red\nbehavior: Preserve safe data.\nview: {cfg.view_root}/g1/a.pyi"
+    assert backend.briefs[1] == expected
+    assert log.kept("g1-red-brief") == expected
+    assert log.kept("g1-red") == ""
+
+
+@pytest.mark.parametrize("role", ["diff-reviewer", "test-reviewer"])
+def test_default_review_brief_is_kept_even_when_empty(
+    green_cfg, origin, log, fake_backend, role
+):
+    cfg = replace(green_cfg, reviewers=[Reviewer(role, ["a.py"])])
+    g = make_group(make_step("s1", ["a.py"]))
+    backend = fake_backend([{"a.py": "1"}])
+    loop.run_group(cfg, g, log, backend)
+    expected = "" if role == "diff-reviewer" else "working tree"
+    assert backend.briefs[1] == expected
+    assert log.kept(f"g1-review-{role}-brief") == expected
+
+
+def test_test_review_uses_explicit_specs_in_order(green_cfg, origin, log, fake_backend):
+    cfg = replace(green_cfg, reviewers=[Reviewer("test-reviewer", ["a.py"])])
+    specs = ("docs/superpowers/specs/b.md", "docs/superpowers/specs/a.md")
+    g = make_group(
+        make_step("s1", ["a.py"]),
+        reviews={"test-reviewer": forms.TestReview("working-tree", specs=specs)},
+    )
+    backend = fake_backend([{"a.py": "1"}])
+    loop.run_group(cfg, g, log, backend)
+    assert backend.briefs[1] == (
+        "working tree\nspec: docs/superpowers/specs/b.md"
+        "\nspec: docs/superpowers/specs/a.md"
+    )
+
+
+@pytest.mark.parametrize("outside", ["a.py", "tests/test_other.py", "ignored.txt"])
+def test_red_output_outside_paths_stops_before_check_and_next_dispatch(
+    green_cfg, log, fake_backend, outside
+):
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        check=["true"],
+        form=forms.Red(()),
+    )
+    g = make_group(red, make_step("later", ["b.py"]))
+    wt = git.make_worktree(green_cfg, g.id)
+    (wt / "a.py").write_text("before")
+    (wt / ".gitignore").write_text("ignored.txt\n")
+    backend = fake_backend([{outside: "unexpected", "tests/test_a.py": "red"}])
+    with pytest.raises(
+        RulingNeeded, match="red output outside declared paths"
+    ) as error:
+        loop._steps(green_cfg, g, wt, log, backend, 0)
+    assert outside in str(error.value)
+    assert "g1-red.txt" in str(error.value)
+    assert len(backend.briefs) == 1
+    assert log.kept("g1-red-before")
+    assert log.kept("g1-red-brief") == "red"
+    with pytest.raises(ConfigError):
+        log.kept("g1-red-check")
+
+
+def test_red_scope_uses_snapshot_and_allows_changes_to_its_existing_file(
+    green_cfg, log, fake_backend
+):
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red(()),
+    )
+    g = make_group(red)
+    wt = git.make_worktree(green_cfg, g.id)
+    (wt / "a.py").write_text("earlier stub")
+    (wt / "tests").mkdir()
+    (wt / "tests/test_a.py").write_text("old tests")
+    loop._steps(
+        green_cfg,
+        g,
+        wt,
+        log,
+        fake_backend([{"tests/test_a.py": "old and new tests"}]),
+        0,
+    )
+    assert (wt / "a.py").read_text() == "earlier stub"
+
+
+def test_generated_view_path_must_fit_single_line(green_cfg, log, fake_backend):
+    cfg = replace(_viewing(green_cfg), view_root=green_cfg.view_root / "bad\nroot")
+    g = make_group(make_step("s1", ["b.py"], views=["a.py"]))
+    wt = git.make_worktree(cfg, g.id)
+    (wt / "a.py").write_text("stub")
+    backend = fake_backend()
+    with pytest.raises(RulingNeeded, match="not a single line"):
+        loop._steps(cfg, g, wt, log, backend, 0)
+    assert backend.briefs == []

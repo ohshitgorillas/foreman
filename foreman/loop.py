@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from foreman import backends, brief, git, reports, steps, verify, views
+from foreman import backends, brief, forms, git, reports, steps, verify, views
 from foreman.backends import Backend
 from foreman.config import Config, Reviewer
 from foreman.errors import (
@@ -42,6 +42,7 @@ def _dispatch(
     role: str,
 ) -> reports.Report:
     """Start a fresh agent, keep its output, and read it; a refusal or overload is a ruling."""
+    log.keep(f"{name}-brief", brief_text)
     result = backend.wait(backend.start(brief_text, wt, role))
     path = log.keep(name, _text(result))
     report = reports.read(result)
@@ -60,10 +61,41 @@ def _steps(
             path = log.keep(f"{group.id}-{step.id}-views", _text(made.result))
             if not made.green:
                 raise _rule(log, group, wt, str(path), f"step {step.id} views failed")
-        log.keep(f"{group.id}-{step.id}-before", git.snapshot(wt))
-        report = _dispatch(
-            group, wt, log, backend, f"{group.id}-{step.id}", step.brief, step.role
+        view_paths = {}
+        for source in step.views:
+            view = views.path(cfg, group.id, source)
+            value = str(view)
+            if not view.is_file() or any(c in value for c in "\r\n\0"):
+                raise _rule(
+                    log,
+                    group,
+                    wt,
+                    f"{group.id}-{step.id}-views.txt",
+                    f"step {step.id} generated view missing or not a single line: {value!r}",
+                )
+            view_paths[source] = value
+        before = git.snapshot(wt)
+        log.keep(f"{group.id}-{step.id}-before", before)
+        text = brief.render(
+            step.form, paths=step.paths, view_paths=view_paths, red_ids=[]
         )
+        report = _dispatch(
+            group, wt, log, backend, f"{group.id}-{step.id}", text, step.role
+        )
+        if isinstance(step.form, forms.Red):
+            outside = [
+                p
+                for p in git.changed_since(wt, before)
+                if not steps.holds(step.paths, p)
+            ]
+            if outside:
+                raise _rule(
+                    log,
+                    group,
+                    wt,
+                    f"{group.id}-{step.id}.txt",
+                    f"step {step.id} red output outside declared paths: {', '.join(outside)}",
+                )
         if report.test_wrong:
             test = _test_owner(group, index, report, wt, log)
             text = (
@@ -136,9 +168,16 @@ def _review(
         if not any(steps.holds(reviewer.paths, c) for c in changed):
             continue
         name = f"{group.id}-review-{reviewer.role}"
-        report = _dispatch(
-            group, wt, log, backend, name, brief.review(reviewer, group), reviewer.role
-        )
+        form = group.reviews.get(reviewer.role)
+        if form is None:
+            form = forms.parse(
+                reviewer.role,
+                "review",
+                {"scope": "working-tree"},
+                where=f"groups.{group.id}.reviews.{reviewer.role}",
+            )
+        text = brief.render(form, paths=[], view_paths={}, red_ids=[])
+        report = _dispatch(group, wt, log, backend, name, text, reviewer.role)
         if report.findings:
             kept.append(name)
     if kept:
