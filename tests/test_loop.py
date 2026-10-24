@@ -442,24 +442,34 @@ def test_wrong_test_stops_before_check_and_gate(
         make_step("tests", ["tests"], role="test-writer"),
         make_step("build", ["a.py"], check=check),
         make_step("later", ["b.py"]),
+        design="docs/superpowers/specs/approved.md",
     )
     output = "TEST WRONG 1:\n  tests/test_a.py::test_a | wrong | spec:1\n"
     backend = fake_backend(
-        [{"tests/test_a.py": "red"}, {"a.py": "partial"}], ["", output]
+        [{"tests/test_a.py": "red"}, {"a.py": "partial"}],
+        ["", output, _undetermined()],
     )
     with pytest.raises(WrongTest):
         loop.run_group(cfg, g, log, backend)
-    assert backend.briefs == [
+    assert backend.briefs[:2] == [
         "stub\nApproved step tests\ntests",
         "stub\nApproved step build\na.py",
     ]
+    assert backend.agents == ["test-writer", "core-builder", "juror"]
+    assert backend.briefs[2].startswith("judgment\n")
     assert log.kept("g1-build") == output
+    assert log.kept("g1-build-juror-1").strip() == _undetermined()
     assert log.kept("g1-build-before").strip()
     wt = git.worktree(cfg, "g1")
     assert (wt / "a.py").read_text() == "partial"
     assert log.done() == set()
     err = capsys.readouterr().err
-    for expected in ("[test_wrong] g1:", "g1-build.txt", "build", "tests", str(wt)):
+    for expected in (
+        "[test_wrong] g1:",
+        "g1-build.txt",
+        "Need owner evidence",
+        str(wt),
+    ):
         assert expected in err
     with pytest.raises(ConfigError):
         log.kept("g1-build-check")
@@ -476,17 +486,28 @@ def test_wrong_test_stops_before_check_and_gate(
         "tests/a.py::test_a | wrong\n  other/b.py::test_b | wrong",
     ],
 )
-def test_wrong_tests_need_one_earlier_owner(green_cfg, log, fake_backend, lines):
+def test_wrong_tests_reach_juror_without_one_earlier_owner(
+    green_cfg, log, fake_backend, lines
+):
     g = make_group(
         make_step("tests", ["tests"]),
         make_step("other", ["other"]),
         make_step("build", ["a.py"]),
         make_step("later", ["later.py"]),
+        design="docs/superpowers/specs/approved.md",
     )
-    backend = fake_backend(outputs=["", "", f"TEST WRONG 2:\n  {lines}\n"])
-    with pytest.raises(RulingNeeded, match="exactly one earlier step"):
+    output = f"TEST WRONG 2:\n  {lines}\n"
+    backend = fake_backend(outputs=["", "", output, _undetermined("README.md:1")])
+    with pytest.raises(WrongTest, match="Need owner evidence"):
         loop.run_group(green_cfg, g, log, backend)
-    assert len(backend.briefs) == 3
+    assert backend.agents == ["core-builder", "core-builder", "core-builder", "juror"]
+    assert backend.briefs[3].startswith("judgment\n")
+    judgment = json.loads(log.kept("g1-build-judgment"))
+    assert judgment["steps"] == ["build"]
+    assert judgment["red_ids"] == []
+    assert judgment["reports"] == [str(green_cfg.state_dir / "g1-build.txt")]
+    assert log.kept("g1-build") == output
+    assert not log.done()
 
 
 @pytest.mark.parametrize("fix", ["", "fix tests verbatim\n\nkeep this newline\n"])
@@ -497,6 +518,7 @@ def test_retest_restores_paths_then_runs_remaining_steps_and_lands(
         make_step("tests", ["tests"], role="test-writer", check=["true"]),
         make_step("build", ["a.py", "new.py"]),
         make_step("later", ["b.py"]),
+        design="docs/superpowers/specs/approved.md",
     )
     # The builder owns a.py too, so the snapshot must restore the earlier content.
     backend = fake_backend(
@@ -504,7 +526,7 @@ def test_retest_restores_paths_then_runs_remaining_steps_and_lands(
             {"tests/test_a.py": "original", "a.py": "before"},
             {"a.py": "partial", "new.py": "remove me", "stray": "preserve"},
         ],
-        ["", "TEST WRONG 1:\n  tests/test_a.py::test_a | wrong\n"],
+        ["", "TEST WRONG 1:\n  tests/test_a.py::test_a | wrong\n", _undetermined()],
     )
     with pytest.raises(WrongTest):
         loop.run_group(green_cfg, g, log, backend)
@@ -572,14 +594,30 @@ def test_retest_fix_must_pass_report_and_check(green_cfg, log, fake_backend, out
 
 
 def test_retest_can_stop_again_for_wrong_test(green_cfg, log, fake_backend):
-    g = make_group(make_step("tests", ["tests"]), make_step("build", ["a.py"]))
+    g = make_group(
+        make_step("tests", ["tests"]),
+        make_step("build", ["a.py"]),
+        design="docs/superpowers/specs/approved.md",
+    )
     output = "TEST WRONG 1:\n  tests/a.py::test_a | wrong\n"
     with pytest.raises(WrongTest):
-        loop.run_group(green_cfg, g, log, fake_backend(outputs=["", output]))
-    backend = fake_backend(outputs=[output])
+        loop.run_group(
+            green_cfg,
+            g,
+            log,
+            fake_backend(outputs=["", output, _undetermined("README.md:1")]),
+        )
+    backend = fake_backend(outputs=[output, _undetermined("README.md:1")])
     with pytest.raises(WrongTest):
         loop.run_retest(green_cfg, g, "", log, backend)
-    assert backend.briefs == ["stub\nApproved step build\na.py"]
+    assert backend.briefs[0] == "stub\nApproved step build\na.py"
+    assert backend.briefs[1].startswith("judgment\n")
+    assert backend.agents == ["core-builder", "juror"]
+    assert log.kept("g1-build-juror-1").strip() == _undetermined("README.md:1")
+    assert log.kept("g1-build-juror-2").strip() == _undetermined("README.md:1")
+    assert log.kept("g1-build") == output
+    assert not log.done()
+    assert git.worktree(green_cfg, "g1").is_dir()
 
 
 @pytest.mark.parametrize("view_code", [0, 1])
@@ -593,18 +631,22 @@ def test_retest_makes_test_step_views_before_fix(
         make_step("stub", ["a.py"]),
         make_step("tests", ["tests"], views=["a.py"]),
         make_step("build", ["b.py"]),
+        design="docs/superpowers/specs/approved.md",
     )
     wt = git.make_worktree(cfg, g.id)
     (wt / "a.py").write_text("stub")
     log.keep("g1-build-before", git.snapshot(wt))
     output = "TEST WRONG 1:\n  tests/a.py::test_a | wrong\n"
     log.keep("g1-build", output)
-    backend = fake_backend(outputs=["", output])
+    backend = fake_backend(outputs=["", output, _undetermined()])
     with pytest.raises(RulingNeeded if view_code else WrongTest):
         loop.run_retest(cfg, g, "fix", log, backend)
-    assert backend.briefs == (
-        [] if view_code else ["fix", "stub\nApproved step build\nb.py"]
-    )
+    if view_code:
+        assert backend.briefs == []
+    else:
+        assert backend.briefs[:2] == ["fix", "stub\nApproved step build\nb.py"]
+        assert backend.briefs[2].startswith("judgment\n")
+        assert backend.agents == ["core-builder", "core-builder", "juror"]
     assert log.kept("g1-tests-retest-views") == ""
     if not view_code:
         assert (cfg.view_root / "g1/a.pyi").exists()
