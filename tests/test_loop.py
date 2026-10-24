@@ -1248,3 +1248,170 @@ def test_juror_attempts_survive_restart_and_stop_at_configured_cap(
     assert fresh.agents == []
     assert str(wt) in capsys.readouterr().err
     assert not log.done()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "machinery",
+        "assertions",
+        "rename",
+        "missing",
+        "outside",
+        "filtered",
+        "membership",
+    ],
+)
+def test_juror_repair_preserves_producer_and_restores_builder(
+    green_cfg, log, fake_backend, change
+):
+    cfg = _viewing(green_cfg)
+    test_id = "tests/test_a.py::test_new"
+    original = "def test_new():\n    value = 1\n    assert value == 1\n"
+    repaired = original.replace("value = 1", "value = 2")
+    red = make_step(
+        "red",
+        ["tests/test_a.py", "tests/test_b.py"],
+        role="test-writer",
+        views=["a.py"],
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        check=["false"],
+        expect_code=1,
+    )
+    build = make_step(
+        "build",
+        ["a.py", "new.py"],
+        form=forms.Build(
+            "core-builder",
+            "Approved build",
+            (forms.RedSelection("red", ("tests/test_a.py",)),),
+        ),
+        check=["true"],
+    )
+    group = make_group(red, build, design="docs/superpowers/specs/approved.md")
+    wt = git.make_worktree(cfg, group.id)
+    (wt / "a.py").write_text("original")
+    loop._steps(
+        cfg,
+        make_group(red),
+        wt,
+        log,
+        fake_backend(
+            [{"tests/test_a.py": original, "tests/test_b.py": original}],
+            [_red_report(test_id, "tests/test_b.py::test_new")],
+        ),
+        0,
+    )
+    producer_report = log.kept("g1-red")
+    producer_evidence = log.kept("g1-red-evidence")
+    if change == "assertions":
+        repaired = repaired.replace("== 1", "== 2")
+    elif change == "rename":
+        repaired = repaired.replace("test_new", "test_renamed")
+    elif change == "missing":
+        repaired = "value = 1\n"
+    files = {"tests/test_a.py": repaired}
+    if change == "outside":
+        files["other.py"] = "unexpected"
+    elif change == "filtered":
+        files["tests/test_b.py"] = original.replace("test_new", "test_renamed")
+    elif change == "membership":
+        files["tests/test_a.py"] += "\ndef test_extra():\n    pass\n"
+    verdict = (
+        "VERDICT tests wrong\nACTION repair\nSTEP red\n"
+        "REASON Machinery misrepresents approved behavior\n"
+        "EVIDENCE tests/test_a.py:2 | wrong fixture value\n"
+        "FAILURE fixture provided wrong value\nEND JUDGMENT"
+    )
+    seen = []
+
+    class Spy(fake_backend):
+        def start(self, brief, worktree, agent):
+            if len(self.briefs) == 3:
+                seen.append(
+                    (
+                        (worktree / "a.py").read_text(),
+                        (worktree / "new.py").exists(),
+                        (worktree / "stray").read_text(),
+                    )
+                )
+            return super().start(brief, worktree, agent)
+
+    backend = Spy(
+        [
+            {"a.py": "partial", "new.py": "remove", "stray": "keep"},
+            {},
+            files,
+            {"a.py": "finished"},
+        ],
+        [
+            f"TEST WRONG 1:\n  {test_id} | wrong machinery\n",
+            verdict,
+            "RUN after all green",
+        ],
+    )
+    if change == "machinery":
+        loop._step(cfg, group, 1, wt, log, backend)
+        assert seen == [("original", False, "keep")]
+        assert backend.briefs[3] == f"Approved build\na.py\nnew.py\n{test_id}"
+        assert json.loads(log.kept("g1-red-repair-evidence"))["red_ids"] == [
+            test_id,
+            "tests/test_b.py::test_new",
+        ]
+    else:
+        with pytest.raises(RulingNeeded):
+            loop._step(cfg, group, 1, wt, log, backend)
+        assert len(backend.briefs) == 3
+        assert (wt / "a.py").read_text() == "partial"
+    assert backend.briefs[2] == (
+        f"repair\nfiles: tests/test_a.py\nfiles: tests/test_b.py\nview: {cfg.view_root}/g1/a.pyi\n"
+        "failure: fixture provided wrong value"
+    )
+    assert backend.agents[:3] == ["core-builder", "juror", "test-writer"]
+    assert log.kept("g1-red") == producer_report
+    assert log.kept("g1-red-evidence") == producer_evidence
+    if change == "machinery":
+        # A successful producer rerun starts a new evidence generation, including
+        # new assertions, and must not inherit the old repair fingerprint.
+        fingerprint = log.kept("g1-red-repair-evidence")
+        rerun = original.replace("== 1", "== 2")
+        loop._steps(
+            cfg,
+            make_group(red),
+            wt,
+            log,
+            fake_backend(
+                [{"tests/test_a.py": rerun, "tests/test_b.py": rerun}],
+                [_red_report(test_id, "tests/test_b.py::test_new")],
+            ),
+            0,
+        )
+        resumed = fake_backend()
+        continued_log = EventLog(cfg)
+        loop._follow_verdict(
+            cfg,
+            group,
+            loop._judgment(group, 1, wt, continued_log),
+            wt,
+            continued_log,
+            resumed,
+            loop.reports.verdict(verdict),
+        )
+        assert resumed.agents == ["test-writer", "core-builder"]
+        assert continued_log.kept("g1-red-repair-evidence") != fingerprint
+    elif change != "outside":
+        # A restart cannot bless a failed repair's edited assertions or ids by
+        # capturing them as a fresh baseline.
+        resumed = fake_backend()
+        continued_log = EventLog(cfg)
+        with pytest.raises(RulingNeeded):
+            loop._follow_verdict(
+                cfg,
+                group,
+                loop._judgment(group, 1, wt, continued_log),
+                wt,
+                continued_log,
+                resumed,
+                loop.reports.verdict(verdict),
+            )
+        assert resumed.briefs == []

@@ -149,6 +149,31 @@ def _steps(
         _step(cfg, group, index, wt, log, backend)
 
 
+def _view_paths(
+    cfg: Config, group: Group, step: Step, wt: Path, log: EventLog, name: str
+) -> dict[str, str]:
+    """Generate and validate views through the same path for steps and repairs."""
+    if step.views:
+        made = views.make(cfg, group.id, step, wt)
+        path = log.keep(f"{name}-views", _text(made.result))
+        if not made.green:
+            raise _rule(log, group, wt, str(path), f"step {step.id} views failed")
+    view_paths = {}
+    for source in step.views:
+        view = views.path(cfg, group.id, source)
+        value = str(view)
+        if not view.is_file() or any(c in value for c in "\r\n\0"):
+            raise _rule(
+                log,
+                group,
+                wt,
+                f"{name}-views.txt",
+                f"step {step.id} generated view missing or not a single line: {value!r}",
+            )
+        view_paths[source] = value
+    return view_paths
+
+
 def _step(
     cfg: Config,
     group: Group,
@@ -161,24 +186,7 @@ def _step(
 ) -> None:
     """Execute one step without replacing its original restoration point."""
     step = group.steps[index]
-    if step.views:
-        made = views.make(cfg, group.id, step, wt)
-        path = log.keep(f"{group.id}-{step.id}-views", _text(made.result))
-        if not made.green:
-            raise _rule(log, group, wt, str(path), f"step {step.id} views failed")
-    view_paths = {}
-    for source in step.views:
-        view = views.path(cfg, group.id, source)
-        value = str(view)
-        if not view.is_file() or any(c in value for c in "\r\n\0"):
-            raise _rule(
-                log,
-                group,
-                wt,
-                f"{group.id}-{step.id}-views.txt",
-                f"step {step.id} generated view missing or not a single line: {value!r}",
-            )
-        view_paths[source] = value
+    view_paths = _view_paths(cfg, group, step, wt, log, f"{group.id}-{step.id}")
     red_ids = _red_ids(group, index, wt, log)
     before = git.snapshot(wt)
     try:
@@ -223,6 +231,7 @@ def _step(
         except ConfigError as error:
             raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
         log.keep(f"{name}-evidence", _producer_identity(step))
+        log.keep(f"{name}-repair-evidence", "")
 
 
 def _judgment(
@@ -364,6 +373,9 @@ def _follow_verdict(
         git.restore(wt, before, step.paths)
         _step(cfg, group, target, wt, log, backend, juror_reasons=verdict.reasons)
         return
+    if verdict.kind == "tests wrong" and verdict.action == "repair":
+        _repair(cfg, group, target, judgment, wt, log, backend, verdict)
+        return
     raise _rule(
         log,
         group,
@@ -371,6 +383,83 @@ def _follow_verdict(
         ", ".join(judgment.reports),
         "tests-wrong transitions await step 19a",
     )
+
+
+def _repair(
+    cfg: Config,
+    group: Group,
+    target: int,
+    judgment: forms.Judgment,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+    verdict: reports.Verdict,
+) -> None:
+    """Repair machinery against preserved producer evidence, then retry its build."""
+    producer = group.steps[target]
+    name = f"{group.id}-{producer.id}"
+    kept = ", ".join(judgment.reports)
+    if producer.role != "test-writer" or not isinstance(producer.form, forms.Red):
+        raise _rule(log, group, wt, kept, "repair target is not a red producer")
+    stopped = next(
+        (
+            i
+            for i in reversed(range(len(group.steps)))
+            if group.steps[i].id in judgment.steps
+            and isinstance(group.steps[i].form, forms.Build)
+        ),
+        None,
+    )
+    if stopped is None:
+        raise _rule(log, group, wt, kept, "repair has no stopped build")
+    build = group.steps[stopped]
+    try:
+        if log.kept(f"{name}-evidence") != _producer_identity(producer):
+            raise ConfigError("repair producer has no current successful evidence")
+        ids = tuple(item.test_id for item in _red_evidence(producer, log.kept(name)))
+        before_build = log.kept(f"{group.id}-{build.id}-before")
+        original = verify.capture_repair(wt, ids)
+        fingerprint = json.dumps(asdict(original), sort_keys=True)
+        try:
+            preserved = log.kept(f"{name}-repair-evidence")
+        except ConfigError:
+            preserved = ""
+        if not preserved:
+            log.keep(f"{name}-repair-evidence", fingerprint)
+        elif preserved != fingerprint:
+            raise RulingNeeded("repair differs from preserved producer evidence")
+    except (ConfigError, RulingNeeded) as error:
+        raise _rule(log, group, wt, kept, str(error)) from error
+    repair_name = f"{name}-repair"
+    view_paths = _view_paths(cfg, group, producer, wt, log, repair_name)
+    form = forms.parse(
+        "test-writer",
+        "repair",
+        {"sources": producer.views, "failures": list(verdict.failures)},
+        where=repair_name,
+    )
+    text = brief.render(form, paths=producer.paths, view_paths=view_paths, red_ids=[])
+    before_repair = git.snapshot(wt)
+    _dispatch(group, wt, log, backend, repair_name, text, "test-writer")
+    outside = [
+        p
+        for p in git.changed_since(wt, before_repair)
+        if not steps.holds(producer.paths, p)
+    ]
+    if outside:
+        raise _rule(
+            log,
+            group,
+            wt,
+            f"{repair_name}.txt",
+            f"repair output outside declared paths: {', '.join(outside)}",
+        )
+    try:
+        verify.validate_repair(original, wt)
+    except RulingNeeded as error:
+        raise _rule(log, group, wt, f"{repair_name}.txt", str(error)) from error
+    git.restore(wt, before_build, build.paths)
+    _step(cfg, group, stopped, wt, log, backend)
 
 
 def _test_owner(
