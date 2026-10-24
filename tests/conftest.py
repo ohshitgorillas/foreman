@@ -88,7 +88,12 @@ def fake_run(
 
     def fake(cmd, cwd, timeout=None, env=None):
         calls.append((cmd, cwd))
-        return Result(cmd, codes.get(cmd[0], 0), f"out {cmd[0]}", "", 0.0)
+        out = f"out {cmd[0]}"
+        if "--output-format" in cmd:
+            out = json.dumps({"result": out})
+        elif "--json" in cmd:
+            out = ""
+        return Result(cmd, codes.get(cmd[0], 0), out, "", 0.0)
 
     monkeypatch.setattr(run, "run", fake)
     return calls, codes
@@ -106,9 +111,18 @@ class FakeBackend:
         self,
         files: list[dict[str, str]] | None = None,
         outputs: list[str] | None = None,
+        *,
+        token_counts: list[int | None] | None = None,
+        codes: list[int] | None = None,
+        seconds: list[float] | None = None,
     ) -> None:
         self.files = files or []
         self.outputs = outputs or []
+        self.token_counts = token_counts or []
+        self.codes = codes or []
+        self.seconds = seconds or []
+        self._tokens: dict[str, int | None] = {}
+        self._results: dict[str, Result] = {}
         self.briefs: list[str] = []
         self.agents: list[str] = []
         self._out: dict[str, str] = {}
@@ -123,10 +137,23 @@ class FakeBackend:
             target.write_text(text)
         handle = f"fake-{n + 1}"
         self._out[handle] = self.outputs[n] if n < len(self.outputs) else ""
+        self._tokens[handle] = (
+            self.token_counts[n] if n < len(self.token_counts) else None
+        )
+        self._results[handle] = Result(
+            ["fake"],
+            self.codes[n] if n < len(self.codes) else 0,
+            self._out[handle],
+            "",
+            self.seconds[n] if n < len(self.seconds) else 0.0,
+        )
         return Job(self.name, worktree.name, worktree, handle)
 
     def wait(self, job: Job) -> Result:
-        return Result(["fake"], 0, self._out[job.handle], "", 0.0)
+        return self._results[job.handle]
+
+    def tokens(self, job: Job) -> int | None:
+        return self._tokens.get(job.handle)
 
 
 @pytest.fixture
@@ -163,3 +190,32 @@ def origin(cfg: Config, tmp_path: Path) -> Path:
     run_ok(["git", "init", "-q", "--bare", str(bare)], tmp_path)
     run_ok(["git", "remote", "add", "origin", str(bare)], cfg.target_repo)
     return bare
+
+
+@pytest.fixture
+def codex_agents(tmp_path: Path) -> Path:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    (agents / "builder.toml").write_text(
+        'model = "test-model"\n'
+        'model_reasoning_effort = "high"\n'
+        'developer_instructions = "Follow the role.\\nPreserve this line."\n'
+    )
+    return agents
+
+
+@pytest.fixture
+def adapter_run(monkeypatch: pytest.MonkeyPatch):
+    """Configurable structured adapter output and recorded timeout arguments."""
+    replies: list[tuple[str, str, int]] = []
+    calls = []
+
+    def fake(cmd, cwd, timeout=None, env=None):
+        calls.append((cmd, cwd, timeout))
+        stdout, report, code = replies.pop(0)
+        if "-o" in cmd:
+            Path(cmd[cmd.index("-o") + 1]).write_text(report, encoding="utf-8")
+        return Result(cmd, code, stdout, "diagnostic", 1.25)
+
+    monkeypatch.setattr(run, "run", fake)
+    return replies, calls
