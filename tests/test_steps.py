@@ -363,3 +363,37 @@ def test_legacy_top_level_red_cannot_bypass_typed_selection(tmp_path: Path) -> N
     text = GOOD.replace("[steps.build]", '[steps.build]\nred = "red"')
     with pytest.raises(ConfigError, match="unknown keys: red"):
         load(write(tmp_path, text))
+
+
+PORT_CHECK = """
+[groups.g1]
+steps = ["port", "stub"]
+[steps.port]
+role = "test-writer"
+shape = "port"
+paths = ["tests/support/process.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_support_process.py::test_run"]
+form = { origin = { design = "docs/superpowers/specs/x.md", steps = ["7"] }, sources = ["gauntlet/seams/process.py"] }
+[steps.stub]
+role = "core-builder"
+shape = "stub"
+paths = ["gauntlet/core/a.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_a.py"]
+form = { step = "Approved stub" }
+"""
+
+
+def test_test_step_holds_the_test_files_its_check_runs(tmp_path: Path) -> None:
+    from foreman import brief
+
+    port, stub = load(write(tmp_path, PORT_CHECK))[0].steps
+    assert port.paths == ["tests/support/process.py", "tests/test_support_process.py"]
+    text = brief.render(
+        port.form,
+        paths=port.paths,
+        view_paths={"gauntlet/seams/process.py": "views/process.md"},
+        red_ids=[],
+    )
+    assert "files: tests/test_support_process.py" in text.splitlines()
+    assert stub.paths == ["gauntlet/core/a.py"]

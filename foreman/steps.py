@@ -1,5 +1,6 @@
 """Reads a step file's groups and steps, lints them, and picks the next ready group."""
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,34 @@ class Step:
     check: list[str]  # one argv; empty means the step runs no check
     expect_code: int = 0  # the check's passing exit code
     views: list[str] = field(default_factory=list)  # .py sources viewed before the step
+
+    def __post_init__(self) -> None:
+        # A test step writes the test files its check runs, so those are its paths
+        # too; every consumer (brief, out-of-paths checks, restore, commit) reads
+        # them here.
+        derived = check_tests(self.form, self.paths, self.check)
+        if derived:
+            object.__setattr__(self, "paths", [*self.paths, *derived])
+
+
+_TEST_FILE = re.compile(r"tests/(?:[^/]+/)*test_[^/]*\.py")
+
+
+def check_tests(form: object, paths: object, check: object) -> list[str]:
+    """Test files a test form's check names that its paths do not already hold."""
+    if not isinstance(form, (forms.Port, forms.Red)):
+        return []
+    if not isinstance(paths, list) or not isinstance(check, list):
+        return []
+    held = [p for p in paths if isinstance(p, str)]
+    found: list[str] = []
+    for arg in check:
+        if not isinstance(arg, str):
+            continue
+        file = arg.partition("::")[0]
+        if _TEST_FILE.fullmatch(file) and not holds(held, file) and file not in found:
+            found.append(file)
+    return found
 
 
 @dataclass(frozen=True)
