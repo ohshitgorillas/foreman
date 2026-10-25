@@ -334,6 +334,56 @@ def test_malformed_transport_stops(
         backend.start("brief", tmp_path, "builder")
 
 
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        ("", "Error: credit balance is too low"),
+        ("Error: Invalid API key", "warning: retrying"),
+    ],
+)
+def test_claude_stop_carries_claude_error_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout: str, stderr: str
+) -> None:
+    def failed(cmd, cwd, timeout=None, env=None):
+        return run.Result(cmd, 1, stdout, stderr, 0.5)
+
+    monkeypatch.setattr(run, "run", failed)
+    with pytest.raises(BackendError) as caught:
+        backends.ClaudeLocal(dispatch_seconds=5).start("brief", tmp_path, "builder")
+    message = str(caught.value)
+    assert stderr in message
+    assert stdout in message
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        ('{"type":', "Error: stream disconnected before completion"),
+        ("Error: unexpected status 401 Unauthorized", "warning: retrying"),
+    ],
+)
+def test_codex_stop_carries_codex_error_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    codex_agents: Path,
+    stdout: str,
+    stderr: str,
+) -> None:
+    def failed(cmd, cwd, timeout=None, env=None):
+        events = [json.dumps({"type": "thread.started"}), stdout]
+        return run.Result(cmd, 1, "\n".join(events), stderr, 0.5)
+
+    monkeypatch.setattr(run, "run", failed)
+    with pytest.raises(BackendError) as caught:
+        backends.CodexLocal(agents_dir=codex_agents, dispatch_seconds=5).start(
+            "brief", tmp_path, "builder"
+        )
+    message = str(caught.value)
+    assert "invalid Codex JSON event" in message
+    assert stderr in message
+    assert stdout in message
+
+
 def test_fake_backend_post_wait_usage_and_timeout(fake_backend, tmp_path: Path) -> None:
     backend = fake_backend(
         outputs=["partial", "done"],

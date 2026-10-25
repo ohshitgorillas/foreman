@@ -41,12 +41,21 @@ def _usage(value: object, *, cache_keys: tuple[str, ...] = ()) -> int | None:
     return sum(counts)
 
 
-def _claude_record(text: str, *, partial: bool) -> dict:
+def _cli_error(cli: str, message: str, out: str, err: str) -> BackendError:
+    """Carry the CLI's own words: its stderr, then any stdout it wrote."""
+    parts = [message]
+    for label, text in (("stderr", err), ("stdout", out)):
+        if text.strip():
+            parts.append(f"{cli} {label}: {text.strip()}")
+    return BackendError("; ".join(parts))
+
+
+def _claude_record(text: str, *, partial: bool, err: str = "") -> dict:
     try:
         record = json.loads(text)
     except ValueError as e:
         if not partial:
-            raise BackendError("invalid Claude JSON output") from e
+            raise _cli_error("Claude", "invalid Claude JSON output", text, err) from e
         # A timeout may cut the final object mid-field. Keep complete fields only.
         decoder = json.JSONDecoder()
         tail = text.lstrip()
@@ -71,12 +80,13 @@ def _claude_record(text: str, *, partial: bool) -> dict:
     if not isinstance(record, dict):
         if partial:
             return {}
-        raise BackendError("Claude JSON output must be an object")
+        raise _cli_error("Claude", "Claude JSON output must be an object", text, err)
     return record
 
 
-def _codex_tokens(text: str, *, partial: bool) -> int | None:
+def _codex_tokens(text: str, *, partial: bool, err: str = "") -> int | None:
     counts = []
+    invalid = []
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -85,13 +95,14 @@ def _codex_tokens(text: str, *, partial: bool) -> int | None:
         except ValueError:
             event = None
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-            if partial:
-                continue
-            raise BackendError("invalid Codex JSON event")
+            invalid.append(line)
+            continue
         if event["type"] == "turn.completed":
             count = _usage(event.get("usage"))
             if count is not None:
                 counts.append(count)
+    if invalid and not partial:
+        raise _cli_error("Codex", "invalid Codex JSON event", "\n".join(invalid), err)
     return sum(counts) if counts else None
 
 
@@ -129,7 +140,9 @@ class ClaudeLocal:
         ]
         try:
             result = run.run(cmd, worktree, timeout=self.dispatch_seconds)
-            record = _claude_record(result.out, partial=result.code == run.TIMEOUT_CODE)
+            record = _claude_record(
+                result.out, partial=result.code == run.TIMEOUT_CODE, err=result.err
+            )
             text = record.get("result", "")
             if not isinstance(text, str):
                 if result.code != run.TIMEOUT_CODE:
@@ -217,7 +230,7 @@ class CodexLocal:
                 ]
                 result = run.run(cmd, worktree, timeout=self.dispatch_seconds)
                 self._tokens[handle] = _codex_tokens(
-                    result.out, partial=result.code == run.TIMEOUT_CODE
+                    result.out, partial=result.code == run.TIMEOUT_CODE, err=result.err
                 )
                 self._results[handle] = replace(
                     result, out=output.read_text(encoding="utf-8")
