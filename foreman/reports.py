@@ -293,6 +293,10 @@ def _primary_anchor(line: str) -> re.Match[str] | None:
     match = _PATH_LINE.match(line)
     if match is None and len(fields) > 1:
         match = _PATH_LINE.fullmatch(fields[1])
+    if match is None and len(fields) > 1:
+        # The test-reviewer's shape: "<category> <path>:<line> | ...".
+        _, _, rest = fields[0].partition(" ")
+        match = _PATH_LINE.fullmatch(rest)
     return match
 
 

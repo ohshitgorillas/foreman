@@ -171,6 +171,19 @@ def test_primary_absolute_anchor_and_separate_sources(tmp_path: Path) -> None:
         )
 
 
+def test_test_reviewer_category_and_anchor_share_the_first_field(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "t.py").write_text("def test_f():\n    pass\n")
+    group = make_group(make_step(role="test-writer", paths=["t.py"]))
+    source = forms.ReviewerSource("test-reviewer", "round-one")
+    line = "loosened t.py:2 | weak | passes on wrong code: x | docs: none | fix: y"
+    assert batches.cut([line], source, group, tmp_path, 10) == (
+        [Batch("test-writer", source, (line,), 2)],
+        [],
+    )
+
+
 def test_empty_findings_produce_no_batches(tmp_path: Path) -> None:
     assert batches.cut([], forms.GateSource("check"), make_group(), tmp_path, 1) == (
         [],
