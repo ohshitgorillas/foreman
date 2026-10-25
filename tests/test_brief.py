@@ -182,7 +182,7 @@ def test_test_reviewer_findings_are_verbatim() -> None:
 @pytest.mark.parametrize(
     "role, fields, expected",
     [
-        ("diff-reviewer", {"scope": "working-tree"}, ""),
+        ("diff-reviewer", {"scope": "working-tree"}, "working tree"),
         ("diff-reviewer", {"scope": "range", "range": "v1...HEAD"}, "v1...HEAD"),
         ("test-reviewer", {"scope": "working-tree"}, "working tree"),
         ("test-reviewer", {"scope": "range", "range": "v1..HEAD"}, "v1..HEAD"),

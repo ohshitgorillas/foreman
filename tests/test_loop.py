@@ -296,7 +296,7 @@ def test_reviewer_findings_raise_and_are_kept(
     backend = fake_backend([{"a.py": "1"}], ["", "FINDINGS 1\n  a.py:1 wrong\n"])
     with pytest.raises(FindingsToRule):
         loop.run_group(cfg, g, log, backend)
-    assert backend.briefs[1] == ""
+    assert backend.briefs[1] == "working tree"
     assert backend.agents[1] == "diff-reviewer"
     assert "a.py:1 wrong" in log.kept("g1-review-diff-reviewer")
     err = capsys.readouterr().err
@@ -679,7 +679,7 @@ def test_default_review_brief_is_kept_even_when_empty(
     g = make_group(make_step("s1", ["a.py"]))
     backend = fake_backend([{"a.py": "1"}])
     loop.run_group(cfg, g, log, backend)
-    expected = "" if role == "diff-reviewer" else "working tree"
+    expected = "working tree"
     assert backend.briefs[1] == expected
     assert log.kept(f"g1-review-{role}-brief") == expected
 
@@ -792,8 +792,8 @@ def _red_report(*ids: str, behavior: int = 1) -> str:
         records.extend(
             [
                 f"BEHAVIOR {behavior} | {test_id} | docs: spec:1 | breaks when: missing",
-                f'RUN red | {test_id} | assertion | "missing"',
-                f'RUN rerun | {test_id} | assertion | "missing"',
+                f'RUN red | {test_id} | assertion | "FAILED {test_id} - AssertionError"',
+                f'RUN rerun | {test_id} | assertion | "FAILED {test_id} - AssertionError"',
             ]
         )
     records.extend(

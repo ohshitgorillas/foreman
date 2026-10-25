@@ -65,7 +65,7 @@ def render(
             if form.scope == "range":
                 assert form.range is not None
                 parts.append(form.range)
-            elif isinstance(form, forms.TestReview):
+            else:
                 parts.append("working tree")
             if isinstance(form, forms.TestReview):
                 parts.extend(f"spec: {spec}" for spec in form.specs)
