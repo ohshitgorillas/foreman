@@ -113,6 +113,25 @@ def _envelope(lines: list[str]) -> list[str]:
     return out
 
 
+# Each red label must be read from the reason its quoted summary line prints.
+_RED_REASONS = {
+    "assertion": re.compile(r"AssertionError(?:: .*)?"),
+    "not-implemented": re.compile(r"NotImplementedError(?:: .*)?"),
+    "not-raised": re.compile(r"Failed: DID NOT RAISE \S.*"),
+}
+
+
+def _red_reason(phase: str, test_id: str, run: RedRun) -> None:
+    prefix = f"FAILED {test_id} - "
+    if not run.summary.startswith(prefix) or not _RED_REASONS[run.outcome].fullmatch(
+        run.summary[len(prefix) :]
+    ):
+        raise ConfigError(
+            f"red report: RUN {phase} {test_id} is {run.outcome} but its line"
+            f" does not print that reason: {run.summary!r}"
+        )
+
+
 def red(text: str) -> tuple[RedEvidence, ...]:
     """Read complete red evidence in BEHAVIOR order; fail closed on ambiguity.
 
@@ -181,6 +200,7 @@ def red(text: str) -> tuple[RedEvidence, ...]:
             if outcome not in {
                 "assertion",
                 "not-implemented",
+                "not-raised",
                 "collection",
                 "test-error",
                 "passed",
@@ -198,13 +218,15 @@ def red(text: str) -> tuple[RedEvidence, ...]:
         if (
             first is None
             or second is None
-            or first.outcome not in {"assertion", "not-implemented"}
-            or second.outcome not in {"assertion", "not-implemented"}
+            or first.outcome not in _RED_REASONS
+            or second.outcome not in _RED_REASONS
             or first.summary != second.summary
         ):
             raise ConfigError(
                 f"red report: missing or unstable red evidence for {test_id}"
             )
+        for phase, run in (("red", first), ("rerun", second)):
+            _red_reason(phase, test_id, run)
         evidence.append(RedEvidence(test_id, number, first, second))
     return tuple(evidence)
 

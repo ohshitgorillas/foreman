@@ -114,11 +114,11 @@ VIEWS /scratch/errors.pyi
 BEHAVIOR 2 | tests/test_errors.py::TestErrors::test_safe[two words] | docs: docs/design.md §1 | breaks when: data leaks
 BEHAVIOR 1 | tests/test_errors.py::test_hierarchy | docs: docs/design.md §2 | breaks when: base changes
 RUN red | tests/test_errors.py::test_old | passed | "PASSED tests/test_errors.py::test_old"
-RUN red | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED hierarchy - NotImplementedError"
-RUN red | tests/test_errors.py::TestErrors::test_safe[two words] | assertion | "FAILED safe - AssertionError: expected safe | got unsafe"
-RUN rerun | tests/test_errors.py::TestErrors::test_safe[two words] | assertion | "FAILED safe - AssertionError: expected safe | got unsafe"
+RUN red | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"
+RUN red | tests/test_errors.py::TestErrors::test_safe[two words] | assertion | "FAILED tests/test_errors.py::TestErrors::test_safe[two words] - AssertionError: expected safe | got unsafe"
+RUN rerun | tests/test_errors.py::TestErrors::test_safe[two words] | assertion | "FAILED tests/test_errors.py::TestErrors::test_safe[two words] - AssertionError: expected safe | got unsafe"
 RUN rerun | tests/test_errors.py::test_old | passed | "PASSED tests/test_errors.py::test_old"
-RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED hierarchy - NotImplementedError"
+RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"
 BLOCKED none
 GATE uv run gate | "ok" | not mine: none
 CHANGED 23
@@ -135,7 +135,8 @@ def test_red_new_ids_only_in_behavior_order_with_exact_selectors() -> None:
         ("tests/test_errors.py::test_hierarchy", 1),
     ]
     assert evidence[0].red == reports.RedRun(
-        "assertion", "FAILED safe - AssertionError: expected safe | got unsafe"
+        "assertion",
+        "FAILED tests/test_errors.py::TestErrors::test_safe[two words] - AssertionError: expected safe | got unsafe",
     )
     assert evidence[0].rerun == evidence[0].red
     assert evidence[1].red.outcome == "not-implemented"
@@ -173,11 +174,11 @@ def test_red_new_ids_only_in_behavior_order_with_exact_selectors() -> None:
             "RUN rerun | tests/test_errors.py::test_hierarchy | test-error",
         ),
         (
-            'RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED hierarchy - NotImplementedError"',
+            'RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"',
             'RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "different"',
         ),
         (
-            'RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED hierarchy - NotImplementedError"\n',
+            'RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"\n',
             "",
         ),
     ],
@@ -185,6 +186,87 @@ def test_red_new_ids_only_in_behavior_order_with_exact_selectors() -> None:
 def test_red_refuses_partial_or_invalid_evidence(old: str, new: str) -> None:
     with pytest.raises(ConfigError, match="red report"):
         reports.red(RED_REPORT.replace(old, new))
+
+
+NOT_RAISED_ID = "tests/test_core_proxy.py::test_x[/v1/messages?beta=%]"
+NOT_RAISED_LINE = f"FAILED {NOT_RAISED_ID} - Failed: DID NOT RAISE LaunchError"
+
+
+def _not_raised_report(line: str) -> str:
+    return RED_REPORT.replace(
+        "BLOCKED none",
+        f"BEHAVIOR 3 | {NOT_RAISED_ID} | docs: docs/design.md §3 | breaks when: x\n"
+        f'RUN red | {NOT_RAISED_ID} | not-raised | "{line}"\n'
+        f'RUN rerun | {NOT_RAISED_ID} | not-raised | "{line}"\n'
+        "BLOCKED none",
+    )
+
+
+def test_red_accepts_not_raised_evidence() -> None:
+    evidence = reports.red(_not_raised_report(NOT_RAISED_LINE))
+    assert [(e.test_id, e.behavior) for e in evidence][-1] == (NOT_RAISED_ID, 3)
+    assert evidence[-1].red == reports.RedRun("not-raised", NOT_RAISED_LINE)
+    assert evidence[-1].rerun == evidence[-1].red
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"FAILED {NOT_RAISED_ID} - AssertionError",
+        f"FAILED {NOT_RAISED_ID} - Failed: Timeout",
+        f"FAILED {NOT_RAISED_ID} - Failed: DID NOT RAISE",
+        f"FAILED {NOT_RAISED_ID}",
+        "FAILED tests/test_core_proxy.py::test_y - Failed: DID NOT RAISE LaunchError",
+    ],
+)
+def test_red_refuses_not_raised_without_its_reason(line: str) -> None:
+    with pytest.raises(ConfigError, match="does not print that reason"):
+        reports.red(_not_raised_report(line))
+
+
+@pytest.mark.parametrize(
+    ("label", "line"),
+    [
+        ("not-implemented", "FAILED tests/test_errors.py::test_hierarchy - KeyError"),
+        ("not-implemented", "FAILED tests/test_errors.py::test_hierarchy"),
+        (
+            "not-implemented",
+            "FAILED tests/test_errors.py::test_hierarchy - NotImplementedErrorX",
+        ),
+        (
+            "not-implemented",
+            "FAILED tests/test_errors.py::test_other - NotImplementedError",
+        ),
+        ("assertion", "FAILED tests/test_errors.py::test_hierarchy - TypeError: x"),
+        ("assertion", "FAILED tests/test_errors.py::test_hierarchy - Assertion"),
+        (
+            "assertion",
+            "FAILED tests/test_errors.py::test_hierarchy - Failed: DID NOT RAISE E",
+        ),
+    ],
+)
+def test_red_refuses_label_without_its_reason(label: str, line: str) -> None:
+    old = 'not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"'
+    text = RED_REPORT.replace(old, f'{label} | "{line}"')
+    with pytest.raises(ConfigError, match="does not print that reason"):
+        reports.red(text)
+
+
+def test_red_accepts_reasons_with_and_without_message() -> None:
+    old = 'not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"'
+    line = "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError: later"
+    evidence = reports.red(RED_REPORT.replace(old, f'not-implemented | "{line}"'))
+    assert evidence[1].red == reports.RedRun("not-implemented", line)
+    line = "FAILED tests/test_errors.py::test_hierarchy - AssertionError"
+    evidence = reports.red(RED_REPORT.replace(old, f'assertion | "{line}"'))
+    assert evidence[1].red == reports.RedRun("assertion", line)
+
+
+def test_red_refuses_run_with_unread_reason_and_no_outcome() -> None:
+    old = 'not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"'
+    text = RED_REPORT.replace(old, '"FAILED tests/test_errors.py::test_hierarchy"')
+    with pytest.raises(ConfigError, match="malformed RUN"):
+        reports.red(text)
 
 
 @pytest.mark.parametrize("prefix", ["BEHAVIOR 1", "RUN red", "RUN rerun"])

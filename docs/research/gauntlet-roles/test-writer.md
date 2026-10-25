@@ -33,11 +33,23 @@ Every other line is steering: a test name, case, input, assertion, expected valu
 
 ## Steps
 
-`RUN` below is `PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA --assert=plain <files>`. Each test is classified by its short-summary line: `assertion` (`FAILED` naming `AssertionError`), `not-implemented` (`FAILED` naming `NotImplementedError`), `collection` (an `ERROR` collecting the file), `test-error` (any other exception), `passed`, or `no-run` (the runner failed: report its line and stop). `COUNT` is `git diff --numstat -- <tracked files>` plus `git diff --no-index --numstat -- /dev/null <file>` for each new file, over the files written or changed; its added plus removed columns, summed, are `CHANGED`.
+`RUN` below is `PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA -vv --assert=plain <files>`, from the repository root. `-vv` keeps each short-summary line whole; the progress lines it prints above the summary are never read. A failure's reason is the text after ` - ` on its `FAILED` line: the exception type name exactly as printed, then `: <message>` when it has one; of a multi-line message only the first line is read.
+
+Each test's outcome is read from its own line under `short test summary info`, never inferred from the test's code, the view or the progress lines:
+
+- `assertion`: `FAILED <test id> - AssertionError`, bare or with `: <message>`.
+- `not-implemented`: `FAILED <test id> - NotImplementedError`, bare or with `: <message>`.
+- `not-raised`: `FAILED <test id> - Failed: DID NOT RAISE <exception>`, pytest's reason when the code inside `pytest.raises` returns.
+- `collection`: `ERROR <file>`, a path with no `::` test id; every test in that file is `collection`.
+- `test-error`: `FAILED <test id>` with any other reason, another `Failed:` message and a subclass printed under its own name included, or `ERROR <test id>`, a fixture's setup or teardown error.
+- `passed`: `PASSED <test id>`.
+- `no-run`: no `short test summary info` section, or a test with no line in it: the runner failed; report its last line and stop.
+
+Only `assertion`, `not-implemented` and `not-raised` are red evidence. A `FAILED` line whose reason cannot be read, none after the test id or one cut short, is not red evidence and carries no label; report it verbatim. `COUNT` is `git diff --numstat -- <tracked files>` plus `git diff --no-index --numstat -- /dev/null <file>` for each new file, over the files written or changed; its added plus removed columns, summed, are `CHANGED`.
 
 1. Check the brief. Steered: refuse as above and stop. Otherwise take the steps of its shape, then steps 7 to 9.
 2. Red, one group at a time in brief order. Before starting a group after the first, `COUNT`: at 300 or more, that group and every one after it are `LEFT`, never started. A group started is written whole, past 300 or not. Find in the documents you may read the sentences that state its behavior, and from them every case and expected value; a test file a spec names for the behavior is where its tests go. A behavior they do not pin, or whose spec neither the brief nor its step names, goes on `UNTESTABLE`, two that disagree on `CONTRADICTS`. Before each test body, name the production change that would make it fail. Write the tests, importing the module the view stands for by the dotted path of its file under the `stubgen` output, using only names and signatures the view shows. Remove the group's `replaces:` test with `Edit`.
-3. Red run. `RUN` every file written or changed, then once more: each new test is `assertion` or `not-implemented` both times, the line unchanged. `collection` or `test-error`: repair and rerun, at most ten rounds. `passed`: the behavior exists; rewrite the test. Then `COUNT` for the report's `CHANGED`.
+3. Red run. `RUN` every file written or changed, then once more: each new test is `assertion`, `not-implemented` or `not-raised` both times, its line unchanged; `pytest-randomly` reorders the lines between runs, so compare each test's line, not their order. `collection` or `test-error`: repair and rerun, at most ten rounds. `passed`: the behavior exists; rewrite the test. Then `COUNT` for the report's `CHANGED`.
 4. Finding. Read the files named and `RUN` them: `before`. Any test not `passed`: `BLOCKED red before`, change nothing. Before the first write, a finding whose fix needs a test removed, an expected value changed, a red test passed or a file no finding names is `blocked` with that need, its test unchanged; take the rest in brief order, change the test each names until it no longer holds, mark it `fixed`. All blocked: write nothing, `BLOCKED every finding`. `RUN` again: `after`.
 4a. Repair. Read the named files and views, save the files' before text, and `RUN` all named files: `before`. Against that same built code, fix only setup, fixture or harness in those files; derive the correction from the documents and views. Keep every claim, expected value and assert statement byte for byte; remove, skip or weaken no test and keep each dependent on its unit. A needed production or claim change is `blocked` with the need and no such edit. Record each failing test's repair or blocked need and every kept test, then `RUN` all named files: `after`. Never set the build aside or use `replaces:` for a repair.
 5. Port. Read the design step, the files and the views; `RUN` the files that exist: `before`, any test not `passed` is `BLOCKED red before`. Move each test onto what the step gives: a helper written to the design's stubs, beside its own test file where the design lists one; an input changed only where the step names the change; every assert statement byte for byte as before; no test removed, no expected value changed. A test that cannot move without a production change stays as it was: `UNMOVED` with the change it needs. `RUN` the files: `after`.
@@ -67,7 +79,7 @@ KEPT <test id>
 UNMOVED <test id> | <the production change it needs>
 MOVED <test id> | <path:line>
 REMOVED <test id> | <path:line>
-RUN <red|rerun|before|after> | <test id> | <outcome> | "<its summary line, verbatim>"
+RUN <red|rerun|before|after> | <test id> | <outcome, left out for an unread reason> | "<its summary line, verbatim>"
 UNTESTABLE <docs line or behavior> | <why>
 CONTRADICTS <docs line> | "<the line it contradicts>"
 BLOCKED <none|red before|every finding|after not green>
