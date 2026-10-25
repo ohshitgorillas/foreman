@@ -188,6 +188,46 @@ def test_red_refuses_partial_or_invalid_evidence(old: str, new: str) -> None:
         reports.red(RED_REPORT.replace(old, new))
 
 
+# The STATUS shape of the g7-5 test-writer report: one record per changed path.
+G7_5_STATUS = """STATUS ?? gauntlet/seams/process.py
+STATUS ?? tests/support/process.py
+STATUS ?? tests/test_support_process.py
+"""
+
+
+def test_red_accepts_one_status_record_per_changed_path() -> None:
+    text = RED_REPORT.replace("STATUS M tests/test_errors.py\n", G7_5_STATUS)
+    assert reports.red(text) == reports.red(RED_REPORT)
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["", "STATUS\n", "STATUS \n", "STATUS M tests/test_errors.py\nSTATUS\n"],
+)
+def test_red_refuses_missing_or_bare_status(status: str) -> None:
+    text = RED_REPORT.replace("STATUS M tests/test_errors.py\n", status)
+    with pytest.raises(ConfigError, match="STATUS"):
+        reports.red(text)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("SHAPE red", "SHAPE red\nSHAPE red"),
+        ("VIEWS /scratch/errors.pyi", "VIEWS /a.pyi\nVIEWS /b.pyi"),
+        ("BLOCKED none", "BLOCKED none\nBLOCKED none"),
+        ('GATE uv run gate | "ok" | not mine: none', 'GATE a | "ok"\nGATE b | "ok"'),
+        ("CHANGED 23", "CHANGED 23\nCHANGED 24"),
+    ],
+)
+def test_red_keeps_other_envelope_records_exactly_one(old: str, new: str) -> None:
+    text = RED_REPORT.replace("STATUS M tests/test_errors.py\n", G7_5_STATUS).replace(
+        old, new
+    )
+    with pytest.raises(ConfigError, match="exactly one"):
+        reports.red(text)
+
+
 NOT_RAISED_ID = "tests/test_core_proxy.py::test_x[/v1/messages?beta=%]"
 NOT_RAISED_LINE = f"FAILED {NOT_RAISED_ID} - Failed: DID NOT RAISE LaunchError"
 
