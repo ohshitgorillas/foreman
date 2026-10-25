@@ -8,6 +8,7 @@ from foreman import backends, batches, brief, forms, git, reports, steps, verify
 from foreman.backends import Backend
 from foreman.config import Config, Reviewer
 from foreman.errors import (
+    BackendError,
     ConfigError,
     FindingsToRule,
     RulingNeeded,
@@ -48,9 +49,17 @@ def _dispatch(
     *,
     load: int | None = None,
 ) -> reports.Report:
-    """Keep and record every returned dispatch; overruns and refusals stop the run."""
+    """Keep and record every returned dispatch; overruns and refusals stop the run.
+
+    A start that fails is marked `<name>-unstarted` so a reserved round that never
+    reached an agent is told apart from one that returned.
+    """
     log.keep(f"{name}-brief", brief_text)
-    job = backend.start(brief_text, wt, role)
+    try:
+        job = backend.start(brief_text, wt, role)
+    except BackendError as error:
+        log.keep(f"{name}-unstarted", str(error))
+        raise
     result = backend.wait(job)
     path = log.keep(name, _stdout(result))
     log.keep(f"{name}-stderr", result.err)
@@ -373,7 +382,10 @@ def _judge(
     *,
     completed: bool = False,
 ) -> None:
-    """Reserve attempts before launch so restarts cannot reset the cap."""
+    """Reserve attempts before launch so restarts cannot reset the cap.
+
+    A reserved round counts unless its dispatch is marked unstarted.
+    """
     log.keep(
         f"{group.id}-pending-judgment",
         json.dumps(
@@ -387,14 +399,19 @@ def _judge(
     )
     log.keep(f"{group.id}-owner-judgment", "")
     number = 1
+    used = 0
     while True:
         name = f"{group.id}-{context}-juror-{number}"
         try:
             log.kept(name)
         except ConfigError:
             break
+        try:
+            log.kept(f"{name}-unstarted")
+        except ConfigError:
+            used += 1
         number += 1
-    if number > cfg.juror_rounds:
+    if used >= cfg.juror_rounds:
         raise _owner_stop(group, judgment, wt, log, "juror rounds exhausted")
     text = brief.render(judgment, paths=[], view_paths={}, red_ids=[])
     log.keep(name, "")
@@ -457,15 +474,14 @@ def _follow_verdict(
         )
     step = group.steps[target]
     if verdict.kind == "build wrong" and verdict.action == "retry":
-        if not isinstance(step.form, forms.Build):
-            raise _rule(
-                log,
-                group,
-                wt,
-                ", ".join(judgment.reports),
-                "retry target is not a build",
-            )
-        replay = _dependent_steps(group, target) if completed else [target]
+        # Before the group completes, replay only through the judged step; later
+        # steps have not run and stay in normal group order.
+        judged = max(i for i, s in enumerate(group.steps) if s.id in judgment.steps)
+        replay = [
+            index
+            for index in _dependent_steps(group, target)
+            if completed or index <= judged
+        ]
         snapshots = []
         try:
             for index in replay:
@@ -487,7 +503,12 @@ def _follow_verdict(
                 wt,
                 log,
                 backend,
-                juror_reasons=verdict.reasons if index == target else (),
+                # Only a build brief defines reasons; other roles get their own brief.
+                juror_reasons=(
+                    verdict.reasons
+                    if index == target and isinstance(step.form, forms.Build)
+                    else ()
+                ),
             )
         return
     if verdict.kind == "tests wrong" and verdict.action == "repair":

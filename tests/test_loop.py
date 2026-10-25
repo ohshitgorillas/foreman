@@ -7,6 +7,7 @@ from conftest import make_group, make_step
 from foreman import forms, git, loop
 from foreman.config import Config, Reviewer
 from foreman.errors import (
+    BackendError,
     ConfigError,
     FindingsToRule,
     ForemanError,
@@ -1188,7 +1189,6 @@ def test_upheld_invalid_typed_finding_stops_before_any_batch(
         ("spec wrong", "owner", None, WrongTest),
         ("undetermined", "owner", None, WrongTest),
         ("build wrong", "retry", "build", None),
-        ("build wrong", "retry", "red", RulingNeeded),
         ("build wrong", "retry", "stub", RulingNeeded),
         ("build wrong", "retry", "absent", RulingNeeded),
     ],
@@ -1295,6 +1295,126 @@ def test_juror_follows_owner_and_build_verdicts(
         "judgment\nspec: docs/superpowers/specs/approved.md\nstep: red\nstep: build\n"
     )
     assert log.kept("g1-build-juror-1").strip() == verdict
+
+
+def test_juror_retry_sends_a_test_writer_step_back_to_its_own_role(
+    green_cfg, log, fake_backend, origin, monkeypatch
+):
+    cfg = _viewing(green_cfg)
+    test_id = "tests/test_a.py::test_new"
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        views=["a.py"],
+        check=["false"],
+        expect_code=1,
+    )
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red"),)
+        ),
+        check=["true"],
+    )
+    group = make_group(
+        make_step("stub", ["a.py", "gauntlet/core/a.py"]),
+        red,
+        build,
+        make_step("later", ["later.py"]),
+        design="docs/superpowers/specs/approved.md",
+    )
+    verdict = (
+        "VERDICT build wrong\nACTION retry\nSTEP red\n"
+        "REASON Preserve the approved behavior\n"
+        "EVIDENCE a.py:1 | test contradicts behavior\nEND JUDGMENT"
+    )
+    backend = fake_backend(
+        [
+            {"a.py": "stub", "gauntlet/core/a.py": "original"},
+            {"tests/test_a.py": "wrong"},
+            {"gauntlet/core/a.py": "partial"},
+            {},
+            {"tests/test_a.py": "red"},
+            {"gauntlet/core/a.py": "fixed"},
+            {"later.py": "later"},
+        ],
+        [
+            "",
+            _red_report(test_id),
+            f"TEST WRONG 1:\n  {test_id} | mismatch\n",
+            verdict,
+            _red_report(test_id),
+        ],
+    )
+    restored = []
+    restore = git.restore
+
+    def observe_restore(wt, tree, paths):
+        restore(wt, tree, paths)
+        restored.append(tuple(paths))
+
+    monkeypatch.setattr(git, "restore", observe_restore)
+    loop.run_group(cfg, group, log, backend)
+    assert log.done() == {"g1"}
+    assert backend.agents == [
+        "core-builder",
+        "test-writer",
+        "core-builder",
+        "juror",
+        "test-writer",
+        "core-builder",
+        "core-builder",
+    ]
+    assert restored == [tuple(build.paths), tuple(red.paths)]
+    assert backend.briefs[4] == backend.briefs[1]
+    assert "Preserve the approved behavior" not in backend.briefs[4]
+    assert backend.briefs[5] == backend.briefs[2]
+    assert "later.py" in backend.briefs[6]
+
+
+class _StartFails:
+    """Wraps a backend so its first start raises before any agent runs."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.failed = False
+
+    def start(self, brief, worktree, role):
+        if not self.failed:
+            self.failed = True
+            raise BackendError("cannot start juror")
+        return self.inner.start(brief, worktree, role)
+
+    def __getattr__(self, attr):
+        return getattr(self.inner, attr)
+
+
+def test_juror_start_failure_does_not_use_a_round(green_cfg, log, fake_backend):
+    cfg = replace(green_cfg, juror_rounds=1)
+    group = make_group(make_step("build"))
+    wt = git.make_worktree(cfg, group.id)
+    path = log.keep("g1-build", "failure")
+    judgment = forms.Judgment(
+        "docs/superpowers/specs/approved.md",
+        ("build",),
+        "Approved build",
+        (),
+        (str(path),),
+    )
+    failing = _StartFails(fake_backend())
+    with pytest.raises(BackendError):
+        loop._judge(cfg, group, "build", judgment, wt, EventLog(cfg), failing)
+    assert failing.inner.agents == []
+    started = fake_backend(outputs=["malformed verdict"])
+    with pytest.raises(RulingNeeded):
+        loop._judge(cfg, group, "build", judgment, wt, EventLog(cfg), started)
+    assert started.agents == ["juror"]
+    fresh = fake_backend()
+    with pytest.raises(WrongTest, match="juror rounds exhausted"):
+        loop._judge(cfg, group, "build", judgment, wt, EventLog(cfg), fresh)
+    assert fresh.agents == []
 
 
 @pytest.mark.parametrize(
