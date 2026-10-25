@@ -146,7 +146,6 @@ def test_red_new_ids_only_in_behavior_order_with_exact_selectors() -> None:
     [
         ("SHAPE red", "SHAPE repair"),
         ("END TESTS", ""),
-        ("END TESTS", "END TESTS\ntrailing prose"),
         ("BLOCKED none", "BLOCKED after not green"),
         ("BLOCKED none", "BLOCKED none\nBLOCKED none"),
         ("BLOCKED none", "LEFT 3 | unfinished\nBLOCKED none"),
@@ -449,3 +448,25 @@ def test_verdict_owner_action_forbids_target(kind: str) -> None:
     )
     with pytest.raises(ConfigError, match="verdict"):
         reports.verdict(text)
+
+
+def test_red_accepts_block_surrounded_by_prose_and_fence() -> None:
+    text = (
+        "Done: I added 2 red tests. Nothing is committed.\n\n```\n"
+        + RED_REPORT
+        + "\n```\n\nThings the lead should check:\n- the second view path\n"
+    )
+    assert reports.red(text) == reports.red(RED_REPORT)
+
+
+def test_red_refuses_two_blocks() -> None:
+    with pytest.raises(ConfigError, match="red report"):
+        reports.red(RED_REPORT + "\nnote\n" + RED_REPORT)
+
+
+@pytest.mark.parametrize(
+    "text", ["", "prose only", "SHAPE red\nBRIEF red", "END TESTS\nSHAPE red"]
+)
+def test_red_refuses_no_block(text: str) -> None:
+    with pytest.raises(ConfigError, match="red report"):
+        reports.red(text)

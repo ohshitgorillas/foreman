@@ -119,9 +119,15 @@ def red(text: str) -> tuple[RedEvidence, ...]:
     ConfigError describes malformed producer evidence. The dispatch loop owns
     turning that error into a stop naming the kept report.
     """
-    raw = text.splitlines()
-    if not raw or raw[0] != "SHAPE red" or raw[-1] != "END TESTS":
-        raise ConfigError("red report: requires SHAPE red and terminal END TESTS")
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line == "SHAPE red"]
+    ends = [i for i, line in enumerate(lines) if line == "END TESTS"]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] > ends[0]:
+        raise ConfigError(
+            "red report: requires exactly one SHAPE red .. END TESTS block"
+        )
+    # Prose or a code fence around the block is ignored.
+    raw = lines[starts[0] : ends[0] + 1]
     envelope = _envelope(raw)
     for key in ("SHAPE", "VIEWS", "BLOCKED", "GATE", "CHANGED", "STATUS"):
         records = [line for line in envelope if line.partition(" ")[0] == key]
