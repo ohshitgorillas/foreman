@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import make_group, make_red, make_step
+from conftest import make_group, make_red, make_step, verdict_text
 
 from foreman import backends, forms, git, preflight
 from foreman.config import Config, Reviewer
@@ -75,13 +75,14 @@ def commit(root: Path) -> None:
     run_ok(["git", "commit", "-q", "-m", "roles"], root)
 
 
-VERDICT = """VERDICT build wrong
-ACTION retry
-STEP 5
-REASON The build skips the second reply.
-EVIDENCE gauntlet/a.py:3 | returns the first reply twice
-END JUDGMENT
-"""
+VERDICT = (
+    verdict_text(
+        step="5",
+        reasons=("The build skips the second reply.",),
+        evidence=("gauntlet/a.py:3 | returns the first reply twice",),
+    )
+    + "\n"
+)
 
 RED = """SHAPE red
 BRIEF Write the red tests.

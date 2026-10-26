@@ -2,7 +2,7 @@ import json
 from dataclasses import asdict, replace
 
 import pytest
-from conftest import make_group, make_red, make_step
+from conftest import make_group, make_red, make_step, red_report, verdict_text
 
 from foreman import forms, git, loop
 from foreman.config import Config, Reviewer
@@ -25,9 +25,12 @@ RED_UNTIL_FIXED = [
 
 
 def _undetermined(anchor="a.py:1"):
-    return (
-        "VERDICT undetermined\nACTION owner\nREASON Need owner evidence\n"
-        f"EVIDENCE {anchor} | observed failure needs clarification\nEND JUDGMENT"
+    return verdict_text(
+        "undetermined",
+        "owner",
+        None,
+        ("Need owner evidence",),
+        (f"{anchor} | observed failure needs clarification",),
     )
 
 
@@ -716,9 +719,10 @@ def test_retest_owner_retry_after_cap_resumes_correct_context(
         make_step("later", ["later.py"]),
         design="docs/superpowers/specs/approved.md",
     )
-    verdict = (
-        "VERDICT build wrong\nACTION retry\nSTEP build\nREASON Fix implementation\n"
-        "EVIDENCE a.py:1 | build contradicts approved behavior\nEND JUDGMENT"
+    verdict = verdict_text(
+        step="build",
+        reasons=("Fix implementation",),
+        evidence=("a.py:1 | build contradicts approved behavior",),
     )
     wrong = "TEST WRONG 1:\n  tests/test_a.py::test_a | wrong\n"
     if trigger == "step":
@@ -819,7 +823,7 @@ def test_red_renders_generated_view_and_keeps_exact_dispatch(
     )
     g = make_group(make_step("stub", ["a.py"]), red)
     wt = git.make_worktree(cfg, g.id)
-    report = _red_report("tests/test_a.py::test_new")
+    report = red_report((1, "tests/test_a.py::test_new"))
     backend = fake_backend(
         [{"a.py": "stub"}, {"tests/test_a.py": "red"}], outputs=["", report]
     )
@@ -884,7 +888,7 @@ def test_red_output_outside_paths_is_logged_restored_and_the_build_goes_on(
             {outside: "unexpected", "tests/test_a.py": "red", "ignored.txt": "cache"},
             {"b.py": "built"},
         ],
-        outputs=[_red_report(test_id), ""],
+        outputs=[red_report((1, test_id)), ""],
     )
     loop._steps(cfg, g, wt, log, backend, 0)
     if outside == "a.py":
@@ -931,7 +935,7 @@ def test_red_scope_uses_snapshot_and_allows_changes_to_its_existing_file(
                     ".ruff_cache/entry": "cache",
                 }
             ],
-            outputs=[_red_report("tests/test_a.py::test_new")],
+            outputs=[red_report((1, "tests/test_a.py::test_new"))],
         ),
         0,
     )
@@ -947,36 +951,6 @@ def test_generated_view_path_must_fit_single_line(green_cfg, log, fake_backend):
     with pytest.raises(RulingNeeded, match="not a single line"):
         loop._steps(cfg, g, wt, log, backend, 0)
     assert backend.briefs == []
-
-
-def _red_report(*ids: str, behavior: int = 1) -> str:
-    records = [
-        "SHAPE red",
-        "BRIEF red",
-        "VIEWS none",
-        "BLOCKED none",
-        "GATE not run",
-        "CHANGED 1",
-        "STATUS done",
-    ]
-    for test_id in ids:
-        records.extend(
-            [
-                f"BEHAVIOR {behavior} | {test_id} | docs: spec:1 | breaks when: missing",
-                f'RUN red | {test_id} | assertion | "FAILED {test_id} - AssertionError"',
-                f'RUN rerun | {test_id} | assertion | "FAILED {test_id} - AssertionError"',
-            ]
-        )
-    records.extend(
-        [
-            'RUN red | tests/test_a.py::test_existing | passed | "ok"',
-            'RUN rerun | tests/test_a.py::test_existing | passed | "ok"',
-            "DIFF none",
-            "COMMANDS none",
-            "END TESTS",
-        ]
-    )
-    return "\n".join(records)
 
 
 def test_build_resolves_filtered_multiple_producers_after_log_reload(
@@ -1011,8 +985,8 @@ def test_build_resolves_filtered_multiple_producers_after_log_reload(
     wt = git.make_worktree(green_cfg, producers.id)
     (wt / "a.py").write_text("stub")
     reports = [
-        _red_report(first, "tests/test_b.py::test_excluded", second),
-        _red_report(other),
+        red_report((1, first), (1, "tests/test_b.py::test_excluded"), (1, second)),
+        red_report((1, other)),
     ]
     loop._steps(green_cfg, producers, wt, log, fake_backend(outputs=reports), 0)
     backend = fake_backend()
@@ -1046,17 +1020,17 @@ def test_invalid_red_evidence_stops_before_builder(green_cfg, log, fake_backend,
         views=["a.py"],
     )
     test_id = "tests/test_a.py::test_new"
-    report = _red_report(test_id)
+    report = red_report((1, test_id))
     if case == "partial":
         report = report.removesuffix("END TESTS")
     elif case == "behavior":
-        report = _red_report(test_id, behavior=2)
+        report = red_report((2, test_id))
     elif case == "scope":
-        report = _red_report("tests/test_other.py::test_new")
+        report = red_report((1, "tests/test_other.py::test_new"))
     elif case == "duplicate":
-        report = _red_report(test_id, test_id)
+        report = red_report((1, test_id), (1, test_id))
     elif case == "excluded-invalid":
-        report = _red_report(test_id, "tests/test_b.py::test_bad").replace(
+        report = red_report((1, test_id), (1, "tests/test_b.py::test_bad")).replace(
             "RUN rerun | tests/test_b.py::test_bad | assertion",
             "RUN rerun | tests/test_b.py::test_bad | passed",
         )
@@ -1110,11 +1084,11 @@ def test_failed_red_rerun_invalidates_earlier_success(
         make_group(red),
         wt,
         log,
-        fake_backend(outputs=[_red_report("tests/test_a.py::test_new")]),
+        fake_backend(outputs=[red_report((1, "tests/test_a.py::test_new"))]),
         0,
     )
     cfg = green_cfg
-    output = _red_report("tests/test_a.py::test_new")
+    output = red_report((1, "tests/test_a.py::test_new"))
     if failure == "rejected":
         output = "REJECTED: STEERING invalid"
     elif failure == "partial":
@@ -1169,7 +1143,7 @@ def test_red_rerun_replaces_ids_and_overlapping_producers_stop(
             make_group(red),
             wt,
             log,
-            fake_backend(outputs=[_red_report(f"tests/test_a.py::test_{name}")]),
+            fake_backend(outputs=[red_report((1, f"tests/test_a.py::test_{name}"))]),
             0,
         )
     backend = fake_backend()
@@ -1183,7 +1157,7 @@ def test_red_rerun_replaces_ids_and_overlapping_producers_stop(
         make_group(other),
         wt,
         log,
-        fake_backend(outputs=[_red_report("tests/test_a.py::test_new")]),
+        fake_backend(outputs=[red_report((1, "tests/test_a.py::test_new"))]),
         0,
     )
     build = replace(
@@ -1415,10 +1389,13 @@ def test_juror_follows_owner_and_build_verdicts(
         make_step("later", ["later.py"]),
         design="docs/superpowers/specs/approved.md",
     )
-    verdict = f"VERDICT {kind}\nACTION {action}\n"
-    if target is not None:
-        verdict += f"STEP {target}\n"
-    verdict += "REASON Preserve the approved behavior\nEVIDENCE a.py:1 | implementation contradicts behavior\nEND JUDGMENT"
+    verdict = verdict_text(
+        kind,
+        action,
+        target,
+        ("Preserve the approved behavior",),
+        ("a.py:1 | implementation contradicts behavior",),
+    )
     backend = fake_backend(
         [
             {"a.py": "stub", "gauntlet/core/a.py": "original"},
@@ -1430,7 +1407,7 @@ def test_juror_follows_owner_and_build_verdicts(
         ],
         [
             "",
-            _red_report(test_id),
+            red_report((1, test_id)),
             f"TEST WRONG 1:\n  {test_id} | mismatch\n",
             verdict,
             verdict,
@@ -1522,10 +1499,10 @@ def test_juror_retry_sends_a_test_writer_step_back_to_its_own_role(
         make_step("later", ["later.py"]),
         design="docs/superpowers/specs/approved.md",
     )
-    verdict = (
-        "VERDICT build wrong\nACTION retry\nSTEP red\n"
-        "REASON Preserve the approved behavior\n"
-        "EVIDENCE a.py:1 | test contradicts behavior\nEND JUDGMENT"
+    verdict = verdict_text(
+        step="red",
+        reasons=("Preserve the approved behavior",),
+        evidence=("a.py:1 | test contradicts behavior",),
     )
     backend = fake_backend(
         [
@@ -1539,10 +1516,10 @@ def test_juror_retry_sends_a_test_writer_step_back_to_its_own_role(
         ],
         [
             "",
-            _red_report(test_id),
+            red_report((1, test_id)),
             f"TEST WRONG 1:\n  {test_id} | mismatch\n",
             verdict,
-            _red_report(test_id),
+            red_report((1, test_id)),
         ],
     )
     restored = []
@@ -1710,7 +1687,7 @@ def test_juror_repair_preserves_producer_and_restores_builder(
         log,
         fake_backend(
             [{"tests/test_a.py": original, "tests/test_b.py": original}],
-            [_red_report(test_id, "tests/test_b.py::test_new")],
+            [red_report((1, test_id), (1, "tests/test_b.py::test_new"))],
         ),
         0,
     )
@@ -1729,11 +1706,13 @@ def test_juror_repair_preserves_producer_and_restores_builder(
         files["tests/test_b.py"] = original.replace("test_new", "test_renamed")
     elif change == "membership":
         files["tests/test_a.py"] += "\ndef test_extra():\n    pass\n"
-    verdict = (
-        "VERDICT tests wrong\nACTION repair\nSTEP red\n"
-        "REASON Machinery misrepresents approved behavior\n"
-        "EVIDENCE tests/test_a.py:2 | wrong fixture value\n"
-        "FAILURE fixture provided wrong value\nEND JUDGMENT"
+    verdict = verdict_text(
+        "tests wrong",
+        "repair",
+        "red",
+        ("Machinery misrepresents approved behavior",),
+        ("tests/test_a.py:2 | wrong fixture value",),
+        ("fixture provided wrong value",),
     )
     seen = []
 
@@ -1819,7 +1798,7 @@ def test_juror_repair_preserves_producer_and_restores_builder(
             log,
             fake_backend(
                 [{"tests/test_a.py": rerun, "tests/test_b.py": rerun}],
-                [_red_report(test_id, "tests/test_b.py::test_new")],
+                [red_report((1, test_id), (1, "tests/test_b.py::test_new"))],
             ),
             0,
         )
@@ -1898,7 +1877,7 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
             {"keep.py": "preserve"},
             {"a.py": "second", "second.py": "old"},
         ],
-        [_red_report(old_id)],
+        [red_report((1, old_id))],
     )
     for index in range(4):
         loop._step(cfg, group, index, wt, log, initial)
@@ -1908,9 +1887,13 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
     }
     judgment = loop._judgment(group, 3, wt, log)
     verdict = loop.reports.verdict(
-        "VERDICT tests wrong\nACTION redo red\nSTEP red\n"
-        "REASON Assertions contradict approved behavior\n"
-        "EVIDENCE tests/test_a.py:1 | assertion is wrong\nEND JUDGMENT"
+        verdict_text(
+            "tests wrong",
+            "redo red",
+            "red",
+            ("Assertions contradict approved behavior",),
+            ("tests/test_a.py:1 | assertion is wrong",),
+        )
     )
 
     class Spy(fake_backend):
@@ -1941,7 +1924,7 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
         (
             ["invalid evidence", "invalid evidence"]
             if outcome == "bad-report"
-            else [_red_report(new_id)]
+            else [red_report((1, new_id))]
         )
         + ([_undetermined()] if outcome != "success" else []),
     )
@@ -2021,14 +2004,19 @@ def test_judgment_check_failures_keep_context_without_finding_anchors(
         )
         files += [{test_id.partition("::")[0]: "red"} for test_id in ids]
         files += [{"a.py": "built"}]
-        outputs += [_red_report(test_id) for test_id in ids] + [""]
+        outputs += [red_report((1, test_id)) for test_id in ids] + [""]
     if trigger == "formatter":
         cfg = replace(cfg, format_cmd=failure)
     elif trigger == "group":
         cfg = replace(cfg, check_cmd=failure)
     outputs.append(
-        "VERDICT undetermined\nACTION owner\nREASON Need owner evidence\n"
-        "EVIDENCE a.py:1 | observed implementation\nEND JUDGMENT"
+        verdict_text(
+            "undetermined",
+            "owner",
+            None,
+            ("Need owner evidence",),
+            ("a.py:1 | observed implementation",),
+        )
     )
     backend = fake_backend(files, outputs)
     with pytest.raises(WrongTest, match="Need owner evidence"):
@@ -2084,7 +2072,7 @@ def test_judgment_expected_producer_red_remains_successful_evidence(
     group = make_group(make_step("stub", ["a.py"]), producer, build)
     backend = fake_backend(
         [{"a.py": "stub"}, {"tests/test_a.py": "red"}, {"a.py": "built"}],
-        ["", _red_report(test_id), ""],
+        ["", red_report((1, test_id)), ""],
     )
     loop.run_group(cfg, group, log, backend)
     assert backend.agents == ["core-builder", "test-writer", "core-builder"]
@@ -2132,7 +2120,7 @@ def test_judgment_group_rejects_missing_spec_or_stale_evidence(
     )
     backend = fake_backend(
         [{"a.py": "stub"}, {"tests/test_a.py": "red"}],
-        ["", _red_report("tests/test_a.py::test_a")],
+        ["", red_report((1, "tests/test_a.py::test_a"))],
     )
     wt = git.make_worktree(cfg, group.id)
     loop._steps(cfg, group, wt, log, backend, 0)
@@ -2156,9 +2144,10 @@ def test_judgment_group_verdict_return_keeps_landing_blocked(
         make_step("build", ["a.py"], form=forms.Build("core-builder", "Build it", ())),
         design="docs/superpowers/specs/approved.md",
     )
-    verdict = (
-        "VERDICT build wrong\nACTION retry\nSTEP build\nREASON Fix implementation\n"
-        "EVIDENCE a.py:1 | still broken\nEND JUDGMENT"
+    verdict = verdict_text(
+        step="build",
+        reasons=("Fix implementation",),
+        evidence=("a.py:1 | still broken",),
     )
     backend = fake_backend(
         [
@@ -2209,9 +2198,10 @@ def test_group_retry_replays_dependent_writes_and_preserves_unrelated(
         ),
         design="docs/superpowers/specs/approved.md",
     )
-    verdict = (
-        "VERDICT build wrong\nACTION retry\nSTEP build\nREASON Fix implementation\n"
-        "EVIDENCE a.py:1 | initial build was wrong\nEND JUDGMENT"
+    verdict = verdict_text(
+        step="build",
+        reasons=("Fix implementation",),
+        evidence=("a.py:1 | initial build was wrong",),
     )
 
     class Spy(fake_backend):
@@ -2298,11 +2288,13 @@ def test_group_test_fix_resumes_affected_checks_only(
         ),
         design="docs/superpowers/specs/approved.md",
     )
-    verdict = (
-        f"VERDICT tests wrong\nACTION {action}\nSTEP red\nREASON Fix approved tests\n"
-        "EVIDENCE tests/test_a.py:2 | wrong test input\n"
-        + ("FAILURE wrong fixture value\n" if action == "repair" else "")
-        + "END JUDGMENT"
+    verdict = verdict_text(
+        "tests wrong",
+        action,
+        "red",
+        ("Fix approved tests",),
+        ("tests/test_a.py:2 | wrong test input",),
+        ("wrong fixture value",) if action == "repair" else (),
     )
     files = [
         {"a.py": "stub"},
@@ -2315,12 +2307,12 @@ def test_group_test_fix_resumes_affected_checks_only(
     ]
     outputs = [
         "",
-        _red_report(old_id),
+        red_report((1, old_id)),
         "",
         "",
         "",
         verdict,
-        "RUN after all green" if action == "repair" else _red_report(new_id),
+        "RUN after all green" if action == "repair" else red_report((1, new_id)),
     ]
     if action == "redo red":
         files += [{"a.py": "fresh first"}, {"b.py": "fresh second"}]
@@ -2351,7 +2343,7 @@ def test_group_test_fix_resumes_affected_checks_only(
             new_id in text and old_id not in text for text in backend.briefs[-2:]
         )
     else:
-        assert log.kept("g1-red").rstrip() == _red_report(old_id)
+        assert log.kept("g1-red").rstrip() == red_report((1, old_id))
     assert run_ok(["git", "show", f"{commit}:keep.py"], origin).out == "preserve"
     assert log.done() == {"g1"}
 
@@ -2407,12 +2399,19 @@ def test_group_test_fix_keeps_transitive_completed_dependents(
         make_step("unrelated", ["keep.py"]),
         design="docs/superpowers/specs/approved.md",
     )
-    verdict = (
-        f"VERDICT tests wrong\nACTION {action}\nSTEP red\nREASON Fix tests\nEVIDENCE tests/test_a.py:2 | fixture wrong\n"
-        + ("FAILURE wrong fixture\n" if action == "repair" else "")
-        + "END JUDGMENT"
+    verdict = verdict_text(
+        "tests wrong",
+        action,
+        "red",
+        ("Fix tests",),
+        ("tests/test_a.py:2 | fixture wrong",),
+        ("wrong fixture",) if action == "repair" else (),
     )
-    retry = "VERDICT build wrong\nACTION retry\nSTEP build\nREASON Fix implementation\nEVIDENCE a.py:1 | implementation wrong\nEND JUDGMENT"
+    retry = verdict_text(
+        step="build",
+        reasons=("Fix implementation",),
+        evidence=("a.py:1 | implementation wrong",),
+    )
     files = [
         {"a.py": "stub"},
         {"tests/test_a.py": original},
@@ -2425,13 +2424,13 @@ def test_group_test_fix_keeps_transitive_completed_dependents(
     ]
     outputs = [
         "",
-        _red_report(test_id),
+        red_report((1, test_id)),
         "",
         "",
         "",
         "",
         verdict,
-        "RUN after all green" if action == "repair" else _red_report(test_id),
+        "RUN after all green" if action == "repair" else red_report((1, test_id)),
     ]
     if action == "repair":
         files.append({})
@@ -2502,9 +2501,13 @@ def test_retest_refreshes_preserved_red_evidence_before_restoring_build(
     wt = git.make_worktree(cfg, group.id)
     (wt / "a.py").write_text("original")
     wrong = f"TEST WRONG 1:\n  {test_id} | wrong machinery\n"
-    repair = (
-        "VERDICT tests wrong\nACTION repair\nSTEP red\nREASON Repair machinery\n"
-        "EVIDENCE tests/test_a.py:2 | wrong fixture\nFAILURE wrong fixture\nEND JUDGMENT"
+    repair = verdict_text(
+        "tests wrong",
+        "repair",
+        "red",
+        ("Repair machinery",),
+        ("tests/test_a.py:2 | wrong fixture",),
+        ("wrong fixture",),
     )
     with pytest.raises(WrongTest):
         loop._steps(
@@ -2522,7 +2525,7 @@ def test_retest_refreshes_preserved_red_evidence_before_restoring_build(
                     {},
                 ],
                 [
-                    _red_report(test_id),
+                    red_report((1, test_id)),
                     wrong,
                     repair,
                     "RUN after all green",
@@ -2532,9 +2535,10 @@ def test_retest_refreshes_preserved_red_evidence_before_restoring_build(
             ),
             0,
         )
-    retry = (
-        "VERDICT build wrong\nACTION retry\nSTEP build\nREASON Fix implementation\n"
-        "EVIDENCE a.py:1 | implementation defect\nEND JUDGMENT"
+    retry = verdict_text(
+        step="build",
+        reasons=("Fix implementation",),
+        evidence=("a.py:1 | implementation defect",),
     )
     if continuation == "group":
         cfg = replace(cfg, check_cmd=RED_UNTIL_FIXED)
@@ -2567,7 +2571,7 @@ def test_retest_refreshes_preserved_red_evidence_before_restoring_build(
             original + "\ndef test_extra():\n    pass\n"
         )
     elif change == "report":
-        log.keep("g1-red", _red_report("tests/test_a.py::test_replaced"))
+        log.keep("g1-red", red_report((1, "tests/test_a.py::test_replaced")))
     elif change == "invalidated":
         log.keep("g1-red-evidence", "")
     elif change == "partial":
@@ -2630,7 +2634,7 @@ def test_named_red_producer_uses_report_ids_with_existing_source_view(
     wt = git.make_worktree(cfg, group.id)
     (wt / "a.py").write_text("existing source")
     backend = fake_backend(
-        outputs=[_red_report(first, second)]
+        outputs=[red_report((1, first), (1, second))]
         if valid_report
         else [summary, summary, _undetermined()]
     )
@@ -2675,13 +2679,13 @@ def test_red_brief_the_cut_refuses_is_logged_and_dispatched_whole(
     (wt / "a.py").write_text("stub")
     backend = fake_backend(
         [{"tests/test_a.py": "red"}, {"b.py": "built"}],
-        outputs=[_red_report(test_id), ""],
+        outputs=[red_report((1, test_id)), ""],
     )
     loop._steps(cfg, g, wt, log, backend, 0)
     assert len(backend.briefs) == 2
     assert backend.briefs[0].count("behavior:") == 2
     assert log.kept("g1-r1-brief") == backend.briefs[0]
-    assert log.kept("g1-r1") == _red_report(test_id) + "\n"
+    assert log.kept("g1-r1") == red_report((1, test_id)) + "\n"
     assert (wt / "b.py").read_text() == "built"
     mismatches = [r for r in _rows(cfg) if r["kind"] == "mismatch"]
     assert [r["mismatch_kind"] for r in mismatches] == ["overload"]
@@ -2693,7 +2697,7 @@ def test_red_over_the_behavior_limit_is_cut_into_parts_of_whole_behaviors(
     green_cfg, log, fake_backend
 ):
     first, second = "tests/test_a.py::test_one", "tests/test_a.py::test_two"
-    outputs = [_red_report(first), _red_report(second)]
+    outputs = [red_report((1, first)), red_report((1, second))]
     red, _, _, backend, run = _cut_red_run(
         green_cfg,
         log,
@@ -2702,7 +2706,7 @@ def test_red_over_the_behavior_limit_is_cut_into_parts_of_whole_behaviors(
         outputs,
         red_behaviors=2,
     )
-    outputs[0] = _red_report(first, "tests/test_a.py::test_one_b", behavior=2)
+    outputs[0] = red_report((2, first), (2, "tests/test_a.py::test_one_b"))
     backend.outputs[0] = outputs[0]
     run()
     assert len(backend.briefs) == 2
@@ -2723,7 +2727,7 @@ def test_red_over_the_behavior_limit_is_cut_into_parts_of_whole_behaviors(
 def test_red_in_one_part_keeps_its_name_and_a_single_count(
     green_cfg, log, fake_backend
 ):
-    report = _red_report("tests/test_a.py::test_one")
+    report = red_report((1, "tests/test_a.py::test_one"))
     red, _, _, backend, run = _cut_red_run(
         green_cfg, log, fake_backend, ("One.",), [report]
     )
@@ -2738,8 +2742,8 @@ def test_red_part_reporting_a_behavior_beyond_its_own_count_is_rerun_then_judged
     green_cfg, log, fake_backend
 ):
     outputs = [
-        _red_report("tests/test_a.py::test_one", behavior=3),
-        _red_report("tests/test_a.py::test_two"),
+        red_report((3, "tests/test_a.py::test_one")),
+        red_report((1, "tests/test_a.py::test_two")),
     ]
     _, _, _, backend, run = _cut_red_run(
         green_cfg,
@@ -2983,7 +2987,7 @@ def test_rejected_red_evidence_reruns_red_step_from_its_before_snapshot(
     group = make_group(_red_step())
     wt = git.make_worktree(cfg, group.id)
     (wt / "a.py").write_text("stub")
-    valid = _red_report("tests/test_a.py::test_new")
+    valid = red_report((1, "tests/test_a.py::test_new"))
     backend = _seeing(fake_backend, "tests/test_a.py")(
         [{"tests/test_a.py": "partial"}, {"tests/test_a.py": "real"}],
         [valid.removesuffix("END TESTS"), valid],
@@ -3012,7 +3016,7 @@ def test_step_past_answer_rounds_opens_a_judgment_keeping_its_failure(
         bad = "REJECTED: STEERING extra fields"
     else:
         step = _red_step()
-        bad = _red_report("tests/test_a.py::test_new").removesuffix("END TESTS")
+        bad = red_report((1, "tests/test_a.py::test_new")).removesuffix("END TESTS")
     group = make_group(step, design="docs/superpowers/specs/approved.md")
     wt = git.make_worktree(cfg, group.id)
     (wt / "a.py").write_text("stub")
@@ -3081,7 +3085,7 @@ def test_unresolved_producer_evidence_opens_a_judgment_before_the_builder(
         make_group(red),
         wt,
         log,
-        fake_backend(outputs=[_red_report("tests/test_a.py::test_new")]),
+        fake_backend(outputs=[red_report((1, "tests/test_a.py::test_new"))]),
         0,
     )
     if case == "stale":
@@ -3131,8 +3135,8 @@ def test_judgment_leaves_unresolved_producer_ids_out_and_keeps_its_report(
         log,
         fake_backend(
             outputs=[
-                _red_report("tests/test_a.py::test_new"),
-                _red_report("tests/test_b.py::test_new"),
+                red_report((1, "tests/test_a.py::test_new")),
+                red_report((1, "tests/test_b.py::test_new")),
             ]
         ),
         0,
@@ -3162,13 +3166,13 @@ def test_judgment_leaves_unresolved_producer_ids_out_and_keeps_its_report(
         "REJECTED: STEERING missing evidence",
         "OVERLOADED: 6 paths",
         "malformed verdict",
-        (
-            "VERDICT build wrong\nACTION retry\nSTEP other\nREASON Fix it\n"
-            "EVIDENCE a.py:1 | broken\nEND JUDGMENT"
-        ),
-        (
-            "VERDICT undetermined\nACTION owner\nREASON Need other evidence\n"
-            "EVIDENCE /elsewhere/report.txt:1 | not in this judgment\nEND JUDGMENT"
+        verdict_text(step="other", reasons=("Fix it",), evidence=("a.py:1 | broken",)),
+        verdict_text(
+            "undetermined",
+            "owner",
+            None,
+            ("Need other evidence",),
+            ("/elsewhere/report.txt:1 | not in this judgment",),
         ),
     ],
     ids=["refused", "overloaded", "malformed", "target-outside", "evidence-outside"],
@@ -3230,14 +3234,16 @@ def test_refused_repair_opens_the_next_judgment_attempt_on_the_same_context(
         make_group(red),
         wt,
         log,
-        fake_backend([{"tests/test_a.py": original}], [_red_report(test_id)]),
+        fake_backend([{"tests/test_a.py": original}], [red_report((1, test_id))]),
         0,
     )
-    verdict = (
-        "VERDICT tests wrong\nACTION repair\nSTEP red\n"
-        "REASON Machinery misrepresents approved behavior\n"
-        "EVIDENCE tests/test_a.py:2 | wrong fixture value\n"
-        "FAILURE fixture provided wrong value\nEND JUDGMENT"
+    verdict = verdict_text(
+        "tests wrong",
+        "repair",
+        "red",
+        ("Machinery misrepresents approved behavior",),
+        ("tests/test_a.py:2 | wrong fixture value",),
+        ("fixture provided wrong value",),
     )
     backend = fake_backend(
         [{"a.py": "partial"}, {}, {}, {}],

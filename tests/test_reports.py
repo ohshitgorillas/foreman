@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from conftest import make_group, make_step
+from conftest import make_group, make_step, verdict_text
 
 from foreman import reports
 from foreman.errors import ConfigError
@@ -421,17 +421,24 @@ def test_anchor_accepts_resolved_worktree_path(tmp_path: Path) -> None:
         )
 
 
-VERDICT = """VERDICT tests wrong
-ACTION repair
-STEP red-2
-REASON The fixture fails before the original assertion.
-REASON Preserve the original test ids and assertions.
-EVIDENCE tests/test_errors.py:12 | fixture accesses an absent attribute
-EVIDENCE docs/superpowers/specs/errors.md:8 | the approved claim is clear
-EVIDENCE /state/g-build.txt:19 | observed failure | additional detail
-FAILURE FAILED tests/test_errors.py::test_safe[two words] - AttributeError: missing | value
-FAILURE ERROR tests/test_errors.py::test_hierarchy - fixture setup failed
-END JUDGMENT"""
+VERDICT = verdict_text(
+    "tests wrong",
+    "repair",
+    "red-2",
+    (
+        "The fixture fails before the original assertion.",
+        "Preserve the original test ids and assertions.",
+    ),
+    (
+        "tests/test_errors.py:12 | fixture accesses an absent attribute",
+        "docs/superpowers/specs/errors.md:8 | the approved claim is clear",
+        "/state/g-build.txt:19 | observed failure | additional detail",
+    ),
+    (
+        "FAILED tests/test_errors.py::test_safe[two words] - AttributeError: missing | value",
+        "ERROR tests/test_errors.py::test_hierarchy - fixture setup failed",
+    ),
+)
 
 
 @pytest.mark.parametrize("final_lf", ["", "\n"])
@@ -468,10 +475,9 @@ def test_verdict_preserves_order_and_verbatim_evidence(final_lf: str) -> None:
 def test_verdict_decodes_each_other_permitted_transition(
     kind: str, action: str, step: str | None
 ) -> None:
-    text = f"VERDICT {kind}\nACTION {action}\n"
-    if step is not None:
-        text += f"STEP {step}\n"
-    text += "REASON Missing evidence.\nEVIDENCE report.txt:1 | observed\nEND JUDGMENT"
+    text = verdict_text(
+        kind, action, step, ("Missing evidence.",), ("report.txt:1 | observed",)
+    )
     assert reports.verdict(text) == reports.Verdict(
         kind, action, step, ("Missing evidence.",), ("report.txt:1 | observed",), ()
     )
@@ -570,20 +576,21 @@ def test_verdict_refuses_non_envelopes(text: str) -> None:
     ],
 )
 def test_verdict_forbids_failures_outside_repair(kind: str, action: str) -> None:
-    text = f"VERDICT {kind}\nACTION {action}\n"
-    if action != "owner":
-        text += "STEP candidate\n"
-    text += "REASON why\nEVIDENCE report.txt:1 | claim\nFAILURE observed\nEND JUDGMENT"
+    text = verdict_text(
+        kind,
+        action,
+        None if action == "owner" else "candidate",
+        ("why",),
+        ("report.txt:1 | claim",),
+        ("observed",),
+    )
     with pytest.raises(ConfigError, match="verdict"):
         reports.verdict(text)
 
 
 @pytest.mark.parametrize("kind", ["spec wrong", "undetermined"])
 def test_verdict_owner_action_forbids_target(kind: str) -> None:
-    text = (
-        f"VERDICT {kind}\nACTION owner\nSTEP candidate\n"
-        "REASON why\nEVIDENCE report.txt:1 | claim\nEND JUDGMENT"
-    )
+    text = verdict_text(kind, "owner", "candidate", ("why",), ("report.txt:1 | claim",))
     with pytest.raises(ConfigError, match="verdict"):
         reports.verdict(text)
 

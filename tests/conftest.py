@@ -208,6 +208,57 @@ def make_group(*steps: Step, gid: str = "g1", **fields: object) -> Group:
     return replace(Group(gid, list(steps), "design.md", []), **fields)  # type: ignore[arg-type]
 
 
+def red_report(*behaviors: tuple[int, str], notes: tuple[str, ...] = ()) -> str:
+    """A complete test-writer red report claiming each (number, id), with notes."""
+    records = [
+        "SHAPE red",
+        "BRIEF red",
+        "VIEWS none",
+        "BLOCKED none",
+        "GATE not run",
+        "CHANGED 1",
+        "STATUS done",
+    ]
+    for number, test_id in behaviors:
+        records.extend(
+            [
+                f"BEHAVIOR {number} | {test_id} | docs: spec:1 | breaks when: missing",
+                f'RUN red | {test_id} | assertion | "FAILED {test_id} - AssertionError"',
+                f'RUN rerun | {test_id} | assertion | "FAILED {test_id} - AssertionError"',
+            ]
+        )
+    records.extend(
+        [
+            'RUN red | tests/test_a.py::test_existing | passed | "ok"',
+            'RUN rerun | tests/test_a.py::test_existing | passed | "ok"',
+            *notes,
+            "DIFF none",
+            "COMMANDS none",
+            "END TESTS",
+        ]
+    )
+    return "\n".join(records)
+
+
+def verdict_text(
+    kind: str = "build wrong",
+    action: str = "retry",
+    step: str | None = "s1",
+    reasons: tuple[str, ...] = ("r",),
+    evidence: tuple[str, ...] = ("a.py:1 | c",),
+    failures: tuple[str, ...] = (),
+) -> str:
+    """A complete juror verdict; STEP is left out when step is None."""
+    lines = [f"VERDICT {kind}", f"ACTION {action}"]
+    if step is not None:
+        lines.append(f"STEP {step}")
+    lines += [f"REASON {r}" for r in reasons]
+    lines += [f"EVIDENCE {e}" for e in evidence]
+    lines += [f"FAILURE {f}" for f in failures]
+    lines.append("END JUDGMENT")
+    return "\n".join(lines)
+
+
 @pytest.fixture
 def origin(cfg: Config, tmp_path: Path) -> Path:
     """A bare repository added as cfg.target_repo's origin remote."""
