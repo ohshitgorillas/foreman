@@ -3,7 +3,7 @@
 # Steps 10-12 (gauntlet/core/launch.py) are the next group.
 
 [groups.g7]
-steps = ["4", "5", "7", "8a", "8b", "8c", "8d", "8e", "9"]
+steps = ["4", "5", "7", "8a", "8b", "8c", "8d.1", "8d.2", "8d.3", "8e", "9"]
 design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md"
 after = []
 
@@ -159,7 +159,7 @@ source = "gauntlet/seams/process.py"
 text = "A child ended by a signal reports status 128 plus the signal number, as a shell does."
 source = "gauntlet/seams/process.py"
 
-[steps.8d]
+[steps."8d.1"]
 role = "test-writer"
 shape = "red"
 paths = ["tests/test_seams_process_cleanup.py"]
@@ -167,30 +167,52 @@ views = ["gauntlet/seams/process.py"]
 check = ["uv", "run", "pytest", "-q", "tests/test_seams_process_cleanup.py"]
 expect_code = 1
 
-[steps.8d.form]
+[steps."8d.1".form]
 origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8d"] }
 
-[[steps.8d.form.behaviors]]
+[[steps."8d.1".form.behaviors]]
 text = "The sequence sends SIGTERM to the child's process group, then waits through the Clock up to TERMINATE_GRACE_SECONDS."
 source = "gauntlet/seams/process.py"
 
-[[steps.8d.form.behaviors]]
+[[steps."8d.1".form.behaviors]]
 text = "The first wait ends at the first check that finds no member running, at most GROUP_POLL_SECONDS after the group empties."
 source = "gauntlet/seams/process.py"
 
-[[steps.8d.form.behaviors]]
+[steps."8d.2"]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_seams_process_cleanup.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_process_cleanup.py"]
+expect_code = 1
+
+[steps."8d.2".form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8d"] }
+
+[[steps."8d.2".form.behaviors]]
 text = "SIGKILL goes to the group only when the first wait ends with a member still running."
 source = "gauntlet/seams/process.py"
 
-[[steps.8d.form.behaviors]]
+[[steps."8d.2".form.behaviors]]
 text = "A second wait through the Clock, up to TERMINATE_GRACE_SECONDS, ends early when the child is reaped"
 source = "gauntlet/seams/process.py"
 
-[[steps.8d.form.behaviors]]
+[steps."8d.3"]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_seams_process_cleanup.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_process_cleanup.py"]
+expect_code = 1
+
+[steps."8d.3".form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8d"] }
+
+[[steps."8d.3".form.behaviors]]
 text = "Cleanup fails when any member of the group has not exited after that second wait."
 source = "gauntlet/seams/process.py"
 
-[[steps.8d.form.behaviors]]
+[[steps."8d.3".form.behaviors]]
 text = "Any exception raised while run waits on its child, KeyboardInterrupt and every other BaseException included, makes run run the sequence and then re-raise that same exception object; run raises ProcessError in its place only when the sequence itself fails, raised `from` that exception so it stays on `__cause__` and in the traceback."
 source = "gauntlet/seams/process.py"
 
@@ -238,6 +260,8 @@ red = [
     { step = "8a", files = ["tests/test_seams_process.py"] },
     { step = "8b", files = ["tests/test_seams_process_streams.py"] },
     { step = "8c", files = ["tests/test_seams_process_failure.py"] },
-    { step = "8d", files = ["tests/test_seams_process_cleanup.py"] },
+    { step = "8d.1", files = ["tests/test_seams_process_cleanup.py"] },
+    { step = "8d.2", files = ["tests/test_seams_process_cleanup.py"] },
+    { step = "8d.3", files = ["tests/test_seams_process_cleanup.py"] },
     { step = "8e", files = ["tests/test_seams_process_close.py"] },
 ]
