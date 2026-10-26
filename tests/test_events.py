@@ -235,3 +235,42 @@ def test_log_built_from_a_state_dir_alone_reads_history_and_stats(
     assert bare.done() == {"g1"}
     assert "2 events" in bare.status()
     assert bare.stats().startswith("builder: tokens: 10.0 seconds: 2.0")
+
+
+def test_stopped_writes_one_stop_event(cfg: Config) -> None:
+    log = EventLog(cfg)
+    log.stopped("g1", "timeout", 4, "too slow")
+    row = json.loads((cfg.state_dir / "events.jsonl").read_text())
+    assert (row["kind"], row["step_id"], row["stop_kind"], row["exit_code"]) == (
+        "stop",
+        "g1",
+        "timeout",
+        4,
+    )
+
+
+def test_stopped_rejects_unknown_kind(cfg: Config) -> None:
+    with pytest.raises(ValueError):
+        EventLog(cfg).stopped(None, "bored", 1, "x")
+
+
+def test_keep_report_numbers_attempts_and_keeps_latest(cfg: Config) -> None:
+    log = EventLog(cfg)
+    first = log.keep_report("s1-red", "one")
+    second = log.keep_report("s1-red", "two")
+    assert first.name == "s1-red-attempt-1.txt"
+    assert second.name == "s1-red-attempt-2.txt"
+    assert first.read_text() == "one"
+    assert log.kept("s1-red") == "two"
+
+
+def test_every_error_kind_is_a_stop_kind() -> None:
+    from foreman import errors
+
+    kinds = [
+        c.kind
+        for c in vars(errors).values()
+        if isinstance(c, type) and issubclass(c, ForemanError)
+    ]
+    assert kinds and all(k in events.STOP_KINDS for k in kinds)
+    assert not hasattr(errors, "Escalated")

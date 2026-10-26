@@ -3,6 +3,7 @@
 
 class ForemanError(Exception):
     exit_code: int = 1
+    kind: str = "infrastructure"  # a member of events.STOP_KINDS
 
 
 class ConfigError(ForemanError):
@@ -17,28 +18,25 @@ class BackendError(ForemanError):
     exit_code = 4
 
 
-class Escalated(ForemanError):
-    """Red twice; Void, the dispatcher, acts."""
-
-    exit_code = 5
-
-
 class RulingNeeded(ForemanError):
     """Refusal, overload, missed step check, unnamed group path or no change; Void rules."""
 
     exit_code = 6
+    kind = "steering"
 
 
 class FindingsToRule(ForemanError):
     """Reviewers filed findings; Void upholds or declines each."""
 
     exit_code = 7
+    kind = "findings"
 
 
 class WrongTest(ForemanError):
     """Spec defect, undetermined judgment or exhausted juror rounds; owner acts."""
 
     exit_code = 8
+    kind = "owner"
 
 
 EXIT_OK = 0

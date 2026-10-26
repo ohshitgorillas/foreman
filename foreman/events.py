@@ -21,6 +21,19 @@ MISMATCH_KINDS = (
     "repair evidence",
     "preflight",
 )
+STOP_KINDS = (
+    "timeout",
+    "infrastructure",
+    "steering",
+    "overload",
+    "reviewer refused",
+    "findings",
+    "owner",
+    "evidence",
+    "no change",
+    "killed",
+    "crashed",
+)
 
 
 def _mean(xs: list[float]) -> str:
@@ -78,6 +91,22 @@ class EventLog:
         if kind not in MISMATCH_KINDS:
             raise ValueError(f"unknown mismatch kind: {kind}")
         self.emit("mismatch", group_id, name=name, mismatch_kind=kind, text=text)
+
+    def stopped(
+        self, group_id: str | None, kind: str, exit_code: int, text: str
+    ) -> None:
+        if kind not in STOP_KINDS:
+            raise ValueError(f"unknown stop kind: {kind}")
+        self.emit("stop", group_id, stop_kind=kind, exit_code=exit_code, text=text)
+
+    def keep_report(self, name: str, text: str) -> Path:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        n = len(list(self._dir.glob(f"{name}-attempt-*.txt"))) + 1
+        path = self._dir / f"{name}-attempt-{n}.txt"
+        path.write_text(text, encoding="utf-8")
+        (self._dir / f"{name}.txt").write_text(text, encoding="utf-8")
+        self.emit("kept", name=f"{name}-attempt-{n}", path=str(path))
+        return path
 
     def keep(self, name: str, text: str) -> Path:
         path = self._dir / f"{name}.txt"
