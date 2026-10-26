@@ -2,7 +2,6 @@
 
 import io
 import json
-import sys
 import tokenize
 from dataclasses import dataclass
 from pathlib import Path
@@ -237,7 +236,7 @@ with contextlib.redirect_stdout(output):
 print(json.dumps({'membership': items, 'output': output.getvalue()}))
 sys.exit(code)
 """
-    command = [sys.executable, "-c", script, *files]
+    command = [*cfg.python_cmd, "-c", script, *files]
     try:
         result = run.run(command, wt, timeout=cfg.check_seconds)
     except ForemanError as exc:

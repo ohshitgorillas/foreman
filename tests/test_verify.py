@@ -340,3 +340,21 @@ def test_repair_collection_runs_under_check_seconds(
     with pytest.raises(RulingNeeded):
         verify.validate_repair(cfg, original, tmp_path)
     assert seen == [7, 7]
+
+
+def test_repair_collection_runs_through_configured_python_cmd(
+    green_cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, ids = _repair_source(tmp_path)
+    seen: list[list[str]] = []
+
+    def fake(cmd, cwd, timeout=None, env=None):
+        seen.append(list(cmd))
+        return run.Result(cmd, 1, "", "stop", 0.0)
+
+    monkeypatch.setattr(run, "run", fake)
+    cfg = replace(green_cfg, python_cmd=["target-python", "-X", "utf8"])
+    with pytest.raises(RulingNeeded):
+        verify.capture_repair(cfg, tmp_path, ids)
+    assert seen[0][:4] == ["target-python", "-X", "utf8", "-c"]
+    assert sys.executable not in seen[0]
