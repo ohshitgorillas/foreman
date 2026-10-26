@@ -24,11 +24,21 @@ ROLE = ".claude/agents/core-builder.md"
 JUROR = ".claude/agents/juror.md"
 
 
+# Report examples pre-flight's examples check parses: any for core-builder,
+# a verdict for the juror.
+REPORT = "\n## Report\n\n```\nDONE\n```\n"
+VERDICT = (
+    "\n## Report\n\n```\nVERDICT undetermined\nACTION owner\nREASON r\n"
+    "EVIDENCE gauntlet/core/a.py:1 | c\nEND JUDGMENT\n```\n"
+)
+
+
 def role_file(cfg: Config, scope: str) -> None:
     path = cfg.target_repo / ROLE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"---\nname: core-builder\ndescription: Writes under `{scope}` only.\n---\n"
+        + REPORT
     )
 
 
@@ -53,7 +63,7 @@ def no_host_agents(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def conf_file(conf_file: Path, green_cfg: Config) -> Path:
     """The shared conf_file, its target repo carrying role files pre-flight passes."""
     role_file(green_cfg, "gauntlet/")
-    (green_cfg.target_repo / JUROR).write_text("---\nname: juror\n---\n")
+    (green_cfg.target_repo / JUROR).write_text("---\nname: juror\n---\n" + VERDICT)
     run_ok(["git", "add", ROLE, JUROR], green_cfg.target_repo)
     run_ok(["git", "commit", "-q", "-m", "role"], green_cfg.target_repo)
     return conf_file

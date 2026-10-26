@@ -18,13 +18,14 @@ import signal
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from foreman import backends, config, forms, git, steps
+from foreman import backends, config, forms, git, reports, steps
 from foreman.config import Config
-from foreman.errors import ConfigError
+from foreman.errors import ConfigError, ForemanError
 from foreman.steps import Group, Step
 
 
@@ -338,51 +339,179 @@ USER_AGENTS: dict[str, Path] = {
 }
 
 
-def check_installed(step: Step, group: Group, cfg: Config) -> list[Finding]:
-    """Check 5: each dispatched role is where cfg.backend finds it in the group's worktree.
+@dataclass(frozen=True)
+class RoleFile:
+    name: str  # where the file is, for findings
+    read: Callable[[], str]  # the role's instructions; raises _UNREADABLE
+
+
+# What RoleFile.read raises when the file is there but cannot be read.
+_UNREADABLE = (OSError, ValueError, KeyError, TypeError, ForemanError)
+
+
+def _codex_instructions(path: Path) -> str:
+    """The developer_instructions CodexLocal sends from role file `path`."""
+    with path.open("rb") as f:
+        instructions = tomllib.load(f)["developer_instructions"]
+    if not isinstance(instructions, str):
+        raise TypeError("developer_instructions must be a string")
+    return instructions
+
+
+@dataclass(frozen=True)
+class RoleLookup:
+    where: str  # where cfg.backend looks, for findings
+    find: Callable[[str], RoleFile | None]  # a role's file, or None if missing
+
+
+def role_lookup(group: Group, cfg: Config) -> RoleLookup:
+    """Where cfg.backend finds each role's file in `group`'s worktree.
 
     claude-local runs `claude --agent <role>` in the worktree, which finds
-    <worktree>/.claude/agents/<role>.md or <role>.md in the user agents
-    folder. The worktree is the kept one if it exists, else the one
+    <role>.md in the user agents folder or <worktree>/.claude/agents/<role>.md.
+    The worktree is the kept one if it exists, else the one
     git.make_worktree will add from HEAD, so a role file not committed at
     HEAD is missing. codex-local reads <role>.toml from its agents folder
-    wherever it runs.
+    wherever it runs, and sends its developer_instructions.
     """
     if cfg.backend not in USER_AGENTS:
         raise ConfigError(f"unknown backend {cfg.backend!r}")
     home = USER_AGENTS[cfg.backend]
     if cfg.backend == backends.CodexLocal.name:
 
-        def installed(role: str) -> bool:
-            return (home / f"{role}.toml").is_file()
+        def find(role: str) -> RoleFile | None:
+            path = home / f"{role}.toml"
+            if not path.is_file():
+                return None
+            return RoleFile(str(path), lambda: _codex_instructions(path))
 
-        where = str(home)
-    else:
-        wt = git.worktree_path(cfg, group.id)
+        return RoleLookup(str(home), find)
+    wt = git.worktree_path(cfg, group.id)
 
-        def installed(role: str) -> bool:
-            rel = f".claude/agents/{role}.md"
-            if (home / f"{role}.md").is_file():
-                return True
-            if wt.is_dir():
-                return (wt / rel).is_file()
-            return git.in_head(cfg.target_repo, rel)
+    def find(role: str) -> RoleFile | None:
+        rel = f".claude/agents/{role}.md"
+        path = home / f"{role}.md"
+        if path.is_file():
+            return RoleFile(str(path), path.read_text)
+        if wt.is_dir():
+            path = wt / rel
+            return RoleFile(str(path), path.read_text) if path.is_file() else None
+        if git.in_head(cfg.target_repo, rel):
+            return RoleFile(
+                f"{rel} at HEAD", lambda: git.read_head(cfg.target_repo, rel)
+            )
+        return None
 
-        tree = f"worktree {wt}" if wt.is_dir() else "HEAD of the target repo"
-        where = f"{home} or .claude/agents/ in {tree}"
+    tree = f"worktree {wt}" if wt.is_dir() else "HEAD of the target repo"
+    return RoleLookup(f"{home} or .claude/agents/ in {tree}", find)
+
+
+def check_installed(step: Step, group: Group, cfg: Config) -> list[Finding]:
+    """Check 5: each dispatched role is where cfg.backend finds it, per role_lookup."""
+    lookup = role_lookup(group, cfg)
     return [
         Finding(
             step.id,
             "installed",
-            f"role {role} not installed for {cfg.backend}: not in {where}",
+            f"role {role} not installed for {cfg.backend}: not in {lookup.where}",
             "role author",
         )
         for role in dispatched_roles(step, group, cfg)
-        if not installed(role)
+        if lookup.find(role) is None
     ]
 
 
-CHECKS: tuple[Check, ...] = (check_verbatim, check_scope, check_hooks, check_installed)
+_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_FENCE = re.compile(r"^(`{3,}|~{3,})")
+
+
+def report_example(text: str) -> str | None:
+    """The report example a role file documents, or None if it documents none.
+
+    The example is the first fenced code block in the section headed
+    `Report` (any heading level), which runs to the next heading of the same
+    or a higher level. The fence lines themselves are not part of it.
+    """
+    lines = text.splitlines()
+    level = None
+    fence = None
+    body: list[str] = []
+    for line in lines:
+        if fence is not None:
+            if re.fullmatch(rf"\s*{fence[0]}{{{len(fence)},}}\s*", line):
+                return "\n".join(body) + "\n"
+            body.append(line)
+            continue
+        heading = _HEADING.match(line)
+        if heading:
+            if level is not None and len(heading.group(1)) <= level:
+                return None
+            if level is None and heading.group(2) == "Report":
+                level = len(heading.group(1))
+            continue
+        opened = _FENCE.match(line)
+        if opened and level is not None:
+            fence = opened.group(1)
+    return None
+
+
+def example_parsers(role: str, group: Group) -> list[Callable[[str], object]]:
+    """The reports parsers loop applies to `role`'s output in `group`.
+
+    loop._dispatch reads every report with reports.parse; loop._step also
+    checks a red step's report with reports.red, and loop._judge reads the
+    juror's with reports.verdict.
+    """
+    parsers: list[Callable[[str], object]] = [reports.parse]
+    if any(s.role == role and isinstance(s.form, forms.Red) for s in group.steps):
+        parsers.append(reports.red)
+    if role == "juror":
+        parsers.append(reports.verdict)
+    return parsers
+
+
+def check_examples(step: Step, group: Group, cfg: Config) -> list[Finding]:
+    """Check 6: each installed dispatched role's report example parses as loop reads it."""
+
+    def found(problem: str) -> Finding:
+        return Finding(step.id, "examples", problem, "role author")
+
+    lookup = role_lookup(group, cfg)
+    findings = []
+    for role in dispatched_roles(step, group, cfg):
+        file = lookup.find(role)
+        if file is None:
+            continue  # check 5 reports a missing role
+        try:
+            text = file.read()
+        except _UNREADABLE as e:
+            findings.append(found(f"cannot read role file {file.name}: {e}"))
+            continue
+        example = report_example(text)
+        if example is None:
+            findings.append(found(f"role file {file.name} documents no report example"))
+            continue
+        for parser in example_parsers(role, group):
+            try:
+                parser(example)
+            except ConfigError as e:
+                findings.append(
+                    found(
+                        f"role file {file.name}: report example fails"
+                        f" reports.{parser.__name__}: {e}"
+                    )
+                )
+                break
+    return findings
+
+
+CHECKS: tuple[Check, ...] = (
+    check_verbatim,
+    check_scope,
+    check_hooks,
+    check_installed,
+    check_examples,
+)
 
 
 def queued(groups: list[Group], start: str | None) -> Iterator[tuple[Step, Group]]:

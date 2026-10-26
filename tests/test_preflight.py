@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,10 +9,12 @@ from foreman.config import Config, Reviewer
 from foreman.errors import ConfigError
 from foreman.preflight import (
     Finding,
+    check_examples,
     check_installed,
     check_scope,
     check_verbatim,
     dispatched_roles,
+    report_example,
     write_scope,
 )
 from foreman.run import run_ok
@@ -71,10 +74,46 @@ def commit(root: Path) -> None:
     run_ok(["git", "commit", "-q", "-m", "roles"], root)
 
 
+VERDICT = """VERDICT build wrong
+ACTION retry
+STEP 5
+REASON The build skips the second reply.
+EVIDENCE gauntlet/a.py:3 | returns the first reply twice
+END JUDGMENT
+"""
+
+RED = """SHAPE red
+BRIEF Write the red tests.
+VIEWS none
+BEHAVIOR 1 | tests/test_a.py::test_x | docs: design.md 1 | breaks when: x changes
+RUN red | tests/test_a.py::test_x | assertion | "FAILED tests/test_a.py::test_x - AssertionError"
+RUN rerun | tests/test_a.py::test_x | assertion | "FAILED tests/test_a.py::test_x - AssertionError"
+BLOCKED none
+GATE make check | "1 failed" | not mine: none
+CHANGED 4
+STATUS ?? tests/test_a.py
+DIFF none
+COMMANDS Bash make check
+END TESTS
+"""
+
+# The report each role's output is read as; any other role's report is
+# read by reports.parse alone.
+EXAMPLES = {"juror": VERDICT, "test-writer": RED}
+
+
+def documented(example: str | None) -> str:
+    """A role file body whose Report section documents `example`, if given."""
+    report = f"## Report\n\n```text\n{example}```\n" if example is not None else ""
+    return f"---\n---\n\n## Steps\n\n```\nnot the example\n```\n\n{report}"
+
+
 def home_roles(user_agents: dict[str, Path], *names: str) -> None:
-    """Install `names` as claude-local roles in the temporary home folder."""
+    """Install `names` as claude-local roles, each with a report example that parses."""
     for name in names:
-        (user_agents["claude-local"] / f"{name}.md").write_text("---\n---\n")
+        (user_agents["claude-local"] / f"{name}.md").write_text(
+            documented(EXAMPLES.get(name, "DONE\n"))
+        )
 
 
 @pytest.fixture
@@ -339,6 +378,151 @@ def test_user_agents_default_to_each_backends_home_folder(monkeypatch):
 
 def test_installed_is_a_default_check():
     assert check_installed in preflight.CHECKS
+
+
+# check 6: examples
+
+
+def test_example_is_the_first_fence_in_the_report_section():
+    text = (
+        "# Role\n\n```\nbefore\n```\n\n## Report\n\nProse.\n\n"
+        "````text\nA\n```\nB\n````\n\n```\nsecond\n```\n"
+    )
+    assert report_example(text) == "A\n```\nB\n"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "## Steps\n\n```\nnot a report\n```\n",
+        "## Report\n\nProse only.\n\n## Rails\n\n```\nlater section\n```\n",
+        "## Report\n\n```\nnever closed\n",
+    ],
+)
+def test_no_fenced_block_in_a_report_section_is_no_example(text: str):
+    assert report_example(text) is None
+
+
+def test_a_subheading_stays_in_the_report_section():
+    assert report_example("## Report\n\n### Shape\n\n~~~\nX\n~~~\n") == "X\n"
+
+
+def test_examples_that_parse_pass(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    home_roles(user_agents, "test-writer", "juror", "seam-builder")
+    early = red("5", GOOD)
+    late = stub("6", "seam-builder", ["gauntlet/seams/a.py"])
+    assert check_examples(early, group(early, late), cfg) == []
+
+
+def test_a_juror_example_that_is_no_verdict_quotes_the_verdict_error(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    home_roles(user_agents, "seam-builder")
+    (user_agents["claude-local"] / "juror.md").write_text(
+        documented("VERDICT <kind>\nACTION <action>\nEND JUDGMENT\n")
+    )
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    found = check_examples(step, group(step), cfg)
+    assert [(f.step, f.check, f.fixer) for f in found] == [
+        ("4", "examples", "role author")
+    ]
+    assert "juror.md" in found[0].problem
+    assert "reports.verdict" in found[0].problem
+    assert "verdict: invalid kind/action pair '<kind>'/'<action>'" in found[0].problem
+
+
+def test_a_red_producers_example_must_parse_as_red_evidence(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    home_roles(user_agents, "juror")
+    (user_agents["claude-local"] / "test-writer.md").write_text(documented("DONE\n"))
+    step = red("5", GOOD)
+    found = check_examples(step, group(step), cfg)
+    assert len(found) == 1 and "test-writer.md" in found[0].problem
+    assert "reports.red" in found[0].problem
+    assert "red report: requires exactly one SHAPE red .. END TESTS block" in (
+        found[0].problem
+    )
+
+
+def test_red_is_not_required_of_a_role_with_no_red_step(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    home_roles(user_agents, "juror")
+    (user_agents["claude-local"] / "seam-builder.md").write_text(documented("DONE\n"))
+    (user_agents["claude-local"] / "builder.md").write_text(documented("DONE\n"))
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    builder = stub("6", "builder", ["gauntlet/b.py"])
+    assert check_examples(step, group(step, builder), cfg) == []
+
+
+def test_a_role_file_with_no_example_is_one_finding(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    home_roles(user_agents, "juror")
+    (user_agents["claude-local"] / "seam-builder.md").write_text(documented(None))
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    found = check_examples(step, group(step), cfg)
+    assert [(f.check, f.fixer) for f in found] == [("examples", "role author")]
+    assert "seam-builder.md documents no report example" in found[0].problem
+
+
+def test_a_missing_role_is_left_to_the_installed_check(cfg: Config, repo: Path):
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    assert check_examples(step, group(step), cfg) == []
+
+
+def test_examples_are_read_at_head_not_from_the_working_tree(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    home_roles(user_agents, "seam-builder")
+    write(repo, ".claude/agents/juror.md", documented(VERDICT))
+    commit(repo)
+    write(repo, ".claude/agents/juror.md", documented(None))
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    assert check_examples(step, group(step), cfg) == []
+    write(repo, ".claude/agents/juror.md", documented("VERDICT <kind>\n"))
+    commit(repo)
+    found = check_examples(step, group(step), cfg)
+    assert len(found) == 1
+    assert "role file .claude/agents/juror.md at HEAD" in found[0].problem
+
+
+def test_examples_are_read_from_a_kept_worktree(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    home_roles(user_agents, "seam-builder")
+    write(repo, ".claude/agents/juror.md", documented(VERDICT))
+    commit(repo)
+    wt = git.make_worktree(cfg, "g1")
+    write(wt, ".claude/agents/juror.md", documented(None))
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    found = check_examples(step, group(step), cfg)
+    assert len(found) == 1
+    assert f"{wt}/.claude/agents/juror.md documents no" in found[0].problem
+
+
+def test_codex_examples_are_read_from_developer_instructions(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    cfg = replace(cfg, backend="codex-local")
+    home = user_agents["codex-local"]
+    instructions = json.dumps(documented("VERDICT <kind>\n"))
+    (home / "juror.toml").write_text(f"developer_instructions = {instructions}\n")
+    (home / "seam-builder.toml").write_text("developer_instructions = 3\n")
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    found = check_examples(step, group(step), cfg)
+    assert [f.problem.split(": ")[0] for f in found] == [
+        f"cannot read role file {home / 'seam-builder.toml'}",
+        f"role file {home / 'juror.toml'}",
+    ]
+    assert "reports.verdict" in found[1].problem
+
+
+def test_examples_is_a_default_check():
+    assert check_examples in preflight.CHECKS
 
 
 # the command

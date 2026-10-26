@@ -103,6 +103,14 @@ def in_head(repo: Path, rel: str) -> bool:
     return result.code == 0 and result.out.strip() == "blob"
 
 
+def read_head(repo: Path, rel: str) -> str:
+    """File `rel` as committed at HEAD in `repo`; raises ForemanError if it is not."""
+    result = run(["git", "show", f"HEAD:{rel}"], repo)
+    if result.code != 0:
+        raise ForemanError(f"{result.cmd} exited {result.code}: {result.err.strip()}")
+    return result.out
+
+
 def make_worktree(cfg: Config, step_id: str) -> Path:
     """Create a worktree for the step on branch foreman/<step_id> from HEAD."""
     wt = worktree_path(cfg, step_id)
