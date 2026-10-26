@@ -199,7 +199,8 @@ def test_timeout_records_overrun_and_stops_before_checks_or_next_dispatch(
         loop.run_group(green_cfg, g, log, backend)
     wt = git.worktree(green_cfg, "g1")
     assert str(wt) in str(stopped.value)
-    assert str(green_cfg.state_dir / "g1-s1.txt") in str(stopped.value)
+    assert str(green_cfg.state_dir / "g1-s1-attempt-1.txt") in str(stopped.value)
+    assert stopped.value.kind == "timeout"
     assert backend.agents == ["core-builder"]
     assert log.kept("g1-s1") == output.rstrip("\n") + "\n"
     assert log.kept("g1-s1-stderr") == "timeout diagnostic\n"
@@ -300,9 +301,29 @@ def test_red_gate_juror_cap_notifies_owner_and_keeps_worktree(
 
 def test_nothing_changed_is_a_ruling(green_cfg, log, fake_backend) -> None:
     g = make_group(make_step("s1", ["a.py"]))
-    with pytest.raises(RulingNeeded):
+    with pytest.raises(RulingNeeded) as stopped:
         loop.run_group(green_cfg, g, log, fake_backend())
+    assert stopped.value.kind == "no change"
     assert (green_cfg.worktree_root / "g1").exists()
+
+
+def test_rule_carries_its_kind_and_refuses_an_unknown_one(green_cfg, log) -> None:
+    g = make_group(make_step("s1"))
+    error = loop._rule(log, g, green_cfg.target_repo, "k", "why", "overload")
+    assert error.kind == "overload"
+    with pytest.raises(ValueError, match="unknown stop kind"):
+        loop._rule(log, g, green_cfg.target_repo, "k", "why", "bogus")
+
+
+def test_dispatch_keeps_each_attempt(green_cfg, log, fake_backend) -> None:
+    g = make_group(make_step("s1"))
+    backend = fake_backend(outputs=["FINDINGS 0\n", "FINDINGS 0\n"])
+    for _ in range(2):
+        loop._dispatch(
+            g, green_cfg.target_repo, log, backend, "g1-s1", "b", "core-builder"
+        )
+    assert (green_cfg.state_dir / "g1-s1-attempt-1.txt").exists()
+    assert (green_cfg.state_dir / "g1-s1-attempt-2.txt").exists()
 
 
 def _reviewed(cfg: Config) -> Config:

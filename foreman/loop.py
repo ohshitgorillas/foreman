@@ -27,16 +27,25 @@ from foreman.errors import (
     RulingNeeded,
     WrongTest,
 )
-from foreman.events import EventLog
+from foreman.events import STOP_KINDS, EventLog
 from foreman.run import TIMEOUT_CODE, Result
 from foreman.steps import Group, Step, next_ready
 
 
-def _rule(log: EventLog, group: Group, wt: Path, kept: str, why: str) -> RulingNeeded:
-    """Signal Void and return the stop to raise; the text names the kept file and worktree."""
+def _rule(
+    log: EventLog, group: Group, wt: Path, kept: str, why: str, kind: str
+) -> RulingNeeded:
+    """Signal Void and return the stop to raise; the text names the kept file and worktree.
+
+    `kind` is the stop's kind, a member of `events.STOP_KINDS`; the cli records it.
+    """
+    if kind not in STOP_KINDS:
+        raise ValueError(f"unknown stop kind: {kind}")
     text = f"{why}; kept {kept}; worktree {wt}"
     log.notify_dispatcher("ruling_needed", group.id, text)
-    return RulingNeeded(text)
+    error = RulingNeeded(text)
+    error.kind = kind
+    return error
 
 
 def _stdout(result: Result) -> str:
@@ -76,8 +85,8 @@ def _dispatch(
         log.keep(f"{name}-unstarted", str(error))
         raise
     result = backend.wait(job)
-    path = log.keep(name, _stdout(result))
-    log.keep(f"{name}-stderr", result.err)
+    path = log.keep_report(name, _stdout(result))
+    log.keep_report(f"{name}-stderr", result.err)
     report = None if result.code == TIMEOUT_CODE else reports.read(result)
     outcome = (
         "overran" if report is None else "done" if report.kind == "done" else "refused"
@@ -92,7 +101,7 @@ def _dispatch(
         outcome=outcome,
     )
     if report is None:
-        raise _rule(log, group, wt, str(path), f"{role} timed out")
+        raise _rule(log, group, wt, str(path), f"{role} timed out", "timeout")
     return report
 
 
@@ -108,7 +117,12 @@ def _refusal_stops(
     """Keep the old stop for callers whose Mismatches rows land in later steps."""
     if report.kind != "done":
         raise _rule(
-            log, group, wt, str(cfg.state_dir / f"{name}.txt"), f"{role} {report.kind}"
+            log,
+            group,
+            wt,
+            str(cfg.state_dir / f"{name}.txt"),
+            f"{role} {report.kind}",
+            "overload" if report.kind == "overloaded" else "steering",
         )
 
 
@@ -159,7 +173,7 @@ def _answer(
     try:
         before = log.kept(f"{name}-before")
     except ConfigError as error:
-        raise _rule(log, group, wt, kept, str(error)) from error
+        raise _rule(log, group, wt, kept, str(error), "infrastructure") from error
     git.restore(wt, before, step.paths)
     _step(cfg, group, index, wt, log, backend, juror_reasons=juror_reasons)
 
@@ -298,7 +312,7 @@ def _settle(
             unresolved.setdefault(name, reason)
     elif found:
         name, reason = next(iter(found.items()))
-        raise _rule(log, group, wt, f"{name}.txt", reason)
+        raise _rule(log, group, wt, f"{name}.txt", reason, "evidence")
 
 
 def _red_ids(
@@ -338,13 +352,16 @@ def _red_ids(
                 wt,
                 f"{name}.txt",
                 "reference is not an earlier red producer",
+                "steering",
             )
         if selection.files is not None and (
             not selection.files
             or len(set(selection.files)) != len(selection.files)
             or not set(selection.files) <= set(producer.paths)
         ):
-            raise _rule(log, group, wt, f"{name}.txt", "invalid red file filter")
+            raise _rule(
+                log, group, wt, f"{name}.txt", "invalid red file filter", "steering"
+            )
         try:
             evidence = _current_red_evidence(cfg, producer, name, wt, log)
             selected = [
@@ -440,7 +457,14 @@ def _view_paths(
         made = views.make(cfg, group.id, step, wt)
         path = log.keep(f"{name}-views", _text(made.result))
         if not made.green:
-            raise _rule(log, group, wt, str(path), f"step {step.id} views failed")
+            raise _rule(
+                log,
+                group,
+                wt,
+                str(path),
+                f"step {step.id} views failed",
+                "infrastructure",
+            )
     view_paths = {}
     for source in step.views:
         view = views.path(cfg, group.id, source)
@@ -452,6 +476,7 @@ def _view_paths(
                 wt,
                 f"{name}-views.txt",
                 f"step {step.id} generated view missing or not a single line: {value!r}",
+                "infrastructure",
             )
         view_paths[source] = value
     return view_paths
@@ -484,7 +509,7 @@ def _step(
             log.kept(f"{producer}-brief")
         except ConfigError:
             # A producer that never dispatched leaves no report to judge.
-            raise _rule(log, group, wt, f"{producer}.txt", reason) from None
+            raise _rule(log, group, wt, f"{producer}.txt", reason, "evidence") from None
     if unresolved:
         # The Mismatches table's `evidence` row: judge the build before it starts.
         judgment = _judgment(cfg, group, index, wt, log, dispatched=False)
@@ -587,7 +612,9 @@ def _check_step(
     if verdict is not None:
         path = log.keep(f"{group.id}-{step.id}-check", _text(verdict.result))
         if verdict.result.code == TIMEOUT_CODE:
-            raise _rule(log, group, wt, str(path), f"step {step.id} check timed out")
+            raise _rule(
+                log, group, wt, str(path), f"step {step.id} check timed out", "timeout"
+            )
         if not verdict.green:
             judgment = _judgment(cfg, group, index, wt, log, failure=str(path))
             _judge(cfg, group, step.id, judgment, wt, log, backend, completed=completed)
@@ -675,7 +702,9 @@ def _judgment(
     except (ConfigError, RulingNeeded) as error:
         # A step judged before it dispatched has no report; its producer's names it.
         kept = name if dispatched or not unresolved else next(iter(unresolved))
-        raise _rule(log, group, wt, f"{kept}.txt", str(error)) from error
+        raise _rule(
+            log, group, wt, f"{kept}.txt", str(error), "infrastructure"
+        ) from error
     log.keep(f"{name}-judgment", json.dumps(asdict(judgment)))
     return judgment
 
@@ -801,7 +830,7 @@ def _follow_verdict(
     """Follow a decoded verdict; never substitute a local fault decision."""
     problem = _outside_judgment(group, judgment, verdict)
     if problem is not None:
-        raise _rule(log, group, wt, ", ".join(judgment.reports), problem)
+        raise _rule(log, group, wt, ", ".join(judgment.reports), problem, "steering")
     if verdict.action == "owner":
         raise _owner_stop(group, judgment, wt, log, "; ".join(verdict.reasons))
     target = _target(group, judgment, verdict)
@@ -822,7 +851,12 @@ def _follow_verdict(
                 snapshots.append(log.kept(f"{group.id}-{group.steps[index].id}-before"))
         except ConfigError as error:
             raise _rule(
-                log, group, wt, ", ".join(judgment.reports), str(error)
+                log,
+                group,
+                wt,
+                ", ".join(judgment.reports),
+                str(error),
+                "infrastructure",
             ) from error
         for index in replay:
             if isinstance(group.steps[index].form, forms.Red):
@@ -867,6 +901,7 @@ def _follow_verdict(
         wt,
         ", ".join(judgment.reports),
         "tests-wrong transitions await step 19a",
+        "steering",
     )
 
 
@@ -908,11 +943,13 @@ def _redo_red(
     name = f"{group.id}-{producer.id}"
     kept = ", ".join(judgment.reports)
     if producer.role != "test-writer" or not isinstance(producer.form, forms.Red):
-        raise _rule(log, group, wt, kept, "redo red target is not a red producer")
+        raise _rule(
+            log, group, wt, kept, "redo red target is not a red producer", "steering"
+        )
     try:
         before = log.kept(f"{name}-before")
     except ConfigError as error:
-        raise _rule(log, group, wt, kept, str(error)) from error
+        raise _rule(log, group, wt, kept, str(error), "infrastructure") from error
     dependents = []
     affected = set(_dependent_steps(group, target)) if completed else set()
     for index in range(target + 1, len(group.steps)):
@@ -964,7 +1001,9 @@ def _repair(
     name = f"{group.id}-{producer.id}"
     kept = ", ".join(judgment.reports)
     if producer.role != "test-writer" or not isinstance(producer.form, forms.Red):
-        raise _rule(log, group, wt, kept, "repair target is not a red producer")
+        raise _rule(
+            log, group, wt, kept, "repair target is not a red producer", "steering"
+        )
     stopped = next(
         (
             i
@@ -975,7 +1014,7 @@ def _repair(
         None,
     )
     if stopped is None and not completed:
-        raise _rule(log, group, wt, kept, "repair has no stopped build")
+        raise _rule(log, group, wt, kept, "repair has no stopped build", "steering")
     try:
         if log.kept(f"{name}-evidence") != _producer_identity(producer):
             raise ConfigError("repair producer has no current successful evidence")
@@ -995,7 +1034,7 @@ def _repair(
         elif preserved != fingerprint:
             raise RulingNeeded("repair differs from preserved producer evidence")
     except (ConfigError, RulingNeeded) as error:
-        raise _rule(log, group, wt, kept, str(error)) from error
+        raise _rule(log, group, wt, kept, str(error), "infrastructure") from error
     repair_name = f"{name}-repair"
     view_paths = _view_paths(cfg, group, producer, wt, log, repair_name)
     form = forms.parse(
@@ -1110,7 +1149,9 @@ def _next_judgment(
         if not isinstance(context, str):
             raise TypeError("pending judgment has no context")
     except (ConfigError, KeyError, TypeError, ValueError) as error:
-        raise _rule(log, group, wt, ", ".join(judgment.reports), str(error)) from error
+        raise _rule(
+            log, group, wt, ", ".join(judgment.reports), str(error), "infrastructure"
+        ) from error
     _judge(cfg, group, context, judgment, wt, log, backend, completed=completed)
 
 
@@ -1119,7 +1160,9 @@ def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) 
         verdict = verify.verify(cfg, wt)
         path = log.keep(f"{group.id}-check", _text(verdict.result))
         if verdict.result.code == TIMEOUT_CODE:
-            raise _rule(log, group, wt, str(path), "combined-tree check timed out")
+            raise _rule(
+                log, group, wt, str(path), "combined-tree check timed out", "timeout"
+            )
         if verdict.green:
             return
         judgment = _judgment(cfg, group, None, wt, log, failure=str(path))
@@ -1159,7 +1202,7 @@ def _review(
             why = f"{reviewer.role} {report.kind}"
             log.mismatched(group.id, name, "refused", f"{why}; kept {kept_report}")
             if _round(cfg, log, name) is None:
-                raise _rule(log, group, wt, kept_report, why)
+                raise _rule(log, group, wt, kept_report, why, "reviewer refused")
             report = _dispatch(group, wt, log, backend, name, text, reviewer.role)
         if report.findings:
             kept.append(name)
@@ -1173,7 +1216,14 @@ def _land(cfg: Config, group: Group, wt: Path, log: EventLog) -> str:
     roots = [p for s in group.steps for p in s.paths]
     paths = [c for c in git.changed_paths(wt) if steps.holds(roots, c)]
     if not paths:
-        raise _rule(log, group, wt, "none", "nothing changed under the group's paths")
+        raise _rule(
+            log,
+            group,
+            wt,
+            "none",
+            "nothing changed under the group's paths",
+            "no change",
+        )
     ids = ", ".join(s.id for s in group.steps)
     commit = git.commit_paths(wt, paths, f"Group {group.id}: steps {ids}")
     git.push(wt)
@@ -1239,7 +1289,7 @@ def run_upheld(
             raise ConfigError("review queue changed; rerun producer evidence")
     except ConfigError as error:
         raise _rule(
-            log, group, wt, f"{group.id}-review-queue.txt", str(error)
+            log, group, wt, f"{group.id}-review-queue.txt", str(error), "infrastructure"
         ) from error
     _group_red_ids(cfg, group, wt, log)
     kept: dict[str, reports.Report] = {}
@@ -1272,6 +1322,7 @@ def run_upheld(
                 wt,
                 name,
                 f"{len(unowned)} upheld lines name no group path",
+                "steering",
             )
         prepared = []
         for number, batch in enumerate(cut, 1):
@@ -1280,7 +1331,14 @@ def run_upheld(
                 line not in kept[role].findings or line not in lines
                 for line in batch.lines
             ):
-                raise _rule(log, group, wt, name, "batch is outside its upheld source")
+                raise _rule(
+                    log,
+                    group,
+                    wt,
+                    name,
+                    "batch is outside its upheld source",
+                    "steering",
+                )
             try:
                 form = forms.parse(
                     batch.role,
@@ -1294,7 +1352,9 @@ def run_upheld(
                     spec_dir=cfg.spec_dir,
                 )
             except ConfigError as error:
-                raise _rule(log, group, wt, name, str(error)) from error
+                raise _rule(
+                    log, group, wt, name, str(error), "infrastructure"
+                ) from error
             text = brief.render(form, paths=[], view_paths={}, red_ids=[])
             prepared.append((key, batch, text))
         pending.append((name, raw, prepared))
@@ -1358,7 +1418,9 @@ def run_retest(
         if tuple(current_ids) != judgment.red_ids:
             raise ConfigError("owner judgment red selectors changed; refresh judgment")
     except (ConfigError, RulingNeeded) as error:
-        raise _rule(log, group, wt, ", ".join(judgment.reports), str(error)) from error
+        raise _rule(
+            log, group, wt, ", ".join(judgment.reports), str(error), "infrastructure"
+        ) from error
     log.keep(f"{group.id}-retest-verdict", text)
     backend = backend or backends.get(cfg)
     _follow_verdict(

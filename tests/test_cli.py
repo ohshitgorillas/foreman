@@ -780,7 +780,7 @@ def test_stop_writes_one_stop_event_with_its_kind(
     )
     assert main(["--config", str(conf_file), "run", str(steps_file)]) == 6
     [stop] = _stops(green_cfg)
-    assert stop["stop_kind"] == errors.RulingNeeded.kind
+    assert stop["stop_kind"] == "no change"
     assert stop["exit_code"] == 6
 
 
