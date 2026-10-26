@@ -3,15 +3,18 @@ from pathlib import Path
 
 import pytest
 
-from foreman import forms, preflight
+from foreman import backends, forms, git, preflight
 from foreman.config import Config, Reviewer
+from foreman.errors import ConfigError
 from foreman.preflight import (
     Finding,
+    check_installed,
     check_scope,
     check_verbatim,
     dispatched_roles,
     write_scope,
 )
+from foreman.run import run_ok
 from foreman.steps import Group, Step
 
 DESIGN = "docs/superpowers/specs/design.md"
@@ -21,6 +24,19 @@ DESIGN = "docs/superpowers/specs/design.md"
 def no_host_settings(monkeypatch):
     """Keep the hooks check off this host's real ~/.claude settings."""
     monkeypatch.setattr(preflight, "USER_SETTINGS", ())
+
+
+@pytest.fixture(autouse=True)
+def user_agents(monkeypatch, tmp_path: Path) -> dict[str, Path]:
+    """Point each backend's home agents folder at an empty temporary one."""
+    homes = {
+        "claude-local": tmp_path / "home" / ".claude" / "agents",
+        "codex-local": tmp_path / "home" / ".codex" / "agents",
+    }
+    for home in homes.values():
+        home.mkdir(parents=True)
+    monkeypatch.setattr(preflight, "USER_AGENTS", homes)
+    return homes
 
 
 def red(id: str, *texts: str, paths: list[str] | None = None) -> Step:
@@ -48,6 +64,17 @@ def role(root: Path, name: str, description: str) -> None:
         f".claude/agents/{name}.md",
         f"---\nname: {name}\ndescription: {description}\n---\n\nBody.\n",
     )
+
+
+def commit(root: Path) -> None:
+    run_ok(["git", "add", "--all"], root)
+    run_ok(["git", "commit", "-q", "-m", "roles"], root)
+
+
+def home_roles(user_agents: dict[str, Path], *names: str) -> None:
+    """Install `names` as claude-local roles in the temporary home folder."""
+    for name in names:
+        (user_agents["claude-local"] / f"{name}.md").write_text("---\n---\n")
 
 
 @pytest.fixture
@@ -226,6 +253,94 @@ def test_step_keeping_one_unheld_path_gets_fixes(cfg: Config):
     ]
 
 
+# check 5: installed
+
+
+def test_roles_committed_at_head_are_installed(cfg: Config, repo: Path):
+    role(repo, "juror", "Judges. Writes nothing.")
+    commit(repo)
+    step = red("5", GOOD)
+    assert check_installed(step, group(step), cfg) == []
+
+
+def test_role_on_disk_but_not_committed_is_missing(cfg: Config, repo: Path):
+    role(repo, "juror", "Judges. Writes nothing.")
+    commit(repo)
+    role(repo, "seam-builder", "Builds, writing only under `gauntlet/seams/`.")
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    found = check_installed(step, group(step), cfg)
+    assert [(f.step, f.check, f.fixer) for f in found] == [
+        ("4", "installed", "role author")
+    ]
+    assert "seam-builder" in found[0].problem
+
+
+def test_role_in_the_user_agents_folder_is_installed(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    home_roles(user_agents, "seam-builder", "juror")
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    assert check_installed(step, group(step), cfg) == []
+
+
+def test_each_missing_dispatched_role_is_one_finding_in_dispatch_order(
+    cfg: Config, repo: Path
+):
+    cfg = replace(cfg, reviewers=[Reviewer("diff-reviewer", ["gauntlet/"])])
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    found = check_installed(step, group(step), cfg)
+    assert [f.problem.split()[1] for f in found] == [
+        "seam-builder",
+        "diff-reviewer",
+        "juror",
+    ]
+
+
+def test_a_kept_worktree_is_checked_instead_of_head(cfg: Config, repo: Path):
+    role(repo, "juror", "Judges. Writes nothing.")
+    commit(repo)
+    wt = git.make_worktree(cfg, "g1")
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    assert len(check_installed(step, group(step), cfg)) == 1
+    role(wt, "seam-builder", "Builds, writing only under `gauntlet/seams/`.")
+    (wt / ".claude/agents/juror.md").unlink()
+    found = check_installed(step, group(step), cfg)
+    assert len(found) == 1 and "juror" in found[0].problem
+
+
+def test_codex_reads_only_its_agents_folder(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    cfg = replace(cfg, backend="codex-local")
+    role(repo, "juror", "Judges. Writes nothing.")
+    commit(repo)
+    home_roles(user_agents, "seam-builder", "juror")
+    (user_agents["codex-local"] / "seam-builder.toml").write_text("")
+    step = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    found = check_installed(step, group(step), cfg)
+    assert [(f.check, f.fixer) for f in found] == [("installed", "role author")]
+    assert "juror" in found[0].problem
+
+
+def test_unknown_backend_is_a_config_error(cfg: Config, repo: Path):
+    step = red("5", GOOD)
+    with pytest.raises(ConfigError, match="unknown backend 'other'"):
+        check_installed(step, group(step), replace(cfg, backend="other"))
+
+
+def test_user_agents_default_to_each_backends_home_folder(monkeypatch):
+    monkeypatch.undo()
+    assert preflight.USER_AGENTS == {
+        "claude-local": Path.home() / ".claude" / "agents",
+        "codex-local": backends.CODEX_AGENTS,
+    }
+    assert backends.CODEX_AGENTS == Path.home() / ".codex" / "agents"
+
+
+def test_installed_is_a_default_check():
+    assert check_installed in preflight.CHECKS
+
+
 # the command
 
 
@@ -273,8 +388,14 @@ def queue(tmp_path: Path, five: str, eight: str) -> Path:
 GOOD = "A runner returns its seeded replies in order."
 
 
+@pytest.fixture
+def installed(user_agents: dict[str, Path]) -> None:
+    """Every role the QUEUE dispatches installed in the temporary home folder."""
+    home_roles(user_agents, "seam-builder", "test-writer", "juror")
+
+
 def test_clean_queue_prints_nothing_and_exits_0(
-    repo: Path, conf_file: Path, tmp_path: Path, capsys
+    repo: Path, conf_file: Path, tmp_path: Path, capsys, installed
 ):
     role(repo, "seam-builder", "Builds, writing only under `gauntlet/seams/`.")
     q = queue(tmp_path, GOOD, GOOD)
@@ -283,7 +404,7 @@ def test_clean_queue_prints_nothing_and_exits_0(
 
 
 def test_findings_print_one_per_line_in_queue_order_and_exit_1(
-    repo: Path, conf_file: Path, tmp_path: Path, capsys
+    repo: Path, conf_file: Path, tmp_path: Path, capsys, installed
 ):
     q = queue(tmp_path, "Five is gone.", "Eight is gone.")
     assert preflight.main([str(q), "--config", str(conf_file)]) == 1
@@ -300,7 +421,9 @@ def test_findings_print_one_per_line_in_queue_order_and_exit_1(
     )
 
 
-def test_from_skips_earlier_steps(repo: Path, conf_file: Path, tmp_path: Path, capsys):
+def test_from_skips_earlier_steps(
+    repo: Path, conf_file: Path, tmp_path: Path, capsys, installed
+):
     q = queue(tmp_path, "Five is gone.", "Eight is gone.")
     assert preflight.main([str(q), "--config", str(conf_file), "--from", "5"]) == 1
     steps = [line.split(" | ")[0] for line in capsys.readouterr().out.splitlines()]
@@ -335,7 +458,7 @@ def test_design_resolves_under_target_repo(
 
 
 def test_judge_flag_adds_the_agent_checks(
-    repo: Path, conf_file: Path, tmp_path: Path, capsys, monkeypatch
+    repo: Path, conf_file: Path, tmp_path: Path, capsys, monkeypatch, installed
 ):
     from foreman import judge
 

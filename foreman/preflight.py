@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from foreman import config, forms, steps
+from foreman import backends, config, forms, git, steps
 from foreman.config import Config
 from foreman.errors import ConfigError
 from foreman.steps import Group, Step
@@ -330,7 +330,59 @@ def dispatched_roles(step: Step, group: Group, cfg: Config) -> list[str]:
     return list(dict.fromkeys(roles))
 
 
-CHECKS: tuple[Check, ...] = (check_verbatim, check_scope, check_hooks)
+# Check 5: installed. Each backend's home-directory agent folder; tests point
+# this elsewhere so the real ~/.claude and ~/.codex are never read.
+USER_AGENTS: dict[str, Path] = {
+    backends.ClaudeLocal.name: Path("~/.claude/agents").expanduser(),
+    backends.CodexLocal.name: backends.CODEX_AGENTS,
+}
+
+
+def check_installed(step: Step, group: Group, cfg: Config) -> list[Finding]:
+    """Check 5: each dispatched role is where cfg.backend finds it in the group's worktree.
+
+    claude-local runs `claude --agent <role>` in the worktree, which finds
+    <worktree>/.claude/agents/<role>.md or <role>.md in the user agents
+    folder. The worktree is the kept one if it exists, else the one
+    git.make_worktree will add from HEAD, so a role file not committed at
+    HEAD is missing. codex-local reads <role>.toml from its agents folder
+    wherever it runs.
+    """
+    if cfg.backend not in USER_AGENTS:
+        raise ConfigError(f"unknown backend {cfg.backend!r}")
+    home = USER_AGENTS[cfg.backend]
+    if cfg.backend == backends.CodexLocal.name:
+
+        def installed(role: str) -> bool:
+            return (home / f"{role}.toml").is_file()
+
+        where = str(home)
+    else:
+        wt = git.worktree_path(cfg, group.id)
+
+        def installed(role: str) -> bool:
+            rel = f".claude/agents/{role}.md"
+            if (home / f"{role}.md").is_file():
+                return True
+            if wt.is_dir():
+                return (wt / rel).is_file()
+            return git.in_head(cfg.target_repo, rel)
+
+        tree = f"worktree {wt}" if wt.is_dir() else "HEAD of the target repo"
+        where = f"{home} or .claude/agents/ in {tree}"
+    return [
+        Finding(
+            step.id,
+            "installed",
+            f"role {role} not installed for {cfg.backend}: not in {where}",
+            "role author",
+        )
+        for role in dispatched_roles(step, group, cfg)
+        if not installed(role)
+    ]
+
+
+CHECKS: tuple[Check, ...] = (check_verbatim, check_scope, check_hooks, check_installed)
 
 
 def queued(groups: list[Group], start: str | None) -> Iterator[tuple[Step, Group]]:

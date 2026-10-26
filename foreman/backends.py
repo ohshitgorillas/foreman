@@ -13,6 +13,9 @@ from foreman.config import Config
 from foreman.errors import BackendError, ConfigError
 from foreman.run import Result
 
+# Where CodexLocal reads <role>.toml unless given another agents_dir.
+CODEX_AGENTS = Path.home() / ".codex" / "agents"
+
 
 @dataclass
 class Job:
@@ -188,9 +191,7 @@ class CodexLocal:
         dispatch_seconds: int,
     ) -> None:
         self.command = command if command is not None else ["codex"]
-        self.agents_dir = (
-            agents_dir if agents_dir is not None else Path.home() / ".codex" / "agents"
-        )
+        self.agents_dir = agents_dir if agents_dir is not None else CODEX_AGENTS
         self.dispatch_seconds = dispatch_seconds
         self._results: dict[str, Result] = {}
         self._tokens: dict[str, int | None] = {}

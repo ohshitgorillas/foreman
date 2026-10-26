@@ -21,6 +21,7 @@ GROUP_FILE = (
 
 
 ROLE = ".claude/agents/core-builder.md"
+JUROR = ".claude/agents/juror.md"
 
 
 def role_file(cfg: Config, scope: str) -> None:
@@ -37,11 +38,23 @@ def no_host_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(preflight, "USER_SETTINGS", ())
 
 
+@pytest.fixture(autouse=True)
+def no_host_agents(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep pre-flight's installed check off this host's real agent folders."""
+    home = tmp_path / "agents-home"
+    monkeypatch.setattr(
+        preflight,
+        "USER_AGENTS",
+        {"claude-local": home / "claude", "codex-local": home / "codex"},
+    )
+
+
 @pytest.fixture
 def conf_file(conf_file: Path, green_cfg: Config) -> Path:
-    """The shared conf_file, its target repo carrying a role file pre-flight passes."""
+    """The shared conf_file, its target repo carrying role files pre-flight passes."""
     role_file(green_cfg, "gauntlet/")
-    run_ok(["git", "add", ROLE], green_cfg.target_repo)
+    (green_cfg.target_repo / JUROR).write_text("---\nname: juror\n---\n")
+    run_ok(["git", "add", ROLE, JUROR], green_cfg.target_repo)
     run_ok(["git", "commit", "-q", "-m", "role"], green_cfg.target_repo)
     return conf_file
 
