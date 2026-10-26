@@ -11,12 +11,6 @@ class ConfigError(ForemanError):
     exit_code = 2
 
 
-class OverloadedStep(ForemanError):
-    """Step file fails the lint."""
-
-    exit_code = 3
-
-
 class BackendError(ForemanError):
     """Agent could not start or vanished."""
 
