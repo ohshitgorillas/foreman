@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import make_group, make_red, make_step
 
 from foreman import forms, judge, preflight
 from foreman.config import Config
@@ -17,23 +18,24 @@ ROLE_TEXT = "---\nname: test-writer\n---\n\nA moved step edits tests only.\n"
 
 
 def red(id: str, *texts: str) -> Step:
-    form = forms.Red(tuple(forms.Behavior(t, "gauntlet/a.py") for t in texts))
-    return Step(id, "test-writer", form, ["tests/test_a.py"], [])
+    return make_red(id, texts, source="gauntlet/a.py", views=[])
 
 
 def moved(id: str) -> Step:
     change = forms.DocumentChange("a.py:1", "old comment", "new comment")
     form = forms.Moved((change,), ("gauntlet/a.py",))
-    return Step(id, "test-writer", form, ["tests/test_a.py", "gauntlet/a.py"], [])
+    return make_step(
+        id, ["tests/test_a.py", "gauntlet/a.py"], role="test-writer", form=form
+    )
 
 
 def build(id: str, text: str) -> Step:
     form = forms.Build("builder", text, (forms.RedSelection("5"),))
-    return Step(id, "builder", form, ["gauntlet/a.py"], [])
+    return make_step(id, ["gauntlet/a.py"], role="builder", form=form)
 
 
 def group(*members: Step, design: str = DESIGN) -> Group:
-    return Group("g1", list(members), design, [])
+    return make_group(*members, design=design)
 
 
 def write(root: Path, rel: str, text: str) -> None:
@@ -272,7 +274,9 @@ def test_rules_read_a_codex_roles_developer_instructions(
 
 def test_missing_role_is_no_finding_and_no_ask(cfg: Config, repo: Path, fake):
     ask = fake("NONE")
-    step = Step("9", "ghost", forms.Stub("ghost", "Stub it"), ["gauntlet/a.py"], [])
+    step = make_step(
+        "9", ["gauntlet/a.py"], role="ghost", form=forms.Stub("ghost", "Stub it")
+    )
     assert check_rules(step, group(step), cfg) == []
     assert ask.prompts == []
 

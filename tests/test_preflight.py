@@ -3,6 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import make_group, make_red, make_step
 
 from foreman import backends, forms, git, preflight
 from foreman.config import Config, Reviewer
@@ -43,16 +44,15 @@ def user_agents(monkeypatch, tmp_path: Path) -> dict[str, Path]:
 
 
 def red(id: str, *texts: str, paths: list[str] | None = None) -> Step:
-    form = forms.Red(tuple(forms.Behavior(t, "gauntlet/a.py") for t in texts))
-    return Step(id, "test-writer", form, paths or ["tests/test_a.py"], [])
+    return make_red(id, texts, paths, source="gauntlet/a.py", views=[])
 
 
 def stub(id: str, role: str, paths: list[str]) -> Step:
-    return Step(id, role, forms.Stub(role, "Approved stub"), paths, [])
+    return make_step(id, paths, role=role, form=forms.Stub(role, "Approved stub"))
 
 
 def group(*members: Step, design: str = DESIGN) -> Group:
-    return Group("g1", list(members), design, [])
+    return make_group(*members, design=design)
 
 
 def write(root: Path, rel: str, text: str) -> None:
