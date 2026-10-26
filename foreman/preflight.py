@@ -150,17 +150,32 @@ def check_scope(step: Step, group: Group, cfg: Config) -> list[Finding]:
     def found(problem: str, fixer: str) -> Finding:
         return Finding(step.id, "scope", problem, fixer)
 
-    rel = f".claude/agents/{step.role}.md"
+    # codex-local sends only developer_instructions, which carry no
+    # frontmatter description to read a write scope from, so the scope of a
+    # codex role is not checked.
+    if cfg.backend == backends.CodexLocal.name:
+        return []
+    # The role's text where cfg.backend finds it; checks 5 and 6 report a
+    # missing or unreadable role file.
+    role = role_lookup(group, cfg).find(step.role)
+    if role is None:
+        return []
     try:
-        text = (cfg.target_repo / rel).read_text()
-    except OSError as e:
-        return [found(f"cannot read role file {rel}: {e.strerror}", "role author")]
+        text = role.read()
+    except _UNREADABLE:
+        return []
     description = _description(text)
     if description is None:
-        return [found(f"role file {rel} has no frontmatter description", "role author")]
+        return [
+            found(
+                f"role file {role.name} has no frontmatter description", "role author"
+            )
+        ]
     scope = write_scope(description)
     if scope is None:
-        return [found(f"role file {rel}: write scope cannot be parsed", "role author")]
+        return [
+            found(f"role file {role.name}: write scope cannot be parsed", "role author")
+        ]
     shown = ", ".join(scope) or "nothing"
     return [
         found(f"{p} outside {step.role}'s write scope ({shown})", "Foreman")
