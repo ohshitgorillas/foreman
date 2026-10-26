@@ -260,3 +260,39 @@ def test_builders_alone_loads(tmp_path: Path) -> None:
     text = GOOD + '[builders]\nbackend = ["hqptuner/backend/"]\n'
     c = load(_write(tmp_path, text))
     assert c.backend == "claude-local"
+
+
+def test_answer_rounds_defaults_to_2(tmp_path: Path) -> None:
+    c = load(_write(tmp_path, GOOD))
+    assert c.answer_rounds == 2
+    assert type(c.answer_rounds) is int
+
+
+@pytest.mark.parametrize(
+    "value", ["true", "false", "1.0", "2.5", '"2"', "[]", "{}", "0", "-1"]
+)
+def test_answer_rounds_rejects_non_positive_integers(
+    tmp_path: Path, value: str
+) -> None:
+    path = _write(tmp_path, GOOD + f"answer_rounds = {value}\n")
+    with pytest.raises(ConfigError) as exc:
+        load(path)
+    assert str(exc.value) == f"{path}: answer_rounds must be an integer >= 1"
+
+
+@pytest.mark.parametrize("value", [1, 2, 5])
+def test_answer_rounds_accepts_positive_integers(tmp_path: Path, value: int) -> None:
+    c = load(_write(tmp_path, GOOD + f"answer_rounds = {value}\n"))
+    assert c.answer_rounds == value
+    assert type(c.answer_rounds) is int
+
+
+def test_shared_cfg_carries_answer_rounds(cfg: Config) -> None:
+    assert cfg.answer_rounds == 2
+
+
+def test_conf_file_serializes_answer_rounds(conf_file: Path, green_cfg: Config) -> None:
+    assert "answer_rounds = 2\n" in conf_file.read_text()
+    c = load(conf_file)
+    assert c.answer_rounds == green_cfg.answer_rounds == 2
+    assert type(c.answer_rounds) is int

@@ -28,6 +28,9 @@ class Config:
     batch_budget: int  # enclosing-unit lines per finding batch
     dispatch_seconds: int  # backend run timeout
     juror_rounds: int = 2  # attempts per failing step or group-check context
+    answer_rounds: int = (
+        2  # reruns per step or reviewer for a refused report or rejected red evidence
+    )
     page_chars: int = 3000  # 7.1f "about a page": characters of a rendered brief
     red_behaviors: int = 6  # 7.1f dispatch cap: behaviors per red brief
     # builder role -> folders (ending "/") and single files it may write
@@ -40,7 +43,7 @@ class Config:
 _PATHS = ("target_repo", "worktree_root", "state_dir", "view_root")
 _LISTS = ("check_cmd", "format_cmd", "view_cmd")
 _REQUIRED_INTS = ("batch_budget", "dispatch_seconds")
-_OPTIONAL_INTS = ("juror_rounds", "page_chars", "red_behaviors")
+_OPTIONAL_INTS = ("juror_rounds", "answer_rounds", "page_chars", "red_behaviors")
 _DEFAULTS = {f.name: f.default for f in fields(Config) if f.name in _OPTIONAL_INTS}
 _REVIEWER_ROLES = ("diff-reviewer", "test-reviewer")
 
