@@ -1,0 +1,36 @@
+# Gauntlet M2 parked follow-up: proxy query values, design steps 24b/24c.
+
+[groups.proxy-escapes]
+steps = ["p1", "p2"]
+design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md"
+after = []
+
+[steps.p1]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_core_proxy.py"]
+views = ["gauntlet/core/proxy.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_core_proxy.py"]
+expect_code = 1
+
+[steps.p1.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["24b"] }
+
+[[steps.p1.form.behaviors]]
+text = "upstream_target rejects with LaunchError a target whose permitted route's query value holds a malformed percent escape: a % not followed by two hex digits."
+source = "gauntlet/core/proxy.py"
+
+[[steps.p1.form.behaviors]]
+text = "upstream_target rejects with LaunchError a target whose permitted route's query name or value holds a raw CR or LF."
+source = "gauntlet/core/proxy.py"
+
+[steps.p2]
+role = "core-builder"
+shape = "build"
+paths = ["gauntlet/core/proxy.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_core_proxy.py"]
+
+[steps.p2.form]
+step = """docs/superpowers/specs/m2-launcher-kinds-order-design.md, Order step 24c
+24c build | core-builder | gauntlet/core/proxy.py | Ambiguous-encoding rejection for query values; proxy policy tests must pass."""
+red = [{ step = "p1" }]

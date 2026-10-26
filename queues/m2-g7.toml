@@ -1,0 +1,133 @@
+# Gauntlet M2, Order steps 4-9: the product process seam and its test helpers.
+# Steps 1-3g are on main; cloud/m2-g4's steps 4-8 never landed, so step 4 is here.
+# Steps 10-12 (gauntlet/core/launch.py) are the next group.
+
+[groups.g7]
+steps = ["4", "5", "7", "8", "9"]
+design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md"
+after = []
+
+[steps.4]
+role = "seam-builder"
+shape = "stub"
+paths = ["gauntlet/seams/process.py"]
+
+[steps.4.form]
+step = """4 stub | seam-builder | gauntlet/seams/process.py | Complete process interfaces with readiness.Clock injection.
+@dataclass(frozen=True)
+class Command:
+    argv: tuple[str, ...]
+    cwd: Path
+    env: Mapping[str, str] | None = None
+    timeout: float | None = None
+    throttled: bool = False
+    outputs: Mapping[str, Path] = field(default_factory=dict)
+    capture: bool = True
+    pass_fds: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class Completed:
+    status: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+    outputs: Mapping[str, str | None]
+
+    def output(self) -> str: ...
+
+
+type Runner = Callable[[Command], Completed]
+
+
+class Child(Protocol):
+    def wait(self) -> Completed: ...
+    def close(self) -> None: ...
+
+
+type Starter = Callable[[Command], Child]
+
+
+def run(command: Command, *, clock: Clock = SYSTEM) -> Completed: ...
+def start(command: Command, *, clock: Clock = SYSTEM) -> Child: ...
+def exec_command(argv: tuple[str, ...], env: Mapping[str, str]) -> NoReturn: ..."""
+
+[steps.5]
+role = "test-writer"
+shape = "red"
+paths = ["tests/support/process.py", "tests/test_support_process.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_support_process.py"]
+expect_code = 1
+
+[steps.5.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["5"] }
+
+[[steps.5.form.behaviors]]
+text = "FakeRunner returns its seeded Completed replies unchanged in call order, raises a seeded ProcessError in its turn, and records every Command it receives in commands."
+source = "gauntlet/seams/process.py"
+
+[[steps.5.form.behaviors]]
+text = "A FakeRunner called after its replies run out raises RepliesExhaustedError carrying back, verbatim, the collaborator identity the test handed it, and the attempted-call count."
+source = "gauntlet/seams/process.py"
+
+[[steps.5.form.behaviors]]
+text = "completed builds a Completed from literal status, stdout, stderr, timed_out and outputs, defaulting to status 0, empty streams, not timed out and no outputs."
+source = "gauntlet/seams/process.py"
+
+[steps.7]
+role = "test-writer"
+shape = "port"
+paths = ["tests/support/process.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_support_process.py"]
+
+[steps.7.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["7"] }
+sources = ["gauntlet/seams/process.py"]
+
+[steps.8]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_seams_process.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_process.py"]
+expect_code = 1
+
+[steps.8.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8"] }
+
+[[steps.8.form.behaviors]]
+text = "Commands carry argv as separate values."
+source = "gauntlet/seams/process.py"
+
+[[steps.8.form.behaviors]]
+text = "Nothing splits or interprets shell text."
+source = "gauntlet/seams/process.py"
+
+[[steps.8.form.behaviors]]
+text = "run/start own child sessions, termination and reaping on exceptions and interrupts; close is idempotent."
+source = "gauntlet/seams/process.py"
+
+[[steps.8.form.behaviors]]
+text = "Pass-through mode preserves stdio for SDK transport."
+source = "gauntlet/seams/process.py"
+
+[[steps.8.form.behaviors]]
+text = "Failed starts and failed cleanup raise ProcessError."
+source = "gauntlet/seams/process.py"
+
+[[steps.8.form.behaviors]]
+text = "A child ended by a signal reports status 128 plus the signal number, as a shell does."
+source = "gauntlet/seams/process.py"
+
+[steps.9]
+role = "seam-builder"
+shape = "build"
+paths = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_process.py"]
+
+[steps.9.form]
+step = """docs/superpowers/specs/m2-launcher-kinds-order-design.md, Order step 9
+9 build | seam-builder | gauntlet/seams/process.py | Process execution and cleanup tests must pass using harmless children."""
+red = [{ step = "8" }]
