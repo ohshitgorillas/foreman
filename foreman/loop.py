@@ -61,10 +61,12 @@ def _dispatch(
     *,
     load: int | None = None,
 ) -> reports.Report:
-    """Keep and record every returned dispatch; overruns and refusals stop the run.
+    """Keep and record every returned dispatch; an overrun stops the run.
 
-    A start that fails is marked `<name>-unstarted` so a reserved round that never
-    reached an agent is told apart from one that returned.
+    A refused report is recorded as refused and returned for the caller to handle
+    as the Mismatches table says. A start that fails is marked `<name>-unstarted`
+    so a reserved round that never reached an agent is told apart from one that
+    returned.
     """
     log.keep(f"{name}-brief", brief_text)
     try:
@@ -90,9 +92,75 @@ def _dispatch(
     )
     if report is None:
         raise _rule(log, group, wt, str(path), f"{role} timed out")
-    if report.kind != "done":
-        raise _rule(log, group, wt, str(path), f"{role} {report.kind}")
     return report
+
+
+def _refusal_stops(
+    cfg: Config,
+    group: Group,
+    wt: Path,
+    log: EventLog,
+    name: str,
+    role: str,
+    report: reports.Report,
+) -> None:
+    """Keep the old stop for callers whose Mismatches rows land in later steps."""
+    if report.kind != "done":
+        raise _rule(
+            log, group, wt, str(cfg.state_dir / f"{name}.txt"), f"{role} {report.kind}"
+        )
+
+
+def _round(cfg: Config, log: EventLog, name: str) -> str | None:
+    """The one rerun counter: reserve `<name>-answer-<n>`, counted from kept keys.
+
+    Returns the reserved key, or None once `cfg.answer_rounds` are used.
+    """
+    number = 1
+    while True:
+        key = f"{name}-answer-{number}"
+        try:
+            log.kept(key)
+        except ConfigError:
+            break
+        number += 1
+    if number > cfg.answer_rounds:
+        return None
+    log.keep(key, "")
+    return key
+
+
+def _answer(
+    cfg: Config,
+    group: Group,
+    index: int,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+    kind: str,
+    kept: str,
+    *,
+    juror_reasons: tuple[str, ...] = (),
+) -> None:
+    """Rerun a step as a fresh agent from its before-snapshot, or judge past the cap.
+
+    `kept` is the kept report the mismatch was read from; past `answer_rounds` it is
+    the judgment's failure report. `juror_reasons` keeps a retried build's rerun
+    brief identical to the brief it answers.
+    """
+    step = group.steps[index]
+    name = f"{group.id}-{step.id}"
+    log.mismatched(group.id, name, kind, f"step {step.id} {kind}; kept {kept}")
+    if _round(cfg, log, name) is None:
+        judgment = _judgment(group, index, wt, log, failure=kept, spec_dir=cfg.spec_dir)
+        _judge(cfg, group, step.id, judgment, wt, log, backend)
+        return
+    try:
+        before = log.kept(f"{name}-before")
+    except ConfigError as error:
+        raise _rule(log, group, wt, kept, str(error)) from error
+    git.restore(wt, before, step.paths)
+    _step(cfg, group, index, wt, log, backend, juror_reasons=juror_reasons)
 
 
 def _producer_identity(step: Step) -> str:
@@ -310,6 +378,7 @@ def _step(
             juror_reasons=juror_reasons,
         )
 
+    reported = name
     if cut is None:
         report = _dispatch(group, wt, log, backend, name, render(step.form), step.role)
     else:
@@ -319,16 +388,11 @@ def _step(
             log.keep(f"{name}-brief", render(step.form))
         log.keep(f"{name}-parts", json.dumps(counts))
         for k, part in enumerate(cut.parts, 1):
+            reported = name if len(cut.parts) == 1 else f"{name}-part-{k}"
             report = _dispatch(
-                group,
-                wt,
-                log,
-                backend,
-                name if len(cut.parts) == 1 else f"{name}-part-{k}",
-                render(part),
-                step.role,
+                group, wt, log, backend, reported, render(part), step.role
             )
-            if report.test_wrong:
+            if report.test_wrong or report.kind != "done":
                 # Parts that never run leave no report, not an earlier run's.
                 for later in range(k + 1, len(cut.parts) + 1):
                     log.keep(f"{name}-part-{later}", "")
@@ -347,6 +411,20 @@ def _step(
                 f"{name}.txt",
                 f"step {step.id} red output outside declared paths: {', '.join(outside)}",
             )
+    if report.kind != "done":
+        kept = str(cfg.state_dir / f"{reported}.txt")
+        _answer(
+            cfg,
+            group,
+            index,
+            wt,
+            log,
+            backend,
+            "refused",
+            kept,
+            juror_reasons=juror_reasons,
+        )
+        return
     if report.test_wrong:
         judgment = _judgment(group, index, wt, log, spec_dir=cfg.spec_dir)
         _judge(cfg, group, step.id, judgment, wt, log, backend)
@@ -357,7 +435,10 @@ def _step(
         try:
             _red_evidence(step, name, log)
         except ConfigError as error:
-            raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+            # Keep the rejection itself: a cut step has no single report to name.
+            kept = str(log.keep(f"{name}-red-report", str(error)))
+            _answer(cfg, group, index, wt, log, backend, "red report", kept)
+            return
         log.keep(f"{name}-evidence", _producer_identity(step))
         log.keep(f"{name}-repair-evidence", "")
 
@@ -439,7 +520,7 @@ def _judgment(
                     text = ""
                 if text or n == key:
                     paths.append(str(log.keep(n, text)))
-        if failure is not None:
+        if failure is not None and failure not in paths:
             paths.append(failure)
         judgment = forms.Judgment(
             group.design,
@@ -510,7 +591,8 @@ def _judge(
         raise _owner_stop(group, judgment, wt, log, "juror rounds exhausted")
     text = brief.render(judgment, paths=[], view_paths={}, red_ids=[])
     log.keep(name, "")
-    _dispatch(group, wt, log, backend, name, text, "juror")
+    report = _dispatch(group, wt, log, backend, name, text, "juror")
+    _refusal_stops(cfg, group, wt, log, name, "juror", report)
     try:
         verdict = reports.verdict(log.kept(name))
     except ConfigError as error:
@@ -757,7 +839,8 @@ def _repair(
     )
     text = brief.render(form, paths=producer.paths, view_paths=view_paths, red_ids=[])
     before_repair = git.snapshot(wt)
-    _dispatch(group, wt, log, backend, repair_name, text, "test-writer")
+    report = _dispatch(group, wt, log, backend, repair_name, text, "test-writer")
+    _refusal_stops(cfg, group, wt, log, repair_name, "test-writer", report)
     outside = [
         p
         for p in git.changed_since(wt, before_repair, include_ignored=False)
@@ -824,6 +907,7 @@ def _review(
         text = brief.render(form, paths=[], view_paths={}, red_ids=[])
         log.keep(f"{name}-handled", "")
         report = _dispatch(group, wt, log, backend, name, text, reviewer.role)
+        _refusal_stops(cfg, group, wt, log, name, reviewer.role, report)
         if report.findings:
             kept.append(name)
     if kept:
@@ -963,7 +1047,10 @@ def run_upheld(
         pending.append((name, raw, prepared))
     for name, raw, prepared in pending:
         for key, batch, text in prepared:
-            _dispatch(group, wt, log, backend, key, text, batch.role, load=batch.load)
+            report = _dispatch(
+                group, wt, log, backend, key, text, batch.role, load=batch.load
+            )
+            _refusal_stops(cfg, group, wt, log, key, batch.role, report)
         log.keep(f"{name}-handled", raw)
     return _check_review_land(cfg, group, wt, log, backend)
 
