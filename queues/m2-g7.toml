@@ -240,7 +240,15 @@ text = "close on a child that is still running always runs the sequence."
 source = "gauntlet/seams/process.py"
 
 [[steps.8e.form.behaviors]]
-text = "close on a child that has exited but is not yet reaped runs the sequence on its process group, then reaps it: the unreaped leader keeps the group id from reuse, so members it left running are stopped."
+text = "close on a child that has exited but is not yet reaped runs the sequence on its process group"
+source = "gauntlet/seams/process.py"
+
+[[steps.8e.form.behaviors]]
+text = "the unreaped leader keeps the group id from reuse, so members it left running are stopped"
+source = "gauntlet/seams/process.py"
+
+[[steps.8e.form.behaviors]]
+text = "reaps it"
 source = "gauntlet/seams/process.py"
 
 [[steps.8e.form.behaviors]]
