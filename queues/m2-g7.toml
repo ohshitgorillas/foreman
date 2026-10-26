@@ -159,7 +159,19 @@ expect_code = 1
 origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8d"] }
 
 [[steps.8d.form.behaviors]]
-text = "The sequence sends SIGTERM to the child's process group, waits up to TERMINATE_GRACE_SECONDS through the Clock, sends SIGKILL to what remains of the group, waits up to TERMINATE_GRACE_SECONDS more through the Clock for the reap, then checks the group."
+text = "The sequence sends SIGTERM to the child's process group, then waits through the Clock up to TERMINATE_GRACE_SECONDS."
+source = "gauntlet/seams/process.py"
+
+[[steps.8d.form.behaviors]]
+text = "The first wait ends at the first check that finds no member running, at most GROUP_POLL_SECONDS after the group empties."
+source = "gauntlet/seams/process.py"
+
+[[steps.8d.form.behaviors]]
+text = "SIGKILL goes to the group only when the first wait ends with a member still running."
+source = "gauntlet/seams/process.py"
+
+[[steps.8d.form.behaviors]]
+text = "A second wait through the Clock, up to TERMINATE_GRACE_SECONDS, ends early when the child is reaped"
 source = "gauntlet/seams/process.py"
 
 [[steps.8d.form.behaviors]]
