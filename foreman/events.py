@@ -93,9 +93,15 @@ class EventLog:
         )
 
 
+# The last line said or failed, for the exit alert.
+LAST: list[str] = [""]
+
+
 def say(text: str) -> None:
+    LAST[0] = text
     sys.stdout.write(text + "\n")
 
 
 def fail(text: str) -> None:
+    LAST[0] = f"foreman: {text}"
     sys.stderr.write(f"foreman: {text}\n")

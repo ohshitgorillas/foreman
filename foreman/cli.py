@@ -1,11 +1,17 @@
 """Command line: parses argv, lints, calls loop, maps each ForemanError to its exit code."""
 
 import argparse
+import contextlib
+import io
+import os
+import signal
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import NoReturn
 
-from foreman import backends, config, loop, steps
+from foreman import backends, config, events, loop, steps
 from foreman.errors import EXIT_OK, ConfigError, ForemanError
 from foreman.events import EventLog, fail, say
 from foreman.steps import Group
@@ -89,5 +95,64 @@ def main(argv: list[str] | None = None) -> int:
         return e.exit_code
 
 
+# Waits for Foreman's pid to go, then pings once: the status file if Foreman
+# wrote one, else a killed-or-crashed notice. Own session, so it outlives a
+# process-group kill and even SIGKILL of Foreman.
+_WATCH = """
+while kill -0 "$1" 2>/dev/null; do sleep 3; done
+sleep 1
+if [ -s "$2" ]; then m=$(cat "$2"); else m="$4 died without reporting an exit (killed or crashed)"; fi
+rm -f "$2"
+"$5" "$3" "$m"
+"""
+
+
+def _arm_alert() -> tuple[str, str] | None:
+    """Start the exit watcher for run/upheld/retest; return its status file."""
+    ping = os.path.expanduser("~/.local/bin/claude-ping")
+    if os.environ.get("FOREMAN_NO_ALERT") or not os.access(ping, os.X_OK):
+        return None
+    quiet = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+            args = _parser().parse_args()
+    except SystemExit:
+        return None
+    if args.command == "status":
+        return None
+    label = f"Foreman {args.command} {args.step_file.stem}"
+    fd, status = tempfile.mkstemp(prefix="foreman-alert-")
+    os.close(fd)
+    tag = f"foreman:{args.step_file.stem}"
+    subprocess.Popen(
+        ["/bin/sh", "-c", _WATCH, "sh", str(os.getpid()), status, tag, label, ping],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda n, _f: sys.exit(128 + n))
+    return label, status
+
+
 def entry() -> NoReturn:
-    sys.exit(main())
+    armed = _arm_alert()
+    code: object = 1
+    try:
+        code = main()
+    except SystemExit as e:
+        code = e.code
+        raise
+    except BaseException as e:
+        code = f"crashed: {type(e).__name__}: {e}"[:200]
+        raise
+    finally:
+        if armed:
+            label, status = armed
+            word = "finished" if code in (None, EXIT_OK) else f"STOPPED (exit {code})"
+            tmp = status + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as out:
+                out.write(f"{label} {word}: {events.LAST[0][-300:]}")
+            os.replace(tmp, status)
+    sys.exit(code)

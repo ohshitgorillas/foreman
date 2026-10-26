@@ -1,8 +1,14 @@
+import os
+import signal
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from foreman import backends, loop
+from foreman import backends, cli, events, loop
 from foreman.cli import main
 from foreman.errors import WrongTest
 from foreman.run import run_ok
@@ -201,3 +207,201 @@ def test_retest_cli_preserves_verdict_bytes(
     assert main(
         ["--config", str(conf_file), "retest", str(steps_file), "g1", str(path)]
     ) == (0 if newline == "\n" else 2)
+
+
+# Exit alert. The ping is a stub under a temporary HOME; alert also fakes Popen
+# and signal.signal, so no watcher starts and pytest's handlers stay. The watch
+# script itself runs in the foreground against an already-gone pid.
+
+
+@pytest.fixture
+def stub_ping(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    home = tmp_path / "home"
+    ping = home / ".local" / "bin" / "claude-ping"
+    ping.parent.mkdir(parents=True)
+    pinged = tmp_path / "pinged"
+    ping.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {pinged}\n')
+    ping.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("FOREMAN_NO_ALERT", raising=False)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(events, "LAST", [""])
+    return SimpleNamespace(ping=ping, pinged=pinged, tmp=tmp_path)
+
+
+@pytest.fixture
+def alert(monkeypatch: pytest.MonkeyPatch, stub_ping):
+    popens: list[tuple[list[str], dict]] = []
+    handlers: dict[int, object] = {}
+    monkeypatch.setattr(
+        cli.subprocess, "Popen", lambda cmd, **kw: popens.append((cmd, kw))
+    )
+    monkeypatch.setattr(
+        cli.signal, "signal", lambda sig, fn: handlers.__setitem__(sig, fn)
+    )
+    stub_ping.popens, stub_ping.handlers = popens, handlers
+    return stub_ping
+
+
+def argv(monkeypatch: pytest.MonkeyPatch, *args: str) -> None:
+    monkeypatch.setattr(sys, "argv", ["foreman", *args])
+
+
+def test_arm_alert_off_when_foreman_no_alert(alert, monkeypatch) -> None:
+    monkeypatch.setenv("FOREMAN_NO_ALERT", "1")
+    argv(monkeypatch, "run", "q/m2.toml")
+    assert cli._arm_alert() is None
+    assert alert.popens == [] and alert.handlers == {}
+
+
+def test_arm_alert_off_without_executable_ping(alert, monkeypatch) -> None:
+    alert.ping.chmod(0o644)
+    argv(monkeypatch, "run", "q/m2.toml")
+    assert cli._arm_alert() is None
+    assert alert.popens == []
+
+
+def test_arm_alert_off_for_status(alert, monkeypatch) -> None:
+    argv(monkeypatch, "status")
+    assert cli._arm_alert() is None
+    assert alert.popens == []
+
+
+def test_arm_alert_off_and_silent_on_bad_argv(alert, monkeypatch, capsys) -> None:
+    argv(monkeypatch, "run")
+    assert cli._arm_alert() is None
+    assert alert.popens == []
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("run", "q/m2.toml", "--group", "g1"),
+        ("upheld", "q/m2.toml", "g1", "f.md"),
+        ("retest", "q/m2.toml", "g1", "v.md"),
+    ],
+)
+def test_arm_alert_starts_detached_watcher(alert, monkeypatch, args) -> None:
+    argv(monkeypatch, "--config", "x.toml", *args)
+    label, status = cli._arm_alert()
+    assert label == f"Foreman {args[0]} m2"
+    assert Path(status).parent == alert.tmp and Path(status).read_text() == ""
+    [(cmd, kw)] = alert.popens
+    assert cmd[:3] == ["/bin/sh", "-c", cli._WATCH]
+    assert cmd[3:] == [
+        "sh",
+        str(os.getpid()),
+        status,
+        "foreman:m2",
+        label,
+        str(alert.ping),
+    ]
+    assert kw["start_new_session"] is True
+    assert {kw[k] for k in ("stdin", "stdout", "stderr")} == {subprocess.DEVNULL}
+    assert set(alert.handlers) == {signal.SIGTERM, signal.SIGHUP}
+    with pytest.raises(SystemExit) as e:
+        alert.handlers[signal.SIGTERM](signal.SIGTERM, None)
+    assert e.value.code == 128 + signal.SIGTERM
+
+
+def armed_entry(alert, monkeypatch, fake_main) -> tuple[pytest.ExceptionInfo, str]:
+    argv(monkeypatch, "run", "q/m2.toml")
+    monkeypatch.setattr(cli, "main", fake_main)
+    with pytest.raises(BaseException) as e:
+        cli.entry()
+    [(cmd, _)] = alert.popens
+    return e, Path(cmd[5]).read_text(encoding="utf-8")
+
+
+def test_entry_reports_finished_with_last_line(alert, monkeypatch, capsys) -> None:
+    def ok() -> int:
+        events.say("x" * 400 + "landed abc")
+        return 0
+
+    e, text = armed_entry(alert, monkeypatch, ok)
+    assert e.type is SystemExit and e.value.code == 0
+    assert text == "Foreman run m2 finished: " + ("x" * 400 + "landed abc")[-300:]
+    assert not list(alert.tmp.glob("*.tmp"))
+
+
+def test_entry_reports_stop_code_and_failure(alert, monkeypatch, capsys) -> None:
+    def stop() -> int:
+        events.fail("owner ruling needed")
+        return 6
+
+    e, text = armed_entry(alert, monkeypatch, stop)
+    assert e.type is SystemExit and e.value.code == 6
+    assert text == "Foreman run m2 STOPPED (exit 6): foreman: owner ruling needed"
+
+
+def test_entry_reports_signal_exit(alert, monkeypatch) -> None:
+    def killed() -> int:
+        raise SystemExit(143)
+
+    e, text = armed_entry(alert, monkeypatch, killed)
+    assert e.type is SystemExit and e.value.code == 143
+    assert text == "Foreman run m2 STOPPED (exit 143): "
+
+
+def test_entry_treats_bare_exit_as_finished(alert, monkeypatch) -> None:
+    def bare() -> int:
+        raise SystemExit
+
+    e, text = armed_entry(alert, monkeypatch, bare)
+    assert e.type is SystemExit and e.value.code is None
+    assert text == "Foreman run m2 finished: "
+
+
+def test_entry_reports_crash_and_reraises(alert, monkeypatch) -> None:
+    def crash() -> int:
+        raise RuntimeError("boom")
+
+    e, text = armed_entry(alert, monkeypatch, crash)
+    assert e.type is RuntimeError
+    assert text == "Foreman run m2 STOPPED (exit crashed: RuntimeError: boom): "
+
+
+def test_entry_unarmed_passes_code_through(alert, monkeypatch) -> None:
+    monkeypatch.setenv("FOREMAN_NO_ALERT", "1")
+    argv(monkeypatch, "run", "q/m2.toml")
+    monkeypatch.setattr(cli, "main", lambda: 4)
+    with pytest.raises(SystemExit) as e:
+        cli.entry()
+    assert e.value.code == 4
+    assert alert.popens == [] and not list(alert.tmp.glob("foreman-alert-*"))
+
+
+def gone_pid() -> int:
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
+
+
+@pytest.mark.parametrize(
+    ("written", "message"),
+    [
+        ("Foreman run m2 finished: abc", "Foreman run m2 finished: abc"),
+        ("", "Foreman run m2 died without reporting an exit (killed or crashed)"),
+    ],
+)
+def test_watch_script_pings_once_pid_is_gone(stub_ping, written, message) -> None:
+    status = stub_ping.tmp / "foreman-alert-x"
+    status.write_text(written)
+    subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            cli._WATCH,
+            "sh",
+            str(gone_pid()),
+            str(status),
+            "foreman:m2",
+            "Foreman run m2",
+            str(stub_ping.ping),
+        ],
+        check=True,
+        timeout=15,
+    )
+    assert stub_ping.pinged.read_text() == f"foreman:m2\n{message}\n"
+    assert not status.exists()

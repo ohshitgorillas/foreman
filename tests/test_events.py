@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from foreman import events
 from foreman.config import Config
 from foreman.errors import (
     ConfigError,
@@ -108,6 +109,18 @@ def test_say_and_fail(capsys: pytest.CaptureFixture[str]) -> None:
     fail("bad")
     out = capsys.readouterr()
     assert (out.out, out.err) == ("hi\n", "foreman: bad\n")
+
+
+def test_say_and_fail_record_the_last_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(events, "LAST", [""])
+    say("landed abc")
+    assert events.LAST == ["landed abc"]
+    fail("stopped")
+    assert events.LAST == ["foreman: stopped"]
+    say("again")
+    assert events.LAST == ["again"]
 
 
 def test_new_error_exit_codes() -> None:
