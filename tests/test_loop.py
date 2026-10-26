@@ -781,35 +781,43 @@ def test_test_review_uses_explicit_specs_in_order(green_cfg, origin, log, fake_b
 
 
 @pytest.mark.parametrize("outside", ["a.py", "tests/test_other.py", "stray.txt"])
-def test_red_output_outside_paths_stops_before_check_and_next_dispatch(
+def test_red_output_outside_paths_is_logged_restored_and_the_build_goes_on(
     green_cfg, log, fake_backend, outside
 ):
+    cfg = _viewing(green_cfg)
+    test_id = "tests/test_a.py::test_new"
     red = make_step(
         "red",
         ["tests/test_a.py"],
         role="test-writer",
-        check=["true"],
-        form=forms.Red(()),
+        views=["a.py"],
+        form=forms.Red((forms.Behavior("Preserve safe data.", "a.py"),)),
     )
     g = make_group(red, make_step("later", ["b.py"]))
-    wt = git.make_worktree(green_cfg, g.id)
+    wt = git.make_worktree(cfg, g.id)
     (wt / "a.py").write_text("before")
     (wt / ".gitignore").write_text("ignored.txt\n")
     backend = fake_backend(
-        [{outside: "unexpected", "tests/test_a.py": "red", "ignored.txt": "cache"}]
+        [
+            {outside: "unexpected", "tests/test_a.py": "red", "ignored.txt": "cache"},
+            {"b.py": "built"},
+        ],
+        outputs=[_red_report(test_id), ""],
     )
-    with pytest.raises(
-        RulingNeeded, match="red output outside declared paths"
-    ) as error:
-        loop._steps(green_cfg, g, wt, log, backend, 0)
-    assert outside in str(error.value)
-    assert "ignored.txt" not in str(error.value)
-    assert "g1-red.txt" in str(error.value)
-    assert len(backend.briefs) == 1
-    assert log.kept("g1-red-before")
-    assert log.kept("g1-red-brief") == "red"
-    with pytest.raises(ConfigError):
-        log.kept("g1-red-check")
+    loop._steps(cfg, g, wt, log, backend, 0)
+    if outside == "a.py":
+        assert (wt / "a.py").read_text() == "before"
+    else:
+        assert not (wt / outside).exists()
+    assert (wt / "tests/test_a.py").read_text() == "red"
+    assert (wt / "ignored.txt").read_text() == "cache"
+    assert (wt / "b.py").read_text() == "built"
+    assert len(backend.briefs) == 2
+    mismatches = [r for r in _rows(cfg) if r["kind"] == "mismatch"]
+    assert [r["mismatch_kind"] for r in mismatches] == ["outside paths"]
+    assert outside in mismatches[0]["text"]
+    assert "ignored.txt" not in mismatches[0]["text"]
+    assert _no_ruling(cfg)
 
 
 def test_red_scope_uses_snapshot_and_allows_changes_to_its_existing_file(
@@ -1683,12 +1691,20 @@ def test_juror_repair_preserves_producer_and_restores_builder(
             "tests/test_b.py::test_new",
         ]
     elif change == "outside":
-        with pytest.raises(RulingNeeded) as error:
-            loop._step(cfg, group, 1, wt, log, backend)
-        assert ".ruff_cache" not in str(error.value)
-        assert "other.py" in str(error.value)
-        assert len(backend.briefs) == 3
-        assert (wt / "a.py").read_text() == "partial"
+        # The Mismatches table's `outside paths` row: logged, restored, and the
+        # stopped build is retried as after any accepted repair.
+        loop._step(cfg, group, 1, wt, log, backend)
+        assert not (wt / "other.py").exists()
+        assert (wt / ".ruff_cache/entry").read_text() == "cache"
+        assert (wt / "tests/test_a.py").read_text() == repaired
+        assert seen == [("original", False, "keep")]
+        assert backend.briefs[3] == f"Approved build\na.py\nnew.py\n{test_id}"
+        assert (wt / "a.py").read_text() == "finished"
+        mismatches = [r for r in _rows(cfg) if r["kind"] == "mismatch"]
+        assert [r["mismatch_kind"] for r in mismatches] == ["outside paths"]
+        assert "other.py" in mismatches[0]["text"]
+        assert ".ruff_cache" not in mismatches[0]["text"]
+        assert _no_ruling(cfg)
     else:
         # The Mismatches table's `repair evidence` row: the next judgment
         # attempt on the same context, never a stop.
@@ -2562,15 +2578,33 @@ def _cut_red_run(cfg, log, fake_backend, texts, outputs, design="design.md", **l
     return red, g, wt, backend, lambda: loop._steps(cfg, g, wt, log, backend, 0)
 
 
-def test_red_over_the_page_limit_is_refused_before_any_dispatch(
-    green_cfg, log, fake_backend
+@pytest.mark.parametrize("test", ["page", "files"])
+def test_red_brief_the_cut_refuses_is_logged_and_dispatched_whole(
+    green_cfg, log, fake_backend, test
 ):
-    _, _, _, backend, run = _cut_red_run(
-        green_cfg, log, fake_backend, ("One.", "Two."), [], page_chars=1
+    test_id = "tests/test_a.py::test_one"
+    cfg = replace(_viewing(green_cfg), page_chars=1 if test == "page" else 3000)
+    paths = ["tests/test_a.py"]
+    if test == "files":
+        paths += [f"tests/test_{n}.py" for n in "bcdef"]
+    red = make_red("r1", ("One.", "Two."), paths=paths, source="a.py")
+    g = make_group(red, make_step("later", ["b.py"]))
+    wt = git.make_worktree(cfg, g.id)
+    (wt / "a.py").write_text("stub")
+    backend = fake_backend(
+        [{"tests/test_a.py": "red"}, {"b.py": "built"}],
+        outputs=[_red_report(test_id), ""],
     )
-    with pytest.raises(RulingNeeded, match="OVERLOADED: page"):
-        run()
-    assert backend.briefs == []
+    loop._steps(cfg, g, wt, log, backend, 0)
+    assert len(backend.briefs) == 2
+    assert backend.briefs[0].count("behavior:") == 2
+    assert log.kept("g1-r1-brief") == backend.briefs[0]
+    assert log.kept("g1-r1") == _red_report(test_id) + "\n"
+    assert (wt / "b.py").read_text() == "built"
+    mismatches = [r for r in _rows(cfg) if r["kind"] == "mismatch"]
+    assert [r["mismatch_kind"] for r in mismatches] == ["overload"]
+    assert f"OVERLOADED: {test}" in mismatches[0]["text"]
+    assert _no_ruling(cfg)
 
 
 def test_red_over_the_behavior_limit_is_cut_into_parts_of_whole_behaviors(

@@ -432,8 +432,12 @@ def _step(
             step.form, step.paths, view_paths, cfg.page_chars, cfg.red_behaviors
         )
         if cut.refused:
+            # The Mismatches table's `overload` row: the form is dispatched whole.
             lines = "; ".join(o.line() for o in cut.refused)
-            raise _rule(log, group, wt, "none", f"step {step.id} refused: {lines}")
+            log.mismatched(
+                group.id, name, "overload", f"step {step.id} red brief {lines}"
+            )
+            cut = overload.Cut((step.form,), ())
 
     def render(form: forms.Form) -> str:
         return brief.render(
@@ -470,13 +474,7 @@ def _step(
             if not steps.holds(step.paths, p)
         ]
         if outside:
-            raise _rule(
-                log,
-                group,
-                wt,
-                f"{name}.txt",
-                f"step {step.id} red output outside declared paths: {', '.join(outside)}",
-            )
+            _restore_outside(group, wt, log, name, before, outside, f"{reported}.txt")
     if report.kind != "done":
         kept = str(cfg.state_dir / f"{reported}.txt")
         _answer(
@@ -969,12 +967,8 @@ def _repair(
         if not steps.holds(producer.paths, p)
     ]
     if outside:
-        raise _rule(
-            log,
-            group,
-            wt,
-            f"{repair_name}.txt",
-            f"repair output outside declared paths: {', '.join(outside)}",
+        _restore_outside(
+            group, wt, log, repair_name, before_repair, outside, f"{repair_name}.txt"
         )
     try:
         verify.validate_repair(original, wt)
@@ -1001,6 +995,29 @@ def _repair(
         assert stopped is not None
         git.restore(wt, before_build, build.paths)
         _step(cfg, group, stopped, wt, log, backend)
+
+
+def _restore_outside(
+    group: Group,
+    wt: Path,
+    log: EventLog,
+    name: str,
+    before: str,
+    outside: list[str],
+    kept: str,
+) -> None:
+    """Log output outside a dispatch's declared paths and put it back.
+
+    The Mismatches table's `outside paths` row: each path returns to the
+    snapshot taken before the dispatch, and the build goes on.
+    """
+    log.mismatched(
+        group.id,
+        name,
+        "outside paths",
+        f"{name} output outside declared paths: {', '.join(outside)}; kept {kept}",
+    )
+    git.restore(wt, before, outside)
 
 
 def _next_judgment(
