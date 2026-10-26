@@ -3,7 +3,7 @@
 # Steps 10-12 (gauntlet/core/launch.py) are the next group.
 
 [groups.g7]
-steps = ["4", "5", "7", "8", "9"]
+steps = ["4", "5", "7", "8a", "8b", "8c", "8d", "8e", "9"]
 design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md"
 after = []
 
@@ -86,7 +86,7 @@ check = ["uv", "run", "pytest", "-q", "tests/test_support_process.py"]
 origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["7"] }
 sources = ["gauntlet/seams/process.py"]
 
-[steps.8]
+[steps.8a]
 role = "test-writer"
 shape = "red"
 paths = ["tests/test_seams_process.py"]
@@ -94,76 +94,126 @@ views = ["gauntlet/seams/process.py"]
 check = ["uv", "run", "pytest", "-q", "tests/test_seams_process.py"]
 expect_code = 1
 
-[steps.8.form]
-origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8"] }
+[steps.8a.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8a"] }
 
-[[steps.8.form.behaviors]]
+[[steps.8a.form.behaviors]]
 text = "Commands carry argv as separate values."
 source = "gauntlet/seams/process.py"
 
-[[steps.8.form.behaviors]]
+[[steps.8a.form.behaviors]]
 text = "Nothing splits or interprets shell text."
 source = "gauntlet/seams/process.py"
 
-[[steps.8.form.behaviors]]
+[[steps.8a.form.behaviors]]
 text = "Each child leads its own session and process group."
 source = "gauntlet/seams/process.py"
 
-[[steps.8.form.behaviors]]
+[steps.8b]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_seams_process_streams.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_process_streams.py"]
+expect_code = 1
+
+[steps.8b.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8b"] }
+
+[[steps.8b.form.behaviors]]
 text = "capture=False is pass-through mode: the child inherits the parent's stdin, stdout and stderr, and Completed carries empty stdout and stderr."
 source = "gauntlet/seams/process.py"
 
-[[steps.8.form.behaviors]]
-text = "The sequence sends SIGTERM to the child's process group, waits up to TERMINATE_GRACE_SECONDS through the Clock, sends SIGKILL to what remains of the group, waits up to TERMINATE_GRACE_SECONDS more through the Clock for the reap, then checks the group."
-source = "gauntlet/seams/process.py"
+[steps.8c]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_seams_process_failure.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_process_failure.py"]
+expect_code = 1
 
-[[steps.8.form.behaviors]]
-text = "Cleanup fails when any member of the group has not exited after that second wait."
-source = "gauntlet/seams/process.py"
+[steps.8c.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8c"] }
 
-[[steps.8.form.behaviors]]
-text = "A member that has exited but is not yet reaped, the child itself included, does not count as still running."
-source = "gauntlet/seams/process.py"
-
-[[steps.8.form.behaviors]]
-text = "Any exception raised while run waits on its child, KeyboardInterrupt and every other BaseException included, makes run run the sequence and then re-raise that same exception object; run raises ProcessError in its place only when the sequence itself fails, raised `from` that exception so it stays on `__cause__` and in the traceback."
-source = "gauntlet/seams/process.py"
-
-[[steps.8.form.behaviors]]
-text = "wait reaps the child."
-source = "gauntlet/seams/process.py"
-
-[[steps.8.form.behaviors]]
-text = "close on a child that is still running always runs the sequence."
-source = "gauntlet/seams/process.py"
-
-[[steps.8.form.behaviors]]
-text = "close on a child that has exited but is not yet reaped runs the sequence on its process group, then reaps it: the unreaped leader keeps the group id from reuse, so members it left running are stopped."
-source = "gauntlet/seams/process.py"
-
-[[steps.8.form.behaviors]]
-text = "close on a child already reaped, by wait or an earlier close, does nothing."
-source = "gauntlet/seams/process.py"
-
-[[steps.8.form.behaviors]]
+[[steps.8c.form.behaviors]]
 text = "Any OSError raised while starting the child is a failed start."
 source = "gauntlet/seams/process.py"
 
-[[steps.8.form.behaviors]]
+[[steps.8c.form.behaviors]]
 text = "Failed starts and failed cleanup raise ProcessError."
 source = "gauntlet/seams/process.py"
 
-[[steps.8.form.behaviors]]
+[[steps.8c.form.behaviors]]
 text = "A child ended by a signal reports status 128 plus the signal number, as a shell does."
+source = "gauntlet/seams/process.py"
+
+[steps.8d]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_seams_process_cleanup.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_process_cleanup.py"]
+expect_code = 1
+
+[steps.8d.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8d"] }
+
+[[steps.8d.form.behaviors]]
+text = "The sequence sends SIGTERM to the child's process group, waits up to TERMINATE_GRACE_SECONDS through the Clock, sends SIGKILL to what remains of the group, waits up to TERMINATE_GRACE_SECONDS more through the Clock for the reap, then checks the group."
+source = "gauntlet/seams/process.py"
+
+[[steps.8d.form.behaviors]]
+text = "Cleanup fails when any member of the group has not exited after that second wait."
+source = "gauntlet/seams/process.py"
+
+[[steps.8d.form.behaviors]]
+text = "Any exception raised while run waits on its child, KeyboardInterrupt and every other BaseException included, makes run run the sequence and then re-raise that same exception object; run raises ProcessError in its place only when the sequence itself fails, raised `from` that exception so it stays on `__cause__` and in the traceback."
+source = "gauntlet/seams/process.py"
+
+[steps.8e]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_seams_process_close.py"]
+views = ["gauntlet/seams/process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_process_close.py"]
+expect_code = 1
+
+[steps.8e.form]
+origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["8e"] }
+
+[[steps.8e.form.behaviors]]
+text = "A member that has exited but is not yet reaped, the child itself included, does not count as still running."
+source = "gauntlet/seams/process.py"
+
+[[steps.8e.form.behaviors]]
+text = "wait reaps the child."
+source = "gauntlet/seams/process.py"
+
+[[steps.8e.form.behaviors]]
+text = "close on a child that is still running always runs the sequence."
+source = "gauntlet/seams/process.py"
+
+[[steps.8e.form.behaviors]]
+text = "close on a child that has exited but is not yet reaped runs the sequence on its process group, then reaps it: the unreaped leader keeps the group id from reuse, so members it left running are stopped."
+source = "gauntlet/seams/process.py"
+
+[[steps.8e.form.behaviors]]
+text = "close on a child already reaped, by wait or an earlier close, does nothing."
 source = "gauntlet/seams/process.py"
 
 [steps.9]
 role = "seam-builder"
 shape = "build"
 paths = ["gauntlet/seams/process.py"]
-check = ["uv", "run", "pytest", "-q", "tests/test_seams_process.py"]
+check = ["uv", "run", "pytest", "-q", "tests/test_seams_process.py", "tests/test_seams_process_streams.py", "tests/test_seams_process_failure.py", "tests/test_seams_process_cleanup.py", "tests/test_seams_process_close.py"]
 
 [steps.9.form]
 step = """docs/superpowers/specs/m2-launcher-kinds-order-design.md, Order step 9
-9 build | seam-builder | gauntlet/seams/process.py | Process execution and cleanup tests must pass using harmless children."""
-red = [{ step = "8", files = ["tests/test_seams_process.py"] }]
+9 build | seam-builder | gauntlet/seams/process.py | One dispatch makes the tests of steps 8a–8e pass using harmless children."""
+red = [
+    { step = "8a", files = ["tests/test_seams_process.py"] },
+    { step = "8b", files = ["tests/test_seams_process_streams.py"] },
+    { step = "8c", files = ["tests/test_seams_process_failure.py"] },
+    { step = "8d", files = ["tests/test_seams_process_cleanup.py"] },
+    { step = "8e", files = ["tests/test_seams_process_close.py"] },
+]
