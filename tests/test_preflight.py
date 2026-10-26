@@ -102,17 +102,27 @@ END TESTS
 EXAMPLES = {"juror": VERDICT, "test-writer": RED}
 
 
-def documented(example: str | None) -> str:
+# The description each home role is installed with; others have none.
+SCOPES = {
+    "juror": "Judges. Writes nothing.",
+    "seam-builder": "Builds, writing only under `gauntlet/seams/`.",
+    "test-writer": "Writes under `tests/` only.",
+}
+
+
+def documented(example: str | None, description: str | None = None) -> str:
     """A role file body whose Report section documents `example`, if given."""
     report = f"## Report\n\n```text\n{example}```\n" if example is not None else ""
-    return f"---\n---\n\n## Steps\n\n```\nnot the example\n```\n\n{report}"
+    front = f"description: {description}\n" if description is not None else ""
+    return f"---\n{front}---\n\n## Steps\n\n```\nnot the example\n```\n\n{report}"
 
 
 def home_roles(user_agents: dict[str, Path], *names: str) -> None:
-    """Install `names` as claude-local roles, each with a report example that parses."""
+    """Install `names` as claude-local roles, each with a report example that
+    parses and its description from SCOPES."""
     for name in names:
         (user_agents["claude-local"] / f"{name}.md").write_text(
-            documented(EXAMPLES.get(name, "DONE\n"))
+            documented(EXAMPLES.get(name, "DONE\n"), SCOPES.get(name))
         )
 
 
@@ -245,11 +255,13 @@ def test_write_scope(description: str, scope: list[str] | None):
 
 
 def test_paths_inside_scope_pass(cfg: Config, repo: Path):
+    commit(repo)
     step = red("5", "x", paths=["tests/test_a.py", "tests/support/b.py"])
     assert check_scope(step, group(step), cfg) == []
 
 
 def test_each_path_outside_scope_is_a_finding_for_foreman(cfg: Config, repo: Path):
+    commit(repo)
     step = red("5", "x", paths=["tests/test_a.py", "gauntlet/a.py", "testsx/b.py"])
     found = check_scope(step, group(step), cfg)
     assert [(f.check, f.fixer) for f in found] == [("scope", "Foreman")] * 2
@@ -258,6 +270,7 @@ def test_each_path_outside_scope_is_a_finding_for_foreman(cfg: Config, repo: Pat
 
 def test_role_that_writes_nothing_flags_every_path(cfg: Config, repo: Path):
     role(repo, "diff-reviewer", "Blind reviewer. Writes nothing, never commits.")
+    commit(repo)
     step = stub("9", "diff-reviewer", ["gauntlet/a.py"])
     assert len(check_scope(step, group(step), cfg)) == 1
 
@@ -265,20 +278,55 @@ def test_role_that_writes_nothing_flags_every_path(cfg: Config, repo: Path):
 @pytest.mark.parametrize(
     "contents",
     [
-        None,  # no role file
         "No frontmatter here.\n",
         "---\nname: spiker\n---\n",  # no description
         "---\nname: spiker\ndescription: Answers one question. Never commits.\n---\n",
     ],
 )
 def test_unreadable_role_scope_is_one_finding_for_the_role_author(
-    cfg: Config, repo: Path, contents: str | None
+    cfg: Config, repo: Path, contents: str
 ):
-    if contents is not None:
-        write(repo, ".claude/agents/spiker.md", contents)
+    write(repo, ".claude/agents/spiker.md", contents)
+    commit(repo)
     step = stub("6", "spiker", ["gauntlet/a.py", "tests/b.py"])
     found = check_scope(step, group(step), cfg)
     assert [(f.check, f.fixer) for f in found] == [("scope", "role author")]
+    assert ".claude/agents/spiker.md at HEAD" in found[0].problem
+
+
+def test_a_missing_or_unreadable_role_is_no_scope_finding(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    step = stub("6", "spiker", ["gauntlet/a.py"])
+    assert check_scope(step, group(step), cfg) == []
+    (user_agents["claude-local"] / "spiker.md").write_bytes(b"\xff")
+    assert check_scope(step, group(step), cfg) == []
+
+
+def test_the_scope_is_read_from_the_user_agents_folder_first(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    commit(repo)
+    home = user_agents["claude-local"] / "test-writer.md"
+    home.write_text(documented(None, "Builds, writing only under `gauntlet/`."))
+    step = red("5", "x", paths=["tests/test_a.py", "gauntlet/a.py"])
+    found = check_scope(step, group(step), cfg)
+    assert len(found) == 1 and "tests/test_a.py" in found[0].problem
+    home.write_text(documented(None))
+    found = check_scope(step, group(step), cfg)
+    assert found[0].problem == f"role file {home} has no frontmatter description"
+
+
+def test_codex_roles_are_not_scope_checked(
+    cfg: Config, repo: Path, user_agents: dict[str, Path]
+):
+    cfg = replace(cfg, backend="codex-local")
+    instructions = json.dumps(documented(None, "Writes nothing."))
+    (user_agents["codex-local"] / "spiker.toml").write_text(
+        f"developer_instructions = {instructions}\n"
+    )
+    step = stub("6", "spiker", ["gauntlet/a.py"])
+    assert check_scope(step, group(step), cfg) == []
 
 
 # dispatched roles
@@ -615,15 +663,15 @@ def installed(user_agents: dict[str, Path]) -> None:
 def test_clean_queue_prints_nothing_and_exits_0(
     repo: Path, conf_file: Path, tmp_path: Path, capsys, installed
 ):
-    role(repo, "seam-builder", "Builds, writing only under `gauntlet/seams/`.")
     q = queue(tmp_path, GOOD, GOOD)
     assert preflight.main([str(q), "--config", str(conf_file)]) == 0
     assert capsys.readouterr().out == ""
 
 
 def test_findings_print_one_per_line_in_queue_order_and_exit_1(
-    repo: Path, conf_file: Path, tmp_path: Path, capsys, installed
+    repo: Path, conf_file: Path, tmp_path: Path, capsys, installed, user_agents
 ):
+    (user_agents["claude-local"] / "seam-builder.md").write_text(documented("DONE\n"))
     q = queue(tmp_path, "Five is gone.", "Eight is gone.")
     assert preflight.main([str(q), "--config", str(conf_file)]) == 1
     lines = capsys.readouterr().out.splitlines()
@@ -682,7 +730,6 @@ def test_judge_flag_adds_the_agent_checks(
 
     asked = []
     monkeypatch.setattr(judge, "ask", lambda p: asked.append(p) or "NONE")
-    role(repo, "seam-builder", "Builds, writing only under `gauntlet/seams/`.")
     q = queue(tmp_path, GOOD, GOOD)
     assert preflight.main([str(q), "--config", str(conf_file)]) == 0
     assert asked == []

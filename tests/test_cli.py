@@ -34,12 +34,15 @@ VERDICT = (
 
 
 def role_file(cfg: Config, scope: str) -> None:
+    """Commit the core-builder role at HEAD, where pre-flight finds it."""
     path = cfg.target_repo / ROLE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"---\nname: core-builder\ndescription: Writes under `{scope}` only.\n---\n"
         + REPORT
     )
+    run_ok(["git", "add", ROLE], cfg.target_repo)
+    run_ok(["git", "commit", "-q", "-m", f"role scope {scope}"], cfg.target_repo)
 
 
 @pytest.fixture(autouse=True)
