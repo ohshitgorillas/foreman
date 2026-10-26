@@ -28,9 +28,11 @@ def _mean(xs: list[float]) -> str:
 
 
 class EventLog:
-    def __init__(self, cfg: Config) -> None:
-        self._dir = cfg.state_dir
-        self._path = cfg.state_dir / "events.jsonl"
+    def __init__(self, where: Config | Path) -> None:
+        """Log under a `Config`'s state_dir, or under a bare state directory,
+        so history and stats can be read with no foreman.toml."""
+        self._dir = where if isinstance(where, Path) else where.state_dir
+        self._path = self._dir / "events.jsonl"
 
     def emit(self, kind: str, step_id: str | None = None, **fields: object) -> None:
         record = {"ts": time.time(), "kind": kind, "step_id": step_id, **fields}

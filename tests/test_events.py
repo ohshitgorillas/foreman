@@ -216,3 +216,22 @@ def test_mismatched_rejects_kind_outside_mismatch_kinds(cfg: Config, kind: str) 
     with pytest.raises(ValueError):
         EventLog(cfg).mismatched("g1", "g1-red-1-reply", kind, "x")
     assert not (cfg.state_dir / "events.jsonl").exists()
+
+
+def test_log_built_from_a_state_dir_alone_reads_history_and_stats(
+    cfg: Config, tmp_path
+) -> None:
+    empty = EventLog(tmp_path / "no-such-state")
+    assert empty.status() == "no events"
+    assert empty.done() == set()
+    assert empty.stats() == "no dispatches"
+    assert not (tmp_path / "no-such-state").exists()
+
+    EventLog(cfg).emit("group_done", "g1")
+    EventLog(cfg).dispatched(
+        "g1", "g1-build", "builder", load=1, seconds=2.0, tokens=10, outcome="done"
+    )
+    bare = EventLog(cfg.state_dir)
+    assert bare.done() == {"g1"}
+    assert "2 events" in bare.status()
+    assert bare.stats().startswith("builder: tokens: 10.0 seconds: 2.0")
