@@ -71,7 +71,24 @@ def _dispatch(
     *,
     load: int | None = None,
 ) -> reports.Report:
+    """`_dispatch_kept` for a caller that needs only the report."""
+    return _dispatch_kept(group, wt, log, backend, name, brief_text, role, load=load)[0]
+
+
+def _dispatch_kept(
+    group: Group,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+    name: str,
+    brief_text: str,
+    role: str,
+    *,
+    load: int | None = None,
+) -> tuple[reports.Report, Path]:
     """Keep and record every returned dispatch; an overrun stops the run.
+
+    Returns the report with the `-attempt-<n>.txt` path `keep_report` returned for it.
 
     A refused report is recorded as refused and returned for the caller to handle
     as the Mismatches table says. A start that fails is marked `<name>-unstarted`
@@ -102,7 +119,7 @@ def _dispatch(
     )
     if report is None:
         raise _rule(log, group, wt, str(path), f"{role} timed out", "timeout")
-    return report
+    return report, path
 
 
 def _refused(
@@ -113,6 +130,7 @@ def _refused(
     log: EventLog,
     backend: Backend,
     report: reports.Report,
+    reported: str,
     kept: str,
 ) -> None:
     """The one handler of a step's refused report, per the Refusals table.
@@ -141,8 +159,7 @@ def _refused(
     if not isinstance(form, forms.Red):
         raise _rule(log, group, wt, kept, f"{step.role} overloaded", "overload")
     counts = [n for _, n in _parts(name, log, step)]
-    stem = Path(kept).stem
-    position = 1 if stem == name else int(stem.rpartition("-part-")[2])
+    position = 1 if reported == name else int(reported.rpartition("-part-")[2])
     start = sum(counts[: position - 1])
     part = replace(form, behaviors=form.behaviors[start : start + counts[position - 1]])
     if len(part.behaviors) == 1:
@@ -542,7 +559,6 @@ def _step(
     step = group.steps[index]
     view_paths = _view_paths(cfg, group, step, wt, log, f"{group.id}-{step.id}")
     name = f"{group.id}-{step.id}"
-    state = cfg.state_dir
     # Kept before evidence resolves, so a verdict on an unstarted build can restore.
     before = git.snapshot(wt)
     try:
@@ -589,11 +605,11 @@ def _step(
 
     reported = name
     if cut is None:
-        report = _dispatch(group, wt, log, backend, name, render(step.form), step.role)
+        report, kept = _dispatch_kept(
+            group, wt, log, backend, name, render(step.form), step.role
+        )
         if report.kind != "done":
-            _refused(
-                cfg, group, index, wt, log, backend, report, f"{state}/{reported}.txt"
-            )
+            _refused(cfg, group, index, wt, log, backend, report, reported, str(kept))
     else:
         assert isinstance(step.form, forms.Red)
         counts = [len(part.behaviors) for part in cut.parts]
@@ -610,7 +626,7 @@ def _step(
                 step.form, behaviors=step.form.behaviors[start : start + counts[k - 1]]
             )
             reported = name if len(counts) == 1 else f"{name}-part-{k}"
-            report = _dispatch(
+            report, kept = _dispatch_kept(
                 group, wt, log, backend, reported, render(part), step.role
             )
             if report.kind != "done":
@@ -622,7 +638,8 @@ def _step(
                     log,
                     backend,
                     report,
-                    f"{state}/{reported}.txt",
+                    reported,
+                    str(kept),
                 )
                 # Only a cut returns: the parts are read again from the new counts.
                 if len(_parts(name, log, step)) > 1:
@@ -1260,14 +1277,18 @@ def _review(
             )
         text = brief.render(form, paths=[], view_paths={}, red_ids=[])
         log.keep(f"{name}-handled", "")
-        report = _dispatch(group, wt, log, backend, name, text, reviewer.role)
+        report, attempt = _dispatch_kept(
+            group, wt, log, backend, name, text, reviewer.role
+        )
         while report.kind != "done":
-            kept_report = str(cfg.state_dir / f"{name}.txt")
+            kept_report = str(attempt)
             why = f"{reviewer.role} {report.kind}"
             log.mismatched(group.id, name, "refused", f"{why}; kept {kept_report}")
             if _round(cfg, log, name) is None:
                 raise _rule(log, group, wt, kept_report, why, "reviewer refused")
-            report = _dispatch(group, wt, log, backend, name, text, reviewer.role)
+            report, attempt = _dispatch_kept(
+                group, wt, log, backend, name, text, reviewer.role
+            )
         if report.findings:
             kept.append(name)
     if kept:
@@ -1424,11 +1445,11 @@ def run_upheld(
         pending.append((name, raw, prepared))
     for name, raw, prepared in pending:
         for key, batch, text in prepared:
-            report = _dispatch(
+            report, attempt = _dispatch_kept(
                 group, wt, log, backend, key, text, batch.role, load=batch.load
             )
             while report.kind != "done":
-                kept_report = str(cfg.state_dir / f"{key}.txt")
+                kept_report = str(attempt)
                 why = f"{batch.role} {report.kind}"
                 log.mismatched(group.id, key, "refused", f"{why}; kept {kept_report}")
                 if _round(cfg, log, key) is None:
@@ -1440,7 +1461,7 @@ def run_upheld(
                         why,
                         "overload" if report.kind == "overloaded" else "steering",
                     )
-                report = _dispatch(
+                report, attempt = _dispatch_kept(
                     group, wt, log, backend, key, text, batch.role, load=batch.load
                 )
         log.keep(f"{name}-handled", raw)

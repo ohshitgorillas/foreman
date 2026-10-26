@@ -84,7 +84,7 @@ def test_rejected_step_stops_as_steering_naming_its_kept_attempt(
     assert stop.value.kind == "steering"
     assert backend.agents == ["core-builder"]
     err = capsys.readouterr().err
-    assert "[ruling_needed] g1:" in err and "g1-s1.txt" in err
+    assert "[ruling_needed] g1:" in err and "g1-s1-attempt-1.txt" in err
     assert str(green_cfg.worktree_root / "g1") in err
     assert (green_cfg.worktree_root / "g1").exists()
     assert log.kept("g1-s1-attempt-1").startswith("REJECTED: STEERING")
@@ -2787,6 +2787,18 @@ def test_upheld_refused_batch_is_dispatched_again_under_a_round(
     ]
 
 
+def test_upheld_batch_refused_past_rounds_names_the_kept_attempt(
+    green_cfg, origin, log, fake_backend
+):
+    cfg, g, key, lines = _refused_batch_setup(green_cfg, log)
+    cfg = replace(cfg, answer_rounds=1)
+    backend = fake_backend(outputs=["OVERLOADED: 6", "OVERLOADED: 7"])
+    with pytest.raises(RulingNeeded) as stop:
+        loop.run_upheld(cfg, g, "\n".join(lines), log, backend)
+    named = str(cfg.state_dir / f"{key}-batch-1-attempt-2.txt")
+    assert named in str(stop.value)
+
+
 @pytest.mark.parametrize(
     "output,kind", [("OVERLOADED: 6", "overload"), ("REJECTED: STEERING", "steering")]
 )
@@ -3439,7 +3451,7 @@ def test_review_refused_past_answer_rounds_stops_without_landing(
     assert isinstance(stopped, RulingNeeded), type(stopped).__name__
     wt = git.worktree(cfg, "g1")
     assert str(wt) in str(stopped)
-    assert str(cfg.state_dir / "g1-review-diff-reviewer.txt") in str(stopped)
+    assert str(cfg.state_dir / "g1-review-diff-reviewer-attempt-2.txt") in str(stopped)
     assert wt.exists()
     assert not log.done()
     assert run_ok(["git", "branch", "--list", "foreman/g1"], origin).out == ""
