@@ -10,7 +10,6 @@ import dataclasses
 import re
 from collections.abc import Callable
 from contextvars import ContextVar
-from pathlib import Path
 
 from foreman import forms, preflight
 from foreman.config import Config
@@ -19,7 +18,6 @@ from foreman.preflight import Finding
 from foreman.run import TIMEOUT_CODE, run
 from foreman.steps import Group, Step
 
-ASK_SECONDS = 300
 ASK_CMD = ["claude", "-p", "--output-format", "text"]
 
 
@@ -27,18 +25,22 @@ class AskError(ForemanError):
     """The agent could not be asked or gave no answer."""
 
 
-# The directory the default `ask` runs in; each check sets it to the target repo.
-_cwd: ContextVar[Path] = ContextVar("judge_cwd")
+# The config the default `ask` runs under (target repo, dispatch timeout);
+# each check sets it.
+_cfg: ContextVar[Config] = ContextVar("judge_cfg")
 
 
 def default_ask(prompt: str) -> str:
     """Run `claude -p` with `prompt` on stdin in the target repo; its stdout."""
+    cfg = _cfg.get()
     try:
-        result = run(ASK_CMD, _cwd.get(), timeout=ASK_SECONDS, stdin=prompt)
+        result = run(
+            ASK_CMD, cfg.target_repo, timeout=cfg.dispatch_seconds, stdin=prompt
+        )
     except ForemanError as e:
         raise AskError(str(e)) from e
     if result.code == TIMEOUT_CODE:
-        raise AskError(f"agent timed out after {ASK_SECONDS}s")
+        raise AskError(f"agent timed out after {cfg.dispatch_seconds}s")
     if result.code != 0:
         tail = _one_line(result.err) or "no stderr"
         raise AskError(f"agent exited {result.code}: {tail}")
@@ -84,7 +86,7 @@ def _judge(
     step: Step, check: str, cfg: Config, prompt: str, fixers: tuple[str, ...]
 ) -> list[Finding]:
     """Ask the agent `prompt` in the target repo and turn its answer into findings."""
-    token = _cwd.set(cfg.target_repo)
+    token = _cfg.set(cfg)
     try:
         answer = ask(prompt)
     except ForemanError as e:
@@ -94,7 +96,7 @@ def _judge(
             )
         ]
     finally:
-        _cwd.reset(token)
+        _cfg.reset(token)
     pairs = parse(answer, fixers)
     if pairs is None:
         shown = _one_line(answer) or "empty answer"

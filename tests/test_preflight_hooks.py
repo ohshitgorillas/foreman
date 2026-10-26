@@ -2,6 +2,7 @@
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -275,7 +276,7 @@ def test_an_unreadable_settings_file_is_a_finding(
 def test_a_hook_that_times_out_is_a_finding(
     cfg: Config, user, tmp_path: Path, log: Path, monkeypatch
 ):
-    monkeypatch.setattr(preflight, "HOOK_SECONDS", 1)
+    cfg = replace(cfg, check_seconds=1)
     settings(user[0], entry(hook(tmp_path, log, "slow.py")))
     role_file(cfg, "Run `make SLEEP`.")
     s = step([])

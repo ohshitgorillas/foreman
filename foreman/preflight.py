@@ -11,11 +11,8 @@ cannot be loaded or STEP is not in the queue.
 
 import argparse
 import json
-import os
 import re
 import shlex
-import signal
-import subprocess
 import sys
 import tempfile
 import tomllib
@@ -26,6 +23,7 @@ from pathlib import Path
 from foreman import backends, config, forms, git, overload, reports, steps, views
 from foreman.config import Config
 from foreman.errors import ConfigError, ForemanError
+from foreman.run import TIMEOUT_CODE, run
 from foreman.steps import Group, Step
 
 
@@ -191,7 +189,6 @@ USER_SETTINGS: tuple[Path, ...] = (
     Path("~/.claude/settings.json").expanduser(),
     Path("~/.claude/settings.local.json").expanduser(),
 )
-HOOK_SECONDS = 10
 _COMMANDS = ("uv", "make", "pytest", "python", "git")
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PLACEHOLDER = re.compile(r"<[^<>]+>")
@@ -345,7 +342,7 @@ class HookResult:
 
 
 def run_hook(
-    hook: str, command: str, cwd: Path, agent_type: str | None = None
+    hook: str, command: str, cwd: Path, cfg: Config, agent_type: str | None = None
 ) -> HookResult:
     """Feed `command` to `hook` as Bash PreToolUse input, in its own process group.
 
@@ -362,25 +359,16 @@ def run_hook(
     }
     if agent_type is not None:
         payload["agent_type"] = agent_type
-    proc = subprocess.Popen(
-        hook,
+    result = run(
+        [hook],
+        cwd,
+        timeout=cfg.check_seconds,
+        stdin=json.dumps(payload),
         shell=True,
-        cwd=cwd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
     )
-    try:
-        out, err = proc.communicate(json.dumps(payload), timeout=HOOK_SECONDS)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.communicate()
+    if result.code == TIMEOUT_CODE:
         return HookResult(False, True, "")
+    out, err = result.out, result.err
     reason = ""
     denied = False
     try:
@@ -394,7 +382,7 @@ def run_hook(
                 reason = str(d.get("permissionDecisionReason", ""))
     lines = err.strip().splitlines()
     first = lines[0] if lines else reason.strip().split("\n")[0]
-    return HookResult(proc.returncode == 2 or denied, False, first)
+    return HookResult(result.code == 2 or denied, False, first)
 
 
 def check_hooks(step: Step, group: Group, cfg: Config) -> list[Finding]:
@@ -428,11 +416,11 @@ def check_hooks(step: Step, group: Group, cfg: Config) -> list[Finding]:
     with tempfile.TemporaryDirectory(prefix="preflight-hooks-") as cwd:
         for command in dict.fromkeys(commands):
             for hook in hooks:
-                r = run_hook(hook, command, Path(cwd), agent_type)
+                r = run_hook(hook, command, Path(cwd), cfg, agent_type)
                 if r.timed_out:
                     findings.append(
                         found(
-                            f"{script_name(hook)} timed out after {HOOK_SECONDS}s"
+                            f"{script_name(hook)} timed out after {cfg.check_seconds}s"
                             f" on: {command}"
                         )
                     )

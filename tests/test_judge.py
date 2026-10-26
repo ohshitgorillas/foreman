@@ -336,9 +336,8 @@ def test_default_ask_turns_a_timeout_into_a_finding(
     cfg: Config, repo: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(judge, "ASK_CMD", ["sh", "-c", "exec sleep 5"])
-    monkeypatch.setattr(judge, "ASK_SECONDS", 0.2)
     step = red("5", "A line.")
-    [f] = check_observable(step, group(step), cfg)
+    [f] = check_observable(step, group(step), replace(cfg, dispatch_seconds=1))
     assert f.fixer == "Foreman"
     assert "timed out" in f.problem
 
