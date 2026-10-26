@@ -1069,6 +1069,11 @@ def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) 
 def _review(
     cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend
 ) -> None:
+    """Dispatch each reviewer whose paths changed; findings stop for Void's ruling.
+
+    A refused reviewer report is logged and the reviewer dispatched again, fresh,
+    with the same text under a round from `_round`; past `answer_rounds` it stops.
+    """
     log.keep(f"{group.id}-review-queue", _queue_identity(group))
     changed = git.changed_paths(wt)
     kept: list[str] = []
@@ -1089,7 +1094,13 @@ def _review(
         text = brief.render(form, paths=[], view_paths={}, red_ids=[])
         log.keep(f"{name}-handled", "")
         report = _dispatch(group, wt, log, backend, name, text, reviewer.role)
-        _refusal_stops(cfg, group, wt, log, name, reviewer.role, report)
+        while report.kind != "done":
+            kept_report = str(cfg.state_dir / f"{name}.txt")
+            why = f"{reviewer.role} {report.kind}"
+            log.mismatched(group.id, name, "refused", f"{why}; kept {kept_report}")
+            if _round(cfg, log, name) is None:
+                raise _rule(log, group, wt, kept_report, why)
+            report = _dispatch(group, wt, log, backend, name, text, reviewer.role)
         if report.findings:
             kept.append(name)
     if kept:

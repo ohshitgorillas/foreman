@@ -3173,3 +3173,111 @@ def test_refused_repair_opens_the_next_judgment_attempt_on_the_same_context(
     assert (wt / "tests/test_a.py").read_text() == original
     assert _mismatch_kinds(cfg) == ["repair evidence"]
     assert _no_ruling(cfg)
+
+
+REVIEW_REFUSALS = ["REJECTED: STEERING extra fields", "OVERLOADED: 6 files"]
+
+
+def _stopped_by(call):
+    """Run call; return the ForemanError it raised, or None and its result."""
+    try:
+        return None, call()
+    except ForemanError as raised:
+        return raised, None
+
+
+# docs/superpowers/specs/brief-forms-design.md Mismatches, reviewer row: a
+# reviewer's refused report is dispatched again, fresh, with the same rendered
+# text while `_round` grants a round; past `answer_rounds`, `RulingNeeded`.
+@pytest.mark.parametrize("refusal", REVIEW_REFUSALS)
+def test_refused_review_is_logged_and_dispatched_again_then_the_group_lands(
+    green_cfg, origin, log, fake_backend, refusal
+):
+    cfg = replace(_reviewed(green_cfg), answer_rounds=2)
+    g = make_group(make_step("s1", ["a.py"]))
+    backend = fake_backend([{"a.py": "1"}], ["", refusal, "FINDINGS 0\n"])
+    stopped, commit = _stopped_by(lambda: loop.run_group(cfg, g, log, backend))
+    assert stopped is None, type(stopped).__name__
+    assert backend.agents == ["core-builder", "diff-reviewer", "diff-reviewer"]
+    assert backend.briefs[1] == backend.briefs[2] == "working tree"
+    assert run_ok(["git", "rev-parse", "foreman/g1"], origin).out.strip() == commit
+    assert log.done() == {"g1"}
+    assert log.kept("g1-review-diff-reviewer") == "FINDINGS 0\n"
+    log.kept("g1-review-diff-reviewer-answer-1")
+    assert _mismatch_kinds(cfg) == ["refused"]
+    assert _no_ruling(cfg)
+
+
+@pytest.mark.parametrize("refusal", REVIEW_REFUSALS)
+def test_review_rerun_findings_are_acted_on_not_landed_past(
+    green_cfg, origin, log, fake_backend, capsys, refusal
+):
+    cfg = _reviewed(green_cfg)
+    g = make_group(make_step("s1", ["a.py"]))
+    backend = fake_backend(
+        [{"a.py": "1"}], ["", refusal, "FINDINGS 1\n  a.py:1 wrong\n"]
+    )
+    stopped, _ = _stopped_by(lambda: loop.run_group(cfg, g, log, backend))
+    assert isinstance(stopped, FindingsToRule), type(stopped).__name__
+    assert backend.agents == ["core-builder", "diff-reviewer", "diff-reviewer"]
+    assert "a.py:1 wrong" in log.kept("g1-review-diff-reviewer")
+    assert not log.done()
+    assert run_ok(["git", "branch", "--list", "foreman/g1"], origin).out == ""
+    assert _mismatch_kinds(cfg) == ["refused"]
+    assert "[findings] g1:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("refusal", REVIEW_REFUSALS)
+def test_review_refused_past_answer_rounds_stops_without_landing(
+    green_cfg, origin, log, fake_backend, refusal
+):
+    cfg = replace(_reviewed(green_cfg), answer_rounds=1)
+    g = make_group(make_step("s1", ["a.py"]))
+    backend = fake_backend([{"a.py": "1"}], ["", refusal, refusal])
+    stopped, _ = _stopped_by(lambda: loop.run_group(cfg, g, log, backend))
+    assert backend.agents == ["core-builder", "diff-reviewer", "diff-reviewer"]
+    assert isinstance(stopped, RulingNeeded), type(stopped).__name__
+    wt = git.worktree(cfg, "g1")
+    assert str(wt) in str(stopped)
+    assert str(cfg.state_dir / "g1-review-diff-reviewer.txt") in str(stopped)
+    assert wt.exists()
+    assert not log.done()
+    assert run_ok(["git", "branch", "--list", "foreman/g1"], origin).out == ""
+    assert _mismatch_kinds(cfg) == ["refused", "refused"]
+    with pytest.raises(ConfigError):
+        log.kept("g1-review-diff-reviewer-answer-2")
+
+
+def test_review_answer_rounds_count_across_restarts(
+    green_cfg, origin, log, fake_backend
+):
+    cfg = replace(_reviewed(green_cfg), answer_rounds=1)
+    log.keep("g1-review-diff-reviewer-answer-1", "")
+    g = make_group(make_step("s1", ["a.py"]))
+    backend = fake_backend([{"a.py": "1"}], ["", "OVERLOADED: 6 files"])
+    stopped, _ = _stopped_by(lambda: loop.run_group(cfg, g, EventLog(cfg), backend))
+    assert isinstance(stopped, RulingNeeded), type(stopped).__name__
+    assert backend.agents == ["core-builder", "diff-reviewer"]
+    assert _mismatch_kinds(cfg) == ["refused"]
+    assert not log.done()
+
+
+def test_refused_review_after_upheld_fixes_is_dispatched_again_then_lands(
+    green_cfg, origin, log, fake_backend
+):
+    cfg = _stopped_for_findings(green_cfg, log, fake_backend)
+    g = make_group(make_step("s1", ["gauntlet/core/a.py"]))
+    line = "misplaced | gauntlet/core/a.py:1 | wrong | fails when: called"
+    backend = fake_backend(
+        [{"gauntlet/core/a.py": "2"}],
+        ["", "REJECTED: STEERING extra fields", "FINDINGS 0\n"],
+    )
+    stopped, commit = _stopped_by(
+        lambda: loop.run_upheld(cfg, g, line + "\n", log, backend)
+    )
+    assert stopped is None, type(stopped).__name__
+    assert backend.agents == ["core-builder", "diff-reviewer", "diff-reviewer"]
+    assert backend.briefs[1] == backend.briefs[2]
+    assert run_ok(["git", "rev-parse", "foreman/g1"], origin).out.strip() == commit
+    assert log.done() == {"g1"}
+    assert _mismatch_kinds(cfg) == ["refused"]
