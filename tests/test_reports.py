@@ -608,3 +608,82 @@ def test_red_refuses_two_blocks() -> None:
 def test_red_refuses_no_block(text: str) -> None:
     with pytest.raises(ConfigError, match="red report"):
         reports.red(text)
+
+
+HIER = "tests/test_errors.py::test_hierarchy"
+HIER_LINE = f"FAILED {HIER} - NotImplementedError"
+HIER_RED = f'RUN red | {HIER} | not-implemented | "{HIER_LINE}"'
+
+
+@pytest.mark.parametrize("phase", ["before", "after"])
+@pytest.mark.parametrize("outcome", ["passed", "assertion", "collection", ""])
+def test_red_accepts_before_and_after_records_without_counting_them(
+    phase: str, outcome: str
+) -> None:
+    extra = f'RUN {phase} | {HIER} | {outcome} | "{HIER_LINE}"'
+    text = RED_REPORT.replace("BLOCKED none", extra + "\nBLOCKED none")
+    assert reports.red(text) == reports.red(RED_REPORT)
+
+
+@pytest.mark.parametrize("phase", ["red", "rerun"])
+@pytest.mark.parametrize("gap", [" ", "  "])
+def test_red_accepts_left_out_outcome_but_never_as_evidence(
+    phase: str, gap: str
+) -> None:
+    old = next(
+        line
+        for line in RED_REPORT.splitlines()
+        if line.startswith(f"RUN {phase} | " + HIER)
+    )
+    left_out = f'RUN {phase} | {HIER} |{gap}| "{HIER_LINE}"'
+    with pytest.raises(ConfigError, match="missing or unstable") as info:
+        reports.red(RED_REPORT.replace(old, left_out))
+    assert HIER in str(info.value)
+
+
+def test_red_before_record_cannot_stand_in_for_red_evidence() -> None:
+    text = RED_REPORT.replace(f"RUN red | {HIER}", f"RUN before | {HIER}")
+    with pytest.raises(ConfigError, match="missing or unstable"):
+        reports.red(text)
+
+
+def test_red_refuses_other_phases() -> None:
+    record = f'RUN during | {HIER} | not-implemented | "{HIER_LINE}"'
+    text = RED_REPORT.replace("BLOCKED none", record + "\nBLOCKED none")
+    with pytest.raises(ConfigError, match="malformed RUN") as info:
+        reports.red(text)
+    assert record in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("record", "rule"),
+    [
+        ("BEHAVIOR 3 | tests/test_x.py::test_x | docs: d", "malformed BEHAVIOR"),
+        (
+            "BEHAVIOR 0 | tests/test_x.py::test_x | docs: d | breaks when: b",
+            "malformed BEHAVIOR",
+        ),
+        ("BEHAVIOR 3 | not-a-test | docs: d | breaks when: b", "test id"),
+        (f'RUN red | {HIER} | "{HIER_LINE}"', "malformed RUN"),
+        (f'RUN red | {HIER} | exploded | "{HIER_LINE}"', "unknown RUN outcome"),
+        (f'RUN before | {HIER} | exploded | "{HIER_LINE}"', "unknown RUN outcome"),
+        ('RUN red | not-a-test | assertion | "x"', "test id"),
+        (f"RUN red | {HIER} | assertion | unquoted", "malformed RUN"),
+    ],
+)
+def test_red_rejections_name_the_record_and_the_rule(record: str, rule: str) -> None:
+    text = RED_REPORT.replace("BLOCKED none", record + "\nBLOCKED none")
+    with pytest.raises(ConfigError, match=rule) as info:
+        reports.red(text)
+    assert record in str(info.value)
+
+
+@pytest.mark.parametrize("prefix", ["BEHAVIOR 1", "RUN red", "RUN rerun", "RUN before"])
+def test_red_duplicate_rejection_names_the_record(prefix: str) -> None:
+    base = RED_REPORT.replace(
+        "BLOCKED none", f'RUN before | {HIER} | passed | "PASSED {HIER}"\nBLOCKED none'
+    )
+    record = next(line for line in base.splitlines() if line.startswith(prefix))
+    with pytest.raises(ConfigError, match="duplicate") as info:
+        reports.red(base.replace(record, record + "\n" + record))
+    assert record in str(info.value)

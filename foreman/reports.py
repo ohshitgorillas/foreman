@@ -132,6 +132,29 @@ def _red_reason(phase: str, test_id: str, run: RedRun) -> None:
         )
 
 
+_RUN = re.compile(r'RUN (red|rerun|before|after) \| (.+?) \|(?: ([\w-]*))? \| "(.+)"')
+_OUTCOMES = {
+    "assertion",
+    "not-implemented",
+    "not-raised",
+    "collection",
+    "test-error",
+    "passed",
+    "no-run",
+}
+
+
+def _refuse(line: str, rule: str) -> ConfigError:
+    return ConfigError(f"red report: {rule}; record: {line}")
+
+
+def _check_id(test_id: str, line: str) -> None:
+    try:
+        forms._test_id(test_id, "red report")
+    except ConfigError as exc:
+        raise _refuse(line, f"invalid test id ({exc})") from exc
+
+
 def red(text: str) -> tuple[RedEvidence, ...]:
     """Read complete red evidence in BEHAVIOR order; fail closed on ambiguity.
 
@@ -191,32 +214,31 @@ def red(text: str) -> tuple[RedEvidence, ...]:
                 line,
             )
             if not match:
-                raise ConfigError("red report: malformed BEHAVIOR record")
+                raise _refuse(
+                    line,
+                    "malformed BEHAVIOR; needs BEHAVIOR <n> | <test id> |"
+                    " docs: <docs> | breaks when: <why>",
+                )
             number, test_id, _, _ = match.groups()
-            forms._test_id(test_id, "red report BEHAVIOR")
+            _check_id(test_id, line)
             if test_id in behaviors:
-                raise ConfigError(f"red report: duplicate BEHAVIOR {test_id}")
+                raise _refuse(line, f"duplicate BEHAVIOR {test_id}")
             behaviors[test_id] = int(number)
         elif key == "RUN":
-            match = re.fullmatch(
-                r'RUN (red|rerun) \| (.+?) \| ([\w-]+) \| "(.+)"', line
-            )
+            match = _RUN.fullmatch(line)
             if not match:
-                raise ConfigError("red report: malformed RUN record")
+                raise _refuse(
+                    line,
+                    "malformed RUN; needs RUN <red|rerun|before|after> |"
+                    ' <test id> | <outcome, may be empty> | "<summary>"',
+                )
             phase, test_id, outcome, summary = match.groups()
-            forms._test_id(test_id, "red report RUN")
-            if outcome not in {
-                "assertion",
-                "not-implemented",
-                "not-raised",
-                "collection",
-                "test-error",
-                "passed",
-                "no-run",
-            }:
-                raise ConfigError("red report: unknown RUN outcome")
+            outcome = outcome or ""
+            _check_id(test_id, line)
+            if outcome and outcome not in _OUTCOMES:
+                raise _refuse(line, f"unknown RUN outcome {outcome!r}")
             if (phase, test_id) in runs:
-                raise ConfigError(f"red report: duplicate RUN {phase} {test_id}")
+                raise _refuse(line, f"duplicate RUN {phase} {test_id}")
             runs[phase, test_id] = RedRun(outcome, summary)
     if not behaviors:
         raise ConfigError("red report: no new test evidence")
