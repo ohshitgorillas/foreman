@@ -84,7 +84,7 @@ text = "exhaustion raises RepliesExhaustedError carrying that identity verbatim 
 source = "gauntlet/seams/process.py"
 
 [[steps.5.form.behaviors]]
-text = "No fake invents, derives or defaults an identity (`docs/testing.md:39`)."
+text = "No fake invents or derives an identity (`docs/testing.md:39`)."
 source = "gauntlet/seams/process.py"
 
 [steps.7]
