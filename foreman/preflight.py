@@ -704,8 +704,8 @@ def main(argv: list[str] | None = None) -> int:
 
         checks += (judge.check_observable, judge.check_rules)
     try:
-        groups = steps.load(args.queue)
         cfg = config.load(args.config)
+        groups = steps.load(args.queue, cfg.builders, cfg.spec_dir)
         findings = preflight(groups, cfg, args.start, checks)
     except ConfigError as e:
         print(f"preflight: {e}", file=sys.stderr)

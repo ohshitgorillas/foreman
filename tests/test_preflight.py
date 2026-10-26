@@ -783,3 +783,36 @@ def test_judge_flag_adds_the_agent_checks(
     assert asked == []
     assert preflight.main([str(q), "--config", str(conf_file), "--judge"]) == 0
     assert asked
+
+
+def test_roles_and_spec_folder_come_from_the_config_file(
+    cfg: Config, repo: Path, tmp_path: Path, capsys, user_agents
+):
+    home_roles(user_agents, "backend")
+    conf = tmp_path / "hqptuner.toml"
+    conf.write_text(
+        "".join(
+            f"{key} = {json.dumps(str(v) if isinstance(v, Path) else v)}\n"
+            for key, v in vars(cfg).items()
+            if key not in ("reviewers", "builders", "spec_dir")
+        )
+        + 'spec_dir = "docs/specs/"\n'
+        + '[builders]\nbackend = ["hqptuner/"]\n'
+    )
+    q = tmp_path / "hqptuner-queue.toml"
+    q.write_text(
+        """\
+[groups.g1]
+steps = ["api-stub"]
+design = "docs/specs/tuner.md"
+[steps.api-stub]
+role = "backend"
+shape = "stub"
+paths = ["hqptuner/api.py"]
+form = { step = "Approved api stub" }
+"""
+    )
+    code = preflight.main([str(q), "--config", str(conf)])
+    err = capsys.readouterr().err
+    assert "unsupported role" not in err and "outside" not in err, err
+    assert code in (0, 1), err
