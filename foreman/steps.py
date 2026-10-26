@@ -2,6 +2,7 @@
 
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,7 +84,13 @@ def _str(where: str, key: str, value: object) -> str:
     return value
 
 
-def _step(path: Path, step_id: str, raw: object) -> Step:
+def _step(
+    path: Path,
+    step_id: str,
+    raw: object,
+    builders: Mapping[str, tuple[str, ...]],
+    spec_dir: str,
+) -> Step:
     where = f"{path}: steps.{step_id}"
     if isinstance(raw, dict) and "brief" in raw:
         raise ConfigError(
@@ -101,7 +108,14 @@ def _step(path: Path, step_id: str, raw: object) -> Step:
     return Step(
         id=step_id,
         role=_str(where, "role", t["role"]),
-        form=forms.parse(t["role"], t["shape"], t["form"], where=f"{where}.form"),
+        form=forms.parse(
+            t["role"],
+            t["shape"],
+            t["form"],
+            where=f"{where}.form",
+            builders=builders,
+            spec_dir=spec_dir,
+        ),
         paths=_str_list(where, "paths", t["paths"]),
         check=_str_list(where, "check", t.get("check", [])),
         expect_code=code,
@@ -109,7 +123,11 @@ def _step(path: Path, step_id: str, raw: object) -> Step:
     )
 
 
-def load(path: Path) -> list[Group]:
+def load(
+    path: Path,
+    builders: Mapping[str, tuple[str, ...]] = forms.GAUNTLET_BUILDERS,
+    spec_dir: str = forms.GAUNTLET_SPEC_DIR,
+) -> list[Group]:
     try:
         with open(path, "rb") as f:
             data = tomllib.load(f)
@@ -128,7 +146,10 @@ def load(path: Path) -> list[Group]:
     if not isinstance(step_tables, dict) or not step_tables:
         raise ConfigError(f"{path}: no [steps.<id>] tables")
 
-    steps = {sid: _step(path, sid, raw) for sid, raw in step_tables.items()}
+    steps = {
+        sid: _step(path, sid, raw, builders, spec_dir)
+        for sid, raw in step_tables.items()
+    }
     groups: list[Group] = []
     for gid, raw in group_tables.items():
         where = f"{path}: groups.{gid}"
@@ -146,7 +167,11 @@ def load(path: Path) -> list[Group]:
         parsed_reviews = {}
         for role, value in reviews.items():
             parsed_reviews[role] = forms.parse(
-                role, "review", value, where=f"{where}.reviews.{role}"
+                role,
+                "review",
+                value,
+                where=f"{where}.reviews.{role}",
+                spec_dir=spec_dir,
             )
         groups.append(
             Group(
@@ -161,13 +186,17 @@ def load(path: Path) -> list[Group]:
     orphans = [sid for sid in steps if sid not in grouped]
     if orphans:
         raise ConfigError(f"{path}: steps in no group: {', '.join(orphans)}")
-    problems = lint(groups)
+    problems = lint(groups, builders, spec_dir)
     if problems:
         raise ConfigError(f"{path}: " + "\n".join(problems))
     return groups
 
 
-def lint(groups: list[Group]) -> list[str]:
+def lint(
+    groups: list[Group],
+    builders: Mapping[str, tuple[str, ...]] = forms.GAUNTLET_BUILDERS,
+    spec_dir: str = forms.GAUNTLET_SPEC_DIR,
+) -> list[str]:
     """Return the problems found; an empty list means clean."""
     problems: list[str] = []
     gids = [g.id for g in groups]
@@ -190,7 +219,9 @@ def lint(groups: list[Group]) -> list[str]:
                 problems.append(f"steps.{s.id}.role: does not match form role")
             problems.extend(
                 f"steps.{s.id}.{p}"
-                for p in forms.validate_step(s.form, s.paths, s.views)
+                for p in forms.validate_step(
+                    s.form, s.paths, s.views, builders, spec_dir
+                )
             )
             if not isinstance(s.check, list) or not all(
                 isinstance(arg, str) and arg and "\0" not in arg for arg in s.check
@@ -202,7 +233,7 @@ def lint(groups: list[Group]) -> list[str]:
                 problems.append(f"steps.{s.id}.expect_code: must be an integer")
         if not g.steps:
             problems.append(f"groups.{g.id}.steps: must be nonempty")
-        problems.extend(forms.validate_group(g))
+        problems.extend(forms.validate_group(g, spec_dir))
     for g in groups:
         for s in g.steps:
             for v in s.views:

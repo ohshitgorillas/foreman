@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from foreman import backends, cli, events, loop, preflight
+from foreman import backends, cli, config, events, loop, preflight
 from foreman.cli import main
 from foreman.config import Config
-from foreman.errors import PreflightFailed, WrongTest
+from foreman.errors import ConfigError, PreflightFailed, WrongTest
 from foreman.run import run_ok
 
 GROUP_FILE = (
@@ -583,3 +583,111 @@ def test_watch_script_pings_once_pid_is_gone(stub_ping, written, message) -> Non
     )
     assert stub_ping.pinged.read_text() == f"foreman:m2\n{message}\n"
     assert not status.exists()
+
+
+# An HQPTuner foreman.toml: its own builder roles and spec folder.
+HQPTUNER_CONFIG = """\
+target_repo = "/work/hqptuner"
+worktree_root = "/work/wt"
+check_cmd = ["make", "check"]
+format_cmd = ["ruff", "format"]
+backend = "claude-local"
+state_dir = "/work/state"
+view_cmd = ["uv", "run", "stubgen"]
+view_root = "/work/views"
+batch_budget = 300
+dispatch_seconds = 600
+spec_dir = "docs/specs/"
+
+[[reviewers]]
+role = "test-reviewer"
+paths = ["tests/"]
+
+[builders]
+backend = ["hqptuner/backend/", "hqptuner/__init__.py"]
+frontend = ["hqptuner/frontend/"]
+"""
+
+HQPTUNER_QUEUE = """\
+[groups.g1]
+steps = ["api-stub", "red", "api-build", "ui-stub", "init-stub"]
+design = "docs/specs/tuner.md"
+[groups.g1.reviews.test-reviewer]
+scope = "working-tree"
+specs = ["docs/specs/tuner.md"]
+[steps.api-stub]
+role = "backend"
+shape = "stub"
+paths = ["hqptuner/backend/api.py"]
+form = { step = "Approved api stub" }
+[steps.red]
+role = "test-writer"
+shape = "red"
+paths = ["tests/test_api.py"]
+views = ["hqptuner/backend/api.py"]
+expect_code = 1
+form = { behaviors = [{text = "Reads the filter", source = "hqptuner/backend/api.py"}], origin = { design = "docs/specs/tuner.md", steps = ["1"] } }
+[steps.api-build]
+role = "backend"
+shape = "build"
+paths = ["hqptuner/backend/api.py"]
+form = { step = "Approved api build", red = [{ step = "red" }] }
+[steps.ui-stub]
+role = "frontend"
+shape = "stub"
+paths = ["hqptuner/frontend/app.py"]
+form = { step = "Approved ui stub" }
+[steps.init-stub]
+role = "backend"
+shape = "stub"
+paths = ["hqptuner/__init__.py"]
+form = { step = "Approved package stub" }
+"""
+
+
+def _hqptuner(tmp_path: Path, queue: str) -> tuple[Config, Path]:
+    conf = tmp_path / "foreman.toml"
+    conf.write_text(HQPTUNER_CONFIG)
+    queue_file = tmp_path / "hqptuner.toml"
+    queue_file.write_text(queue)
+    return config.load(conf), queue_file
+
+
+def test_hqptuner_queue_loads_through_config(tmp_path: Path) -> None:
+    cfg, queue_file = _hqptuner(tmp_path, HQPTUNER_QUEUE)
+    (group,) = cli._load(queue_file, cfg)
+    assert [(s.role, s.paths) for s in group.steps if s.role != "test-writer"] == [
+        ("backend", ["hqptuner/backend/api.py"]),
+        ("backend", ["hqptuner/backend/api.py"]),
+        ("frontend", ["hqptuner/frontend/app.py"]),
+        ("backend", ["hqptuner/__init__.py"]),
+    ]
+    assert group.reviews["test-reviewer"].specs == ("docs/specs/tuner.md",)
+
+
+def test_hqptuner_step_outside_its_role_writes_is_refused(tmp_path: Path) -> None:
+    queue = HQPTUNER_QUEUE.replace(
+        'paths = ["hqptuner/frontend/app.py"]', 'paths = ["hqptuner/backend/app.py"]'
+    )
+    cfg, queue_file = _hqptuner(tmp_path, queue)
+    with pytest.raises(ConfigError, match="ui-stub"):
+        cli._load(queue_file, cfg)
+
+
+def test_hqptuner_single_file_write_does_not_cover_siblings(tmp_path: Path) -> None:
+    queue = HQPTUNER_QUEUE.replace(
+        'paths = ["hqptuner/__init__.py"]', 'paths = ["hqptuner/other.py"]'
+    )
+    cfg, queue_file = _hqptuner(tmp_path, queue)
+    with pytest.raises(ConfigError, match="init-stub"):
+        cli._load(queue_file, cfg)
+
+
+def test_hqptuner_spec_outside_spec_dir_is_refused(tmp_path: Path) -> None:
+    queue = HQPTUNER_QUEUE.replace(
+        'specs = ["docs/specs/tuner.md"]',
+        'specs = ["docs/superpowers/specs/tuner.md"]',
+    )
+    cfg, queue_file = _hqptuner(tmp_path, queue)
+    with pytest.raises(ConfigError, match="specs"):
+        cli._load(queue_file, cfg)

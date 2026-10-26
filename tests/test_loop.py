@@ -2594,3 +2594,102 @@ def test_wrong_test_in_first_part_judges_only_the_parts_that_ran(
     judgment = json.loads(log.kept("g1-r1-judgment"))
     assert judgment["reports"] == [str(cfg.state_dir / "g1-r1-part-1.txt")]
     assert log.kept("g1-r1-part-2") == ""
+
+
+def _hqptuner(cfg: Config, **fields: object) -> Config:
+    """cfg naming HQPTuner's own builder and spec folder instead of Gauntlet's."""
+    return replace(
+        cfg, builders={"backend": ("hqptuner/",)}, spec_dir="specs/", **fields
+    )
+
+
+def _backend_step(sid: str = "s1", **fields: object):
+    return make_step(
+        sid,
+        ["hqptuner/a.py"],
+        role="backend",
+        form=forms.Stub("backend", f"Approved step {sid}"),
+        **fields,
+    )
+
+
+def test_upheld_fix_goes_to_a_configured_builder_inside_its_own_folder(
+    green_cfg, origin, log, fake_backend
+):
+    cfg = _hqptuner(green_cfg, reviewers=[Reviewer("diff-reviewer", ["hqptuner"])])
+    g = make_group(_backend_step(), design="specs/approved.md")
+    wt = git.make_worktree(cfg, g.id)
+    (wt / "hqptuner").mkdir()
+    (wt / "hqptuner/a.py").write_text("value = 1\n")
+    line = "misplaced | hqptuner/a.py:1 | wrong | fails when: called"
+    log.keep("g1-review-queue", json.dumps(asdict(g), sort_keys=True))
+    log.keep("g1-review-diff-reviewer", f"FINDINGS 1\n  {line}\n")
+    backend = fake_backend([{"hqptuner/a.py": "value = 2\n"}], ["", "FINDINGS 0\n"])
+    commit = loop.run_upheld(cfg, g, line, log, backend)
+    assert backend.agents == ["backend", "diff-reviewer"]
+    assert backend.briefs[0] == line
+    assert run_ok(["git", "show", f"{commit}:hqptuner/a.py"], origin).out == (
+        "value = 2\n"
+    )
+    assert log.done() == {"g1"}
+
+
+@pytest.mark.parametrize("role", ["diff-reviewer", "test-reviewer"])
+def test_default_review_of_a_configured_builder_group_lands(
+    green_cfg, origin, log, fake_backend, role
+):
+    cfg = _hqptuner(green_cfg, reviewers=[Reviewer(role, ["hqptuner"])])
+    g = make_group(_backend_step(), design="specs/approved.md")
+    backend = fake_backend([{"hqptuner/a.py": "1"}], ["", "FINDINGS 0\n"])
+    loop.run_group(cfg, g, log, backend)
+    assert backend.agents == ["backend", role]
+    assert backend.briefs[1] == "working tree"
+    assert log.done() == {"g1"}
+
+
+def test_failing_configured_builder_step_reaches_juror_with_configured_spec(
+    green_cfg, log, fake_backend
+):
+    cfg = _hqptuner(green_cfg)
+    g = make_group(_backend_step(check=["false"]), design="specs/approved.md")
+    backend = fake_backend(
+        [{"hqptuner/a.py": "1"}], ["", _undetermined("hqptuner/a.py:1")]
+    )
+    with pytest.raises(WrongTest, match="Need owner evidence"):
+        loop.run_group(cfg, g, log, backend)
+    assert backend.agents == ["backend", "juror"]
+    assert json.loads(log.kept("g1-s1-judgment"))["spec"] == "specs/approved.md"
+    assert not log.done()
+
+
+def test_retest_accepts_a_kept_judgment_of_the_configured_spec(
+    green_cfg, log, fake_backend
+):
+    cfg = _hqptuner(green_cfg)
+    g = make_group(_backend_step(), design="specs/approved.md")
+    wt = git.make_worktree(cfg, g.id)
+    judgment = forms.Judgment(
+        "specs/approved.md",
+        ("s1",),
+        "Approved step s1",
+        (),
+        (str(log.keep("g1-check", "hqptuner/a.py:1 bad\n")),),
+    )
+    log.keep(
+        "g1-pending-judgment",
+        json.dumps(
+            {
+                "context": "group-check",
+                "queue": json.dumps(asdict(g), sort_keys=True),
+                "completed": True,
+                "judgment": asdict(judgment),
+            }
+        ),
+    )
+    log.keep("g1-owner-judgment", json.dumps(asdict(judgment)))
+    backend = fake_backend()
+    with pytest.raises(WrongTest, match="Need owner evidence"):
+        loop.run_retest(cfg, g, _undetermined("README.md:1"), log, backend)
+    assert backend.briefs == []
+    assert wt.exists()
+    assert not log.done()

@@ -1,9 +1,10 @@
 """Loads foreman.toml once into a frozen value."""
 
 import tomllib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+from foreman import forms
 from foreman.errors import ConfigError
 
 
@@ -29,6 +30,11 @@ class Config:
     juror_rounds: int = 2  # attempts per failing step or group-check context
     page_chars: int = 3000  # 7.1f "about a page": characters of a rendered brief
     red_behaviors: int = 6  # 7.1f dispatch cap: behaviors per red brief
+    # builder role -> folders (ending "/") and single files it may write
+    builders: dict[str, tuple[str, ...]] = field(
+        default_factory=lambda: dict(forms.GAUNTLET_BUILDERS)
+    )
+    spec_dir: str = forms.GAUNTLET_SPEC_DIR  # folder holding the approved specs
 
 
 _PATHS = ("target_repo", "worktree_root", "state_dir", "view_root")
@@ -78,6 +84,33 @@ def _reviewers(value: object, *, where: str) -> list[Reviewer]:
     return out
 
 
+def _builders(value: object, *, where: str) -> dict[str, tuple[str, ...]]:
+    if not isinstance(value, dict) or not value:
+        raise ConfigError(f"{where} must be a nonempty [builders] table")
+    out: dict[str, tuple[str, ...]] = {}
+    for role, writes in value.items():
+        entry = f"{where}.{role}"
+        if not role or role != role.strip() or any(c.isspace() for c in role):
+            raise ConfigError(f"{entry}: role must be a name without whitespace")
+        if role in forms.FIXED_ROLES:
+            raise ConfigError(f"{entry}: {role} is not a builder role")
+        if not isinstance(writes, list) or not writes:
+            raise ConfigError(f"{entry} must be a nonempty list of paths")
+        paths = tuple(
+            forms.write_path(w, f"{entry}[{i}]") for i, w in enumerate(writes)
+        )
+        if len(set(paths)) != len(paths):
+            raise ConfigError(f"{entry}: duplicate paths")
+        out[role] = paths
+    return out
+
+
+def _spec_dir(value: object, *, where: str) -> str:
+    if not isinstance(value, str) or not value.endswith("/"):
+        raise ConfigError(f"{where} must be a folder path ending '/'")
+    return forms.write_path(value, where)
+
+
 def load(path: Path) -> Config:
     try:
         with open(path, "rb") as f:
@@ -91,7 +124,8 @@ def load(path: Path) -> Config:
     missing = [k for k in required if k not in data]
     if missing:
         raise ConfigError(f"{path}: missing keys: {', '.join(missing)}")
-    unknown = sorted(set(data) - set(required) - {"reviewers", *_OPTIONAL_INTS})
+    optional = {"reviewers", "builders", "spec_dir", *_OPTIONAL_INTS}
+    unknown = sorted(set(data) - set(required) - optional)
     if unknown:
         raise ConfigError(f"{path}: unknown keys: {', '.join(unknown)}")
 
@@ -113,4 +147,8 @@ def load(path: Path) -> Config:
     values["reviewers"] = _reviewers(
         data.get("reviewers", []), where=f"{path}: reviewers"
     )
+    if "builders" in data:
+        values["builders"] = _builders(data["builders"], where=f"{path}: builders")
+    if "spec_dir" in data:
+        values["spec_dir"] = _spec_dir(data["spec_dir"], where=f"{path}: spec_dir")
     return Config(**values)  # type: ignore[arg-type]

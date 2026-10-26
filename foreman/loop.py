@@ -17,7 +17,7 @@ from foreman import (
     views,
 )
 from foreman.backends import Backend
-from foreman.config import Config, Reviewer
+from foreman.config import Config
 from foreman.errors import (
     BackendError,
     ConfigError,
@@ -348,7 +348,7 @@ def _step(
                 f"step {step.id} red output outside declared paths: {', '.join(outside)}",
             )
     if report.test_wrong:
-        judgment = _judgment(group, index, wt, log)
+        judgment = _judgment(group, index, wt, log, spec_dir=cfg.spec_dir)
         _judge(cfg, group, step.id, judgment, wt, log, backend)
         return
     if not _check_step(cfg, group, index, wt, log, backend):
@@ -380,7 +380,9 @@ def _check_step(
         if verdict.result.code == TIMEOUT_CODE:
             raise _rule(log, group, wt, str(path), f"step {step.id} check timed out")
         if not verdict.green:
-            judgment = _judgment(group, index, wt, log, failure=str(path))
+            judgment = _judgment(
+                group, index, wt, log, failure=str(path), spec_dir=cfg.spec_dir
+            )
             _judge(cfg, group, step.id, judgment, wt, log, backend, completed=completed)
             return False
     return True
@@ -393,6 +395,7 @@ def _judgment(
     log: EventLog,
     *,
     failure: str | None = None,
+    spec_dir: str = forms.GAUNTLET_SPEC_DIR,
 ) -> forms.Judgment:
     """Resolve a failed step or completed group through the same evidence path."""
     if index is None:
@@ -445,7 +448,7 @@ def _judgment(
             tuple(red_ids),
             tuple(paths),
         )
-        problems = forms.validate_judgment(judgment)
+        problems = forms.validate_judgment(judgment, spec_dir=spec_dir)
         if problems:
             raise ConfigError("; ".join(problems))
     except (ConfigError, RulingNeeded) as error:
@@ -749,6 +752,8 @@ def _repair(
         "repair",
         {"sources": producer.views, "failures": list(verdict.failures)},
         where=repair_name,
+        builders=cfg.builders,
+        spec_dir=cfg.spec_dir,
     )
     text = brief.render(form, paths=producer.paths, view_paths=view_paths, red_ids=[])
     before_repair = git.snapshot(wt)
@@ -790,17 +795,19 @@ def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) 
             raise _rule(log, group, wt, str(path), "combined-tree check timed out")
         if verdict.green:
             return
-        judgment = _judgment(group, None, wt, log, failure=str(path))
+        judgment = _judgment(
+            group, None, wt, log, failure=str(path), spec_dir=cfg.spec_dir
+        )
         _judge(cfg, group, "group-check", judgment, wt, log, backend)
 
 
 def _review(
-    group: Group, wt: Path, log: EventLog, backend: Backend, reviewers: list[Reviewer]
+    cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend
 ) -> None:
     log.keep(f"{group.id}-review-queue", _queue_identity(group))
     changed = git.changed_paths(wt)
     kept: list[str] = []
-    for reviewer in reviewers:
+    for reviewer in cfg.reviewers:
         if not any(steps.holds(reviewer.paths, c) for c in changed):
             continue
         name = f"{group.id}-review-{reviewer.role}"
@@ -811,6 +818,8 @@ def _review(
                 "review",
                 {"scope": "working-tree"},
                 where=f"groups.{group.id}.reviews.{reviewer.role}",
+                builders=cfg.builders,
+                spec_dir=cfg.spec_dir,
             )
         text = brief.render(form, paths=[], view_paths={}, red_ids=[])
         log.keep(f"{name}-handled", "")
@@ -874,7 +883,7 @@ def _check_review_land(
     cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend
 ) -> str:
     _gate(cfg, group, wt, log, backend)
-    _review(group, wt, log, backend, cfg.reviewers)
+    _review(cfg, group, wt, log, backend)
     return _land(cfg, group, wt, log)
 
 
@@ -944,6 +953,8 @@ def run_upheld(
                         "lines": list(batch.lines),
                     },
                     where=key,
+                    builders=cfg.builders,
+                    spec_dir=cfg.spec_dir,
                 )
             except ConfigError as error:
                 raise _rule(log, group, wt, name, str(error)) from error
@@ -980,7 +991,7 @@ def run_retest(
             tuple(raw["red_ids"]),
             tuple(raw["reports"]),
         )
-        problems = forms.validate_judgment(judgment)
+        problems = forms.validate_judgment(judgment, spec_dir=cfg.spec_dir)
         if problems:
             raise ValueError("; ".join(problems))
         context = pending["context"]

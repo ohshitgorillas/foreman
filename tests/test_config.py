@@ -235,3 +235,28 @@ def test_conf_file_round_trip(conf_file: Path, green_cfg: Config) -> None:
     assert c == green_cfg
     for key in LIMITS:
         assert type(getattr(c, key)) is int
+
+
+HQPTUNER_BUILDERS = """\
+spec_dir = "docs/specs/"
+
+[builders]
+backend = ["hqptuner/backend/", "hqptuner/__init__.py"]
+frontend = ["hqptuner/frontend/"]
+"""
+
+
+def test_builders_table_and_spec_dir_load(tmp_path: Path) -> None:
+    c = load(_write(tmp_path, GOOD + HQPTUNER_BUILDERS))
+    assert c.target_repo == Path("/work/target")
+
+
+def test_spec_dir_alone_loads(tmp_path: Path) -> None:
+    c = load(_write(tmp_path, GOOD + 'spec_dir = "docs/specs/"\n'))
+    assert c.backend == "claude-local"
+
+
+def test_builders_alone_loads(tmp_path: Path) -> None:
+    text = GOOD + '[builders]\nbackend = ["hqptuner/backend/"]\n'
+    c = load(_write(tmp_path, text))
+    assert c.backend == "claude-local"

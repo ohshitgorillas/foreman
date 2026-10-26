@@ -72,7 +72,12 @@ def conf_file(green_cfg: Config, tmp_path: Path) -> Path:
             )
             + "\n"
             for key, v in vars(green_cfg).items()
-            if key != "reviewers"
+            if key not in ("reviewers", "builders")
+        )
+        + "[builders]\n"
+        + "".join(
+            f"{role} = {json.dumps(list(argv))}\n"
+            for role, argv in green_cfg.builders.items()
         )
     )
     return path

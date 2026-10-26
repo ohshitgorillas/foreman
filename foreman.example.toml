@@ -16,6 +16,9 @@ juror_rounds = 2 # optional; attempts per failing step or group-check context
 page_chars = 3000 # optional
 # Behaviors per red brief (7.1f dispatch cap): an unmeasured starting value.
 red_behaviors = 6 # optional
+# Optional: the folder holding approved specs. Spec paths in a step file
+# (red and port origins, test-reviewer specs) must lie under it.
+spec_dir = "docs/superpowers/specs/" # the default
 
 # Reviewers run in this order after the group check, when the group changed a
 # path equal to or under one of `paths`. Only diff-reviewer and test-reviewer
@@ -27,6 +30,14 @@ paths = ["foreman/", "tests/"]
 [[reviewers]]
 role = "test-reviewer"
 paths = ["tests/"]
+
+# Optional: the target repository's builder roles. Each role maps to the
+# folders (ending "/") and single files its steps may write; a single file
+# covers only itself. Omitting the table means these Gauntlet defaults.
+# test-writer, diff-reviewer and test-reviewer are fixed and cannot be listed.
+[builders]
+core-builder = ["gauntlet/core/", "gauntlet/__init__.py"]
+seam-builder = ["gauntlet/seams/"]
 
 # Review content belongs in the step file, separately from this roster.
 # To request explicit test-reviewer specs for group g1, add there:

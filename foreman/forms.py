@@ -2,13 +2,28 @@
 
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from foreman.steps import Group
 
 from foreman.errors import ConfigError
+
+# Gauntlet's builder roles and what each may write: a folder ends with "/",
+# anything else is one file. foreman.toml's [builders] table replaces them.
+GAUNTLET_BUILDERS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "core-builder": ("gauntlet/core/", "gauntlet/__init__.py"),
+        "seam-builder": ("gauntlet/seams/",),
+    }
+)
+# Gauntlet's spec folder; foreman.toml's spec_dir replaces it.
+GAUNTLET_SPEC_DIR = "docs/superpowers/specs/"
+# Roles whose forms are fixed; a builder role may not reuse one.
+FIXED_ROLES = ("test-writer", "diff-reviewer", "test-reviewer")
 
 
 @dataclass(frozen=True)
@@ -213,6 +228,20 @@ def _path(value: object, where: str, *, suffix: str = "", prefix: str = "") -> s
     return value
 
 
+def write_path(value: object, where: str) -> str:
+    """A repository-relative folder ending "/" or a single file a role may write."""
+    if not isinstance(value, str):
+        raise ConfigError(f"{where} must be a string path")
+    try:
+        _path(value.removesuffix("/"), where)
+    except ConfigError:
+        raise ConfigError(
+            f"{where}: expected a repository-relative folder ending '/' or file,"
+            " without traversal, whitespace or controls"
+        ) from None
+    return value
+
+
 def _array(value: object, where: str, *, empty: bool = False) -> list:
     if not isinstance(value, list) or (not value and not empty):
         raise ConfigError(f"{where}: must be {'an' if empty else 'a nonempty'} array")
@@ -235,14 +264,9 @@ def _sources(value: object, where: str) -> tuple[str, ...]:
     )
 
 
-def _origin(value: object, where: str) -> Origin:
+def _origin(value: object, where: str, spec_dir: str) -> Origin:
     table = _table(value, where, {"design", "steps"})
-    design = _path(
-        table["design"],
-        f"{where}.design",
-        prefix="docs/superpowers/specs/",
-        suffix=".md",
-    )
+    design = _path(table["design"], f"{where}.design", prefix=spec_dir, suffix=".md")
     steps = _distinct(
         tuple(
             _line(v, f"{where}.steps[{i}]")
@@ -272,7 +296,7 @@ def _test_id(value: object, where: str) -> str:
     return value
 
 
-def _red(value: object, where: str) -> Red:
+def _red(value: object, where: str, spec_dir: str) -> Red:
     table = _table(value, where, {"behaviors"}, {"origin"})
     behaviors = []
     for i, raw in enumerate(_array(table["behaviors"], f"{where}.behaviors")):
@@ -291,13 +315,15 @@ def _red(value: object, where: str) -> Red:
     )
     return Red(
         tuple(behaviors),
-        _origin(table["origin"], f"{where}.origin") if "origin" in table else None,
+        _origin(table["origin"], f"{where}.origin", spec_dir)
+        if "origin" in table
+        else None,
     )
 
 
-def _port(value: object, where: str) -> Port:
+def _port(value: object, where: str, spec_dir: str) -> Port:
     table = _table(value, where, {"origin", "sources"})
-    origin = _origin(table["origin"], f"{where}.origin")
+    origin = _origin(table["origin"], f"{where}.origin", spec_dir)
     if len(origin.steps) != 1:
         raise ConfigError(f"{where}.origin.steps: port requires exactly one Order id")
     return Port(origin, _sources(table["sources"], f"{where}.sources"))
@@ -374,17 +400,12 @@ def _block(value: object, where: str) -> str:
     return value
 
 
-def validate_judgment(form: Judgment) -> list[str]:
+def validate_judgment(form: Judgment, spec_dir: str = GAUNTLET_SPEC_DIR) -> list[str]:
     """Validate runtime judgment framing without loading files or queue forms."""
     try:
         if not isinstance(form, Judgment):
             raise ConfigError("judgment: expected a Judgment value")
-        _path(
-            form.spec,
-            "judgment.spec",
-            prefix="docs/superpowers/specs/",
-            suffix=".md",
-        )
+        _path(form.spec, "judgment.spec", prefix=spec_dir, suffix=".md")
         for name in ("steps", "red_ids", "reports"):
             values = getattr(form, name)
             if not isinstance(values, tuple) or (not values and name != "red_ids"):
@@ -410,23 +431,23 @@ def validate_judgment(form: Judgment) -> list[str]:
     return []
 
 
-def _builder_path(value: object, where: str, role: str) -> str:
+def _builder_path(value: object, where: str, role: str, writes: tuple[str, ...]) -> str:
+    """A path the role may write: under one of its folders, or one of its files."""
     path = _path(value, where)
-    prefix = "gauntlet/core/" if role == "core-builder" else "gauntlet/seams/"
-    if not path.startswith(prefix) and not (
-        role == "core-builder" and path == "gauntlet/__init__.py"
-    ):
+    if not any(path.startswith(w) if w.endswith("/") else path == w for w in writes):
         raise ConfigError(f"{where}: path outside {role} writes")
     return path
 
 
-def _exclusions(table: dict, where: str, role: str) -> tuple[str, ...]:
+def _exclusions(
+    table: dict, where: str, role: str, writes: tuple[str, ...]
+) -> tuple[str, ...]:
     if "exclude" not in table:
         return ()
     loc = f"{where}.exclude"
     return _distinct(
         tuple(
-            _builder_path(v, f"{loc}[{i}]", role)
+            _builder_path(v, f"{loc}[{i}]", role, writes)
             for i, v in enumerate(_array(table["exclude"], loc))
         ),
         loc,
@@ -465,7 +486,9 @@ _BUILDER_CATEGORIES = frozenset(
 )
 
 
-def _builder_finding_line(line: str, where: str, role: str) -> None:
+def _builder_finding_line(
+    line: str, where: str, role: str, writes: tuple[str, ...]
+) -> None:
     # Validate the declared form fields, not a report or its incidental citations.
     fields = line.split(" | ")
     if len(fields) != 4:
@@ -474,7 +497,7 @@ def _builder_finding_line(line: str, where: str, role: str) -> None:
     if category not in _BUILDER_CATEGORIES:
         raise ConfigError(f"{where}: unsupported builder finding category")
     path, sep, number = anchor.rpartition(":")
-    _builder_path(path, where, role)
+    _builder_path(path, where, role, writes)
     if not sep or not re.fullmatch(r"[1-9][0-9]*", number):
         raise ConfigError(f"{where}: expected writable path:positive-line")
     _line(defect, where)
@@ -483,7 +506,9 @@ def _builder_finding_line(line: str, where: str, role: str) -> None:
     _line(failure.removeprefix("fails when: "), where)
 
 
-def _builder(role: str, shape: str, value: object, where: str) -> Form:
+def _builder(
+    role: str, shape: str, writes: tuple[str, ...], value: object, where: str
+) -> Form:
     required = {
         "stub": {"step"},
         "build": {"step", "red"},
@@ -491,7 +516,7 @@ def _builder(role: str, shape: str, value: object, where: str) -> Form:
         "finding": {"source", "lines"},
     }[shape]
     table = _table(value, where, required, {"exclude"})
-    exclude = _exclusions(table, where, role)
+    exclude = _exclusions(table, where, role, writes)
     if shape == "stub":
         return Stub(role, _block(table["step"], f"{where}.step"), exclude)
     if shape == "build":
@@ -510,11 +535,13 @@ def _builder(role: str, shape: str, value: object, where: str) -> Form:
     lines = _finding_lines(table["lines"], f"{where}.lines")
     if isinstance(source, ReviewerSource):
         for i, line in enumerate(lines):
-            _builder_finding_line(line, f"{where}.lines[{i}]", role)
+            _builder_finding_line(line, f"{where}.lines[{i}]", role, writes)
     return BuilderFinding(role, source, lines, exclude)
 
 
-def _review(role: str, value: object, where: str) -> DiffReview | TestReview:
+def _review(
+    role: str, value: object, where: str, spec_dir: str
+) -> DiffReview | TestReview:
     optional = {"range", "specs"} if role == "test-reviewer" else {"range"}
     table = _table(value, where, {"scope"}, optional)
     scope = table["scope"]
@@ -544,9 +571,7 @@ def _review(role: str, value: object, where: str) -> DiffReview | TestReview:
         return DiffReview(scope, revision_range)
     specs = _distinct(
         tuple(
-            _path(
-                v, f"{where}.specs[{i}]", prefix="docs/superpowers/specs/", suffix=".md"
-            )
+            _path(v, f"{where}.specs[{i}]", prefix=spec_dir, suffix=".md")
             for i, v in enumerate(
                 _array(table.get("specs", []), f"{where}.specs", empty=True)
             )
@@ -556,40 +581,49 @@ def _review(role: str, value: object, where: str) -> DiffReview | TestReview:
     return TestReview(scope, revision_range, specs)
 
 
-_PARSERS = {
-    ("test-writer", shape): parser
-    for shape, parser in (
-        ("red", _red),
-        ("port", _port),
-        ("repair", _repair),
-        ("moved", _moved),
-        ("finding", _finding),
-    )
-}
+_BUILDER_SHAPES = ("stub", "build", "rewrite", "finding")
 
 
-def _builder_parser(role: str, shape: str):
-    return lambda value, where: _builder(role, shape, value, where)
+def _parser(
+    role: str,
+    shape: str,
+    builders: Mapping[str, tuple[str, ...]],
+    spec_dir: str,
+):
+    """The parser for one role/shape pair, or None when the pair is unsupported."""
+    if role == "test-writer":
+        if shape in ("red", "port"):
+            parse_spec = _red if shape == "red" else _port
+            return lambda value, where: parse_spec(value, where, spec_dir)
+        return {"repair": _repair, "moved": _moved, "finding": _finding}.get(shape)
+    if role in ("diff-reviewer", "test-reviewer"):
+        if shape != "review":
+            return None
+        return lambda value, where: _review(role, value, where, spec_dir)
+    if role in builders and shape in _BUILDER_SHAPES:
+        writes = builders[role]
+        return lambda value, where: _builder(role, shape, writes, value, where)
+    return None
 
 
-for _role in ("core-builder", "seam-builder"):
-    for _shape in ("stub", "build", "rewrite", "finding"):
-        _PARSERS[_role, _shape] = _builder_parser(_role, _shape)
-for _role in ("diff-reviewer", "test-reviewer"):
-    _PARSERS[_role, "review"] = lambda value, where, role=_role: _review(
-        role, value, where
-    )
-
-
-def parse(role: str, shape: str, fields: object, *, where: str) -> Form:
+def parse(
+    role: str,
+    shape: str,
+    fields: object,
+    *,
+    where: str,
+    builders: Mapping[str, tuple[str, ...]] = GAUNTLET_BUILDERS,
+    spec_dir: str = GAUNTLET_SPEC_DIR,
+) -> Form:
     """Parse one closed role/shape pair; errors retain the caller's location."""
-    if (
-        not isinstance(role, str)
-        or not isinstance(shape, str)
-        or (role, shape) not in _PARSERS
-    ):
+    parser = (
+        _parser(role, shape, builders, spec_dir)
+        if isinstance(role, str) and isinstance(shape, str)
+        else None
+    )
+    if parser is None:
         raise ConfigError(f"{where}: unsupported role/shape pair {role!r}/{shape!r}")
-    return _PARSERS[role, shape](fields, where)
+    return parser(fields, where)
 
 
 def _fields(value: object) -> object:
@@ -612,7 +646,13 @@ def _fields(value: object) -> object:
     return value
 
 
-def validate_step(form: Form, paths: list[str], views: list[str]) -> list[str]:
+def validate_step(
+    form: Form,
+    paths: list[str],
+    views: list[str],
+    builders: Mapping[str, tuple[str, ...]] = GAUNTLET_BUILDERS,
+    spec_dir: str = GAUNTLET_SPEC_DIR,
+) -> list[str]:
     """Check structural grammar and the relationship to declared step fields."""
     try:
         if not isinstance(
@@ -620,12 +660,19 @@ def validate_step(form: Form, paths: list[str], views: list[str]) -> list[str]:
             (Red, Port, Repair, Moved, Finding, Stub, Build, Rewrite, BuilderFinding),
         ):
             raise ConfigError("form: expected a writable step form")
-        parse(form.role, form.shape, _fields(form), where="form")
+        parse(
+            form.role,
+            form.shape,
+            _fields(form),
+            where="form",
+            builders=builders,
+            spec_dir=spec_dir,
+        )
         declared = _distinct(
             tuple(
                 _path(p, f"paths[{i}]", prefix="tests/", suffix=".py")
                 if form.role == "test-writer"
-                else _builder_path(p, f"paths[{i}]", form.role)
+                else _builder_path(p, f"paths[{i}]", form.role, builders[form.role])
                 for i, p in enumerate(_array(paths, "paths"))
             ),
             "paths",
@@ -649,7 +696,7 @@ def validate_step(form: Form, paths: list[str], views: list[str]) -> list[str]:
     return []
 
 
-def validate_group(group: "Group") -> list[str]:
+def validate_group(group: "Group", spec_dir: str = GAUNTLET_SPEC_DIR) -> list[str]:
     """Validate form relationships without reading code, views or reports."""
     problems = []
     earlier = {}
@@ -693,7 +740,7 @@ def validate_group(group: "Group") -> list[str]:
         try:
             if not isinstance(review, (DiffReview, TestReview)) or role != review.role:
                 raise ConfigError(f"{loc}: expected matching reviewer form")
-            parse(role, "review", _fields(review), where=loc)
+            parse(role, "review", _fields(review), where=loc, spec_dir=spec_dir)
             if review.scope != "working-tree":
                 raise ConfigError(
                     f"{loc}.scope: automatic group reviews require working-tree"

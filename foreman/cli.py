@@ -57,7 +57,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _load(step_file: Path, cfg: config.Config) -> list[Group]:
-    groups = steps.load(step_file)
+    groups = steps.load(step_file, cfg.builders, cfg.spec_dir)
     configured = {reviewer.role for reviewer in cfg.reviewers}
     for group in groups:
         unknown = set(group.reviews) - configured
