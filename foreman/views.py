@@ -17,7 +17,9 @@ def path(cfg: Config, group_id: str, source: str) -> Path:
 def make(cfg: Config, group_id: str, step: Step, wt: Path) -> Verdict:
     """Run view_cmd for step.views in wt; green when every view exists."""
     out = cfg.view_root / group_id
-    result = run.run([*cfg.view_cmd, "-o", str(out), *step.views], wt)
+    result = run.run(
+        [*cfg.view_cmd, "-o", str(out), *step.views], wt, cfg.check_seconds
+    )
     made = all(path(cfg, group_id, s).is_file() for s in step.views)
     return Verdict(result.code == 0 and made, result)
 

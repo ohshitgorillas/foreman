@@ -1,9 +1,11 @@
 from pathlib import Path
 
+import pytest
 from conftest import make_step
 
-from foreman import forms, views
+from foreman import forms, run, views
 from foreman.config import Config
+from foreman.run import Result
 from foreman.steps import Step
 
 
@@ -33,6 +35,20 @@ def test_make_runs_view_cmd_with_output_dir_and_sources(
     assert calls == [
         (["stubgen", "-o", str(cfg.view_root / "g1"), "a/b.py", "a/c.py"], tmp_path)
     ]
+
+
+def test_make_runs_under_check_seconds(
+    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[float | None] = []
+
+    def fake(cmd, cwd, timeout=None, env=None):
+        seen.append(timeout)
+        return Result(cmd, 0, "", "", 0.0)
+
+    monkeypatch.setattr(run, "run", fake)
+    views.make(cfg, "g1", _step("a/b.py"), tmp_path)
+    assert seen == [cfg.check_seconds]
 
 
 def test_make_green_when_code_zero_and_views_exist(
