@@ -133,8 +133,10 @@ def test_a_hook_exiting_2_on_a_role_command_is_one_finding(
     assert "second line" not in found[0].problem
     assert [r["input"] for r in ran(log)] == [
         {
+            "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": command, "run_in_background": False},
+            "agent_type": "builder",
         }
     ]
 
@@ -349,3 +351,47 @@ def test_a_red_test_placeholder_takes_the_red_test_paths(
         "git add src/y.py",
         "git add src/z.py",
     ]
+
+
+# A fake hook that blocks on the session's agent_type, as
+# ~/.claude/hooks/no-foreground-tests.py lets agent sessions run tests.
+AGENT_HOOK = """\
+import json, sys
+data = json.load(sys.stdin)
+with open({log!r}, "a") as f:
+    f.write(json.dumps({{"name": "agent.py", "cwd": "", "input": data}}) + "\\n")
+agent = data.get("agent_type")
+if agent == {block_on!r}:
+    sys.stderr.write("BLOCKED: agent " + str(agent) + "\\n")
+    sys.exit(2)
+"""
+
+
+def agent_hook(tmp_path: Path, log: Path, block_on: str | None) -> str:
+    """A hook blocking when agent_type is `block_on`, or absent when None."""
+    script = tmp_path / "hooks" / "agent.py"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text(AGENT_HOOK.format(log=str(log), block_on=block_on))
+    return f'"{sys.executable}" -I "{script}" --hook'
+
+
+def test_a_hook_blocking_only_outside_an_agent_session_gives_no_finding(
+    cfg: Config, user, tmp_path: Path, log: Path
+):
+    settings(user[0], entry(agent_hook(tmp_path, log, None)))
+    role_file(cfg, "Run `uv run pytest`.")
+    s = step([])
+    assert check_hooks(s, group(s), cfg) == []
+    assert [r["input"].get("agent_type") for r in ran(log)] == ["builder"]
+
+
+def test_a_hook_blocking_the_steps_role_is_a_finding(
+    cfg: Config, user, tmp_path: Path, log: Path
+):
+    settings(user[0], entry(agent_hook(tmp_path, log, "builder")))
+    role_file(cfg, "Run `uv run pytest`.")
+    s = step([])
+    found = check_hooks(s, group(s), cfg)
+    assert len(found) == 1
+    assert "uv run pytest" in found[0].problem
+    assert "BLOCKED: agent builder" in found[0].problem

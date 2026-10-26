@@ -300,12 +300,24 @@ class HookResult:
     stderr: str  # the first stderr line, or the deny reason when stderr is empty
 
 
-def run_hook(hook: str, command: str, cwd: Path) -> HookResult:
-    """Feed `command` to `hook` as Bash PreToolUse input, in its own process group."""
-    payload = {
+def run_hook(
+    hook: str, command: str, cwd: Path, agent_type: str | None = None
+) -> HookResult:
+    """Feed `command` to `hook` as Bash PreToolUse input, in its own process group.
+
+    The payload mirrors what Claude Code sends. A session started with
+    `claude --agent <role>` also carries `agent_type: <role>`, and hooks may
+    act on it (no-foreground-tests.py lets agent sessions run tests in the
+    foreground), so `agent_type`, when given, is sent too; leaving it out
+    would report blocks the dispatched session never meets.
+    """
+    payload: dict[str, object] = {
+        "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {"command": command, "run_in_background": False},
     }
+    if agent_type is not None:
+        payload["agent_type"] = agent_type
     proc = subprocess.Popen(
         hook,
         shell=True,
@@ -365,10 +377,14 @@ def check_hooks(step: Step, group: Group, cfg: Config) -> list[Finding]:
             hooks += [h for h in bash_hooks(path) if h not in hooks]
         except (OSError, ValueError, AttributeError, TypeError) as e:
             findings.append(found(f"cannot read settings {path}: {e}"))
+    # claude-local dispatches `claude -p --agent <role>`, whose hook input names
+    # the role as agent_type; feed the hooks the same, so a hook that exempts
+    # agent sessions is judged as the dispatched session meets it.
+    agent_type = step.role if cfg.backend == backends.ClaudeLocal.name else None
     with tempfile.TemporaryDirectory(prefix="preflight-hooks-") as cwd:
         for command in dict.fromkeys(commands):
             for hook in hooks:
-                r = run_hook(hook, command, Path(cwd))
+                r = run_hook(hook, command, Path(cwd), agent_type)
                 if r.timed_out:
                     findings.append(
                         found(
