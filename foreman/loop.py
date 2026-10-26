@@ -356,12 +356,33 @@ def _queue_identity(group: Group) -> str:
 
 
 def _steps(
-    cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend, first: int
+    cfg: Config,
+    group: Group,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+    first: int,
+    *,
+    restore: bool = False,
 ) -> None:
+    """Run steps from first; `restore` puts rerun steps back to their kept snapshots."""
     # Invalidate before any views, dispatch or check can fail on a rerun.
     for producer in group.steps[first:]:
         if isinstance(producer.form, forms.Red):
             log.keep(f"{group.id}-{producer.id}-evidence", "")
+    if restore:
+        kept = []
+        for index in range(first, len(group.steps)):
+            try:
+                kept.append(
+                    (index, log.kept(f"{group.id}-{group.steps[index].id}-before"))
+                )
+            except ConfigError:
+                # A step that never started has no snapshot; it runs as the tree is.
+                continue
+        # Latest first, so a path shared with an earlier step ends at its snapshot.
+        for index, snapshot in reversed(kept):
+            git.restore(wt, snapshot, group.steps[index].paths)
     for index in range(first, len(group.steps)):
         _step(cfg, group, index, wt, log, backend)
 
@@ -1152,7 +1173,7 @@ def run_resume(
         ) from error
     backend = backend or backends.get(cfg)
     log.emit("group_started", group.id)
-    _steps(cfg, group, wt, log, backend, first)
+    _steps(cfg, group, wt, log, backend, first, restore=True)
     return _check_review_land(cfg, group, wt, log, backend)
 
 

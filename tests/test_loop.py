@@ -448,6 +448,88 @@ def test_resume_goes_through_review(green_cfg, log, fake_backend) -> None:
     assert (green_cfg.worktree_root / "g1").exists()
 
 
+def _seeing_files(fake_backend, *paths: str):
+    """A FakeBackend class recording each path's content (None if absent) per start."""
+
+    class SeeingFiles(fake_backend):  # type: ignore[valid-type, misc]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.seen: list[dict[str, str | None]] = []
+
+        def start(self, brief, worktree, agent):
+            self.seen.append(
+                {
+                    p: (worktree / p).read_text() if (worktree / p).exists() else None
+                    for p in paths
+                }
+            )
+            return super().start(brief, worktree, agent)
+
+    return SeeingFiles
+
+
+def test_resume_reruns_steps_from_their_kept_before_snapshots(
+    green_cfg, origin, log, fake_backend
+) -> None:
+    g = make_group(
+        make_step("s1", ["a.py"]),
+        make_step("s2", ["b.py", "d.py", "e.py"]),
+        make_step("s3", ["c.py"]),
+    )
+    wt = git.make_worktree(green_cfg, g.id)
+    (wt / "b.py").write_text("b0")
+    (wt / "d.py").write_text("d0")
+    loop._steps(
+        green_cfg,
+        g,
+        wt,
+        log,
+        fake_backend([{"a.py": "1"}, {"b.py": "2"}, {"c.py": "3"}]),
+        0,
+    )
+    # Earlier attempts' leftovers, an earlier step's later work and an outside file.
+    (wt / "a.py").write_text("1-edited")
+    (wt / "b.py").write_text("stale")
+    (wt / "d.py").unlink()
+    (wt / "e.py").write_text("new")
+    (wt / "c.py").write_text("stale3")
+    (wt / "other.txt").write_text("keep")
+    watched = ("a.py", "b.py", "c.py", "d.py", "e.py", "other.txt")
+    backend = _seeing_files(fake_backend, *watched)([{"b.py": "B"}, {"c.py": "C"}])
+    loop.run_resume(green_cfg, g, "s2", EventLog(green_cfg), backend)
+    assert backend.seen == [
+        {
+            "a.py": "1-edited",
+            "b.py": "b0",
+            "c.py": None,
+            "d.py": "d0",
+            "e.py": None,
+            "other.txt": "keep",
+        },
+        {
+            "a.py": "1-edited",
+            "b.py": "B",
+            "c.py": None,
+            "d.py": "d0",
+            "e.py": None,
+            "other.txt": "keep",
+        },
+    ]
+
+
+def test_resume_step_without_kept_snapshot_runs_on_the_tree_as_it_is(
+    green_cfg, origin, log, fake_backend
+) -> None:
+    g = make_group(make_step("s1", ["a.py"]), make_step("s2", ["b.py"]))
+    wt = git.make_worktree(green_cfg, g.id)
+    loop._step(green_cfg, g, 0, wt, log, fake_backend([{"a.py": "1"}]))
+    (wt / "a.py").write_text("1-edited")
+    (wt / "b.py").write_text("partial")
+    backend = _seeing_files(fake_backend, "a.py", "b.py")([{"b.py": "2"}])
+    loop.run_resume(green_cfg, g, "s2", EventLog(green_cfg), backend)
+    assert backend.seen == [{"a.py": "1-edited", "b.py": "partial"}]
+
+
 def test_resume_unknown_step_raises_before_dispatch(
     green_cfg, log, fake_backend
 ) -> None:
