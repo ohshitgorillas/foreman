@@ -1,12 +1,14 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from foreman import forms, judge
+from foreman import forms, judge, preflight
 from foreman.config import Config
 from foreman.errors import ForemanError
 from foreman.judge import check_observable, check_rules
 from foreman.preflight import Finding
+from foreman.run import run_ok
 from foreman.steps import Group, Step
 
 DESIGN = "docs/superpowers/specs/design.md"
@@ -52,11 +54,26 @@ class FakeAsk:
         return self.answer
 
 
+@pytest.fixture(autouse=True)
+def user_agents(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
+    """Point each backend's home agents folder at an empty temporary one."""
+    homes = {
+        "claude-local": tmp_path / "home" / ".claude" / "agents",
+        "codex-local": tmp_path / "home" / ".codex" / "agents",
+    }
+    for home in homes.values():
+        home.mkdir(parents=True)
+    monkeypatch.setattr(preflight, "USER_AGENTS", homes)
+    return homes
+
+
 @pytest.fixture
 def repo(cfg: Config) -> Path:
     write(cfg.target_repo, DESIGN, DESIGN_TEXT)
     write(cfg.target_repo, ".claude/agents/test-writer.md", ROLE_TEXT)
     write(cfg.target_repo, ".claude/agents/builder.md", "---\nname: builder\n---\n")
+    run_ok(["git", "add", "--all"], cfg.target_repo)
+    run_ok(["git", "commit", "-q", "-m", "roles"], cfg.target_repo)
     return cfg.target_repo
 
 
@@ -200,12 +217,57 @@ def test_rules_reject_a_fixer_outside_their_set(cfg: Config, repo: Path, fake):
     assert "unparseable" in f.problem
 
 
-def test_missing_role_file_is_a_finding_without_asking(cfg: Config, repo: Path, fake):
+def test_rules_prompt_names_the_role_file_at_head(cfg: Config, repo: Path, fake):
+    ask = fake("NONE")
+    step = moved("7")
+    check_rules(step, group(step), cfg)
+    [prompt] = ask.prompts
+    assert "Role file .claude/agents/test-writer.md at HEAD:" in prompt
+
+
+def test_rules_read_a_role_in_the_user_agents_folder(
+    cfg: Config, repo: Path, fake, user_agents: dict[str, Path]
+):
+    ask = fake("NONE")
+    path = user_agents["claude-local"] / "test-writer.md"
+    path.write_text("---\nname: test-writer\n---\n\nThe user's own rules.\n")
+    step = moved("7")
+    assert check_rules(step, group(step), cfg) == []
+    [prompt] = ask.prompts
+    assert "The user's own rules." in prompt
+    assert "A moved step edits tests only." not in prompt
+    assert f"Role file {path}:" in prompt
+
+
+def test_rules_read_a_codex_roles_developer_instructions(
+    cfg: Config, repo: Path, fake, user_agents: dict[str, Path]
+):
+    ask = fake("NONE")
+    cfg = replace(cfg, backend="codex-local")
+    path = user_agents["codex-local"] / "test-writer.toml"
+    path.write_text('developer_instructions = "Codex rules: tests only."\n')
+    step = moved("7")
+    assert check_rules(step, group(step), cfg) == []
+    [prompt] = ask.prompts
+    assert "Codex rules: tests only." in prompt
+    assert f"Role file {path}:" in prompt
+
+
+def test_missing_role_is_no_finding_and_no_ask(cfg: Config, repo: Path, fake):
     ask = fake("NONE")
     step = Step("9", "ghost", forms.Stub("ghost", "Stub it"), ["gauntlet/a.py"], [])
-    [f] = check_rules(step, group(step), cfg)
-    assert (f.check, f.fixer) == ("scope", "role author")
-    assert ".claude/agents/ghost.md" in f.problem
+    assert check_rules(step, group(step), cfg) == []
+    assert ask.prompts == []
+
+
+def test_unreadable_role_is_no_finding_and_no_ask(
+    cfg: Config, repo: Path, fake, user_agents: dict[str, Path]
+):
+    ask = fake("NONE")
+    cfg = replace(cfg, backend="codex-local")
+    (user_agents["codex-local"] / "test-writer.toml").write_text("not toml [\n")
+    step = moved("7")
+    assert check_rules(step, group(step), cfg) == []
     assert ask.prompts == []
 
 

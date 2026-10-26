@@ -12,7 +12,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
 
-from foreman import forms
+from foreman import forms, preflight
 from foreman.config import Config
 from foreman.errors import ForemanError
 from foreman.preflight import Finding
@@ -204,21 +204,19 @@ def _form_text(form: object) -> str:
 
 def check_rules(step: Step, group: Group, cfg: Config) -> list[Finding]:
     """Check 3, judgment half: the step's work stays within its role's own rules."""
-    rel = f".claude/agents/{step.role}.md"
+    # The role's instructions where cfg.backend finds them, codex-local's
+    # developer_instructions included; checks 5 and 6 report a missing or
+    # unreadable role file.
+    role = preflight.role_lookup(group, cfg).find(step.role)
+    if role is None:
+        return []
     try:
-        role_text = (cfg.target_repo / rel).read_text()
-    except OSError as e:
-        return [
-            Finding(
-                step.id,
-                "scope",
-                f"cannot read role file {rel}: {e.strerror}",
-                "role author",
-            )
-        ]
+        role_text = role.read()
+    except preflight._UNREADABLE:
+        return []
     prompt = _RULES_PROMPT.format(
         role=step.role,
-        rel=rel,
+        rel=role.name,
         role_text=role_text,
         id=step.id,
         shape=step.form.shape,

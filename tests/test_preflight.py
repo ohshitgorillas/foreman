@@ -730,7 +730,6 @@ def test_judge_flag_adds_the_agent_checks(
 
     asked = []
     monkeypatch.setattr(judge, "ask", lambda p: asked.append(p) or "NONE")
-    role(repo, "seam-builder", "Builds, writing only under `gauntlet/seams/`.")
     q = queue(tmp_path, GOOD, GOOD)
     assert preflight.main([str(q), "--config", str(conf_file)]) == 0
     assert asked == []
