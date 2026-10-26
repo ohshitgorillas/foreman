@@ -7,7 +7,7 @@ backend = "claude-local"
 view_cmd = ["uv", "run", "stubgen"]
 view_root = "~/dev/foreman-views"
 batch_budget = 300
-dispatch_seconds = 600
+dispatch_seconds = 86400 # hang guard only, not an agent cap (owner ruling, 26 Oct: no wall-clock caps on agents)
 
 [[reviewers]]
 role = "diff-reviewer"

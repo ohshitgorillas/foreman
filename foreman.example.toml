@@ -10,7 +10,7 @@ view_root = "~/dev/foreman/views"
 # Enclosing-unit lines per finding batch: an unmeasured starting value.
 # The owner tunes this budget from dispatch records.
 batch_budget = 300
-dispatch_seconds = 600 # ten-minute agent cap
+dispatch_seconds = 86400 # hang guard only, not an agent cap (owner ruling, 26 Oct: no wall-clock caps on agents)
 juror_rounds = 2 # optional; attempts per failing step or group-check context
 # Reruns per step or reviewer for a refused report or rejected red evidence: unmeasured.
 answer_rounds = 2 # optional
