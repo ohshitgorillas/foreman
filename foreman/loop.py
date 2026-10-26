@@ -2,7 +2,7 @@
 
 import json
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from foreman import (
@@ -105,25 +105,71 @@ def _dispatch(
     return report
 
 
-def _refusal_stops(
+def _refused(
     cfg: Config,
     group: Group,
+    index: int,
     wt: Path,
     log: EventLog,
-    name: str,
-    role: str,
+    backend: Backend,
     report: reports.Report,
+    kept: str,
 ) -> None:
-    """Keep the old stop for callers whose Mismatches rows land in later steps."""
-    if report.kind != "done":
+    """The one handler of a step's refused report, per the Refusals table.
+
+    A rejected report stops as `steering`, naming the kept attempt and its lines.
+    An overloaded red part is cut again at half its behaviors: the new counts are
+    written to `<name>-parts` and the caller dispatches the parts from them. Any
+    other overloaded report, a refused one-behavior part and a cut that refuses stop
+    as `overload`. Nothing here asks a juror or reruns the refused brief.
+    """
+    step = group.steps[index]
+    name = f"{group.id}-{step.id}"
+    if report.kind == "rejected":
+        try:
+            quoted = "; ".join(
+                line.strip()
+                for line in Path(kept).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )[:500]
+        except OSError:
+            quoted = ""
         raise _rule(
-            log,
-            group,
-            wt,
-            str(cfg.state_dir / f"{name}.txt"),
-            f"{role} {report.kind}",
-            "overload" if report.kind == "overloaded" else "steering",
+            log, group, wt, kept, f"{step.role} refused {step.id}: {quoted}", "steering"
         )
+    form = step.form
+    if not isinstance(form, forms.Red):
+        raise _rule(log, group, wt, kept, f"{step.role} overloaded", "overload")
+    counts = [n for _, n in _parts(name, log, step)]
+    stem = Path(kept).stem
+    position = 1 if stem == name else int(stem.rpartition("-part-")[2])
+    start = sum(counts[: position - 1])
+    part = replace(form, behaviors=form.behaviors[start : start + counts[position - 1]])
+    if len(part.behaviors) == 1:
+        raise _rule(
+            log, group, wt, kept, f"{step.role} overloaded on one behavior", "overload"
+        )
+    view_paths = {src: str(views.path(cfg, group.id, src)) for src in step.views}
+    cut = overload.cut_red(
+        part,
+        step.paths,
+        view_paths,
+        cfg.page_chars,
+        max(1, len(part.behaviors) // 2),
+    )
+    if cut.refused:
+        lines = "; ".join(o.line() for o in cut.refused)
+        raise _rule(
+            log, group, wt, kept, f"step {step.id} red brief {lines}", "overload"
+        )
+    log.mismatched(
+        group.id,
+        name,
+        "overload",
+        f"step {step.id} part {position} cut into {len(cut.parts)}; kept {kept}",
+    )
+    counts[position - 1 : position] = [len(p.behaviors) for p in cut.parts]
+    log.keep(f"{name}-parts", json.dumps(counts))
 
 
 def _round(cfg: Config, log: EventLog, name: str) -> str | None:
@@ -496,6 +542,7 @@ def _step(
     step = group.steps[index]
     view_paths = _view_paths(cfg, group, step, wt, log, f"{group.id}-{step.id}")
     name = f"{group.id}-{step.id}"
+    state = cfg.state_dir
     # Kept before evidence resolves, so a verdict on an unstarted build can restore.
     before = git.snapshot(wt)
     try:
@@ -521,12 +568,15 @@ def _step(
             step.form, step.paths, view_paths, cfg.page_chars, cfg.red_behaviors
         )
         if cut.refused:
-            # The Mismatches table's `overload` row: the form is dispatched whole.
             lines = "; ".join(o.line() for o in cut.refused)
-            log.mismatched(
-                group.id, name, "overload", f"step {step.id} red brief {lines}"
+            raise _rule(
+                log,
+                group,
+                wt,
+                f"{name}-brief.txt",
+                f"step {step.id} red brief {lines}",
+                "overload",
             )
-            cut = overload.Cut((step.form,), ())
 
     def render(form: forms.Form) -> str:
         return brief.render(
@@ -540,22 +590,50 @@ def _step(
     reported = name
     if cut is None:
         report = _dispatch(group, wt, log, backend, name, render(step.form), step.role)
+        if report.kind != "done":
+            _refused(
+                cfg, group, index, wt, log, backend, report, f"{state}/{reported}.txt"
+            )
     else:
         assert isinstance(step.form, forms.Red)
         counts = [len(part.behaviors) for part in cut.parts]
         if len(cut.parts) > 1:
             log.keep(f"{name}-brief", render(step.form))
         log.keep(f"{name}-parts", json.dumps(counts))
-        for k, part in enumerate(cut.parts, 1):
-            reported = name if len(cut.parts) == 1 else f"{name}-part-{k}"
+        k = 1
+        while True:
+            counts = [n for _, n in _parts(name, log, step)]
+            if k > len(counts):
+                break
+            start = sum(counts[: k - 1])
+            part = replace(
+                step.form, behaviors=step.form.behaviors[start : start + counts[k - 1]]
+            )
+            reported = name if len(counts) == 1 else f"{name}-part-{k}"
             report = _dispatch(
                 group, wt, log, backend, reported, render(part), step.role
             )
-            if report.test_wrong or report.kind != "done":
+            if report.kind != "done":
+                _refused(
+                    cfg,
+                    group,
+                    index,
+                    wt,
+                    log,
+                    backend,
+                    report,
+                    f"{state}/{reported}.txt",
+                )
+                # Only a cut returns: the parts are read again from the new counts.
+                if len(_parts(name, log, step)) > 1:
+                    log.keep(f"{name}-brief", render(step.form))
+                continue
+            if report.test_wrong:
                 # Parts that never run leave no report, not an earlier run's.
-                for later in range(k + 1, len(cut.parts) + 1):
+                for later in range(k + 1, len(counts) + 1):
                     log.keep(f"{name}-part-{later}", "")
                 break
+            k += 1
     if isinstance(step.form, forms.Red):
         outside = [
             p
@@ -564,20 +642,6 @@ def _step(
         ]
         if outside:
             _restore_outside(group, wt, log, name, before, outside, f"{reported}.txt")
-    if report.kind != "done":
-        kept = str(cfg.state_dir / f"{reported}.txt")
-        _answer(
-            cfg,
-            group,
-            index,
-            wt,
-            log,
-            backend,
-            "refused",
-            kept,
-            juror_reasons=juror_reasons,
-        )
-        return
     if report.test_wrong:
         judgment = _judgment(cfg, group, index, wt, log)
         _judge(cfg, group, step.id, judgment, wt, log, backend)
@@ -1363,7 +1427,22 @@ def run_upheld(
             report = _dispatch(
                 group, wt, log, backend, key, text, batch.role, load=batch.load
             )
-            _refusal_stops(cfg, group, wt, log, key, batch.role, report)
+            while report.kind != "done":
+                kept_report = str(cfg.state_dir / f"{key}.txt")
+                why = f"{batch.role} {report.kind}"
+                log.mismatched(group.id, key, "refused", f"{why}; kept {kept_report}")
+                if _round(cfg, log, key) is None:
+                    raise _rule(
+                        log,
+                        group,
+                        wt,
+                        kept_report,
+                        why,
+                        "overload" if report.kind == "overloaded" else "steering",
+                    )
+                report = _dispatch(
+                    group, wt, log, backend, key, text, batch.role, load=batch.load
+                )
         log.keep(f"{name}-handled", raw)
     return _check_review_land(cfg, group, wt, log, backend)
 

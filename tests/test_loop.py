@@ -72,35 +72,34 @@ def test_run_group_commits_pushes_and_cleans(
     assert log.kept("g1-s1") == ""
 
 
-def test_refusal_past_answer_rounds_is_judged_and_keeps_worktree(
+def test_rejected_step_stops_as_steering_naming_its_kept_attempt(
     green_cfg, log, fake_backend, capsys
 ):
     g = make_group(
         make_step("s1", ["a.py"]), design="docs/superpowers/specs/approved.md"
     )
-    refusal = "REJECTED: STEERING too much"
-    backend = fake_backend(outputs=[refusal] * 3 + [_undetermined()])
-    with pytest.raises(WrongTest, match="Need owner evidence"):
+    backend = fake_backend(outputs=["REJECTED: STEERING too much"])
+    with pytest.raises(RulingNeeded, match="too much") as stop:
         loop.run_group(green_cfg, g, log, backend)
-    assert backend.agents == ["core-builder"] * 3 + ["juror"]
+    assert stop.value.kind == "steering"
+    assert backend.agents == ["core-builder"]
     err = capsys.readouterr().err
-    assert "[test_wrong] g1:" in err and "g1-s1.txt" in err
-    assert "ruling_needed" not in err
+    assert "[ruling_needed] g1:" in err and "g1-s1.txt" in err
     assert str(green_cfg.worktree_root / "g1") in err
     assert (green_cfg.worktree_root / "g1").exists()
+    assert log.kept("g1-s1-attempt-1").startswith("REJECTED: STEERING")
 
 
-def test_overload_reruns_the_step_and_the_group_lands(
-    green_cfg, origin, log, fake_backend
+def test_overloaded_step_other_than_red_stops_as_overload(
+    green_cfg, log, fake_backend
 ) -> None:
     g = make_group(make_step("s1", ["a.py"]))
-    backend = fake_backend([{}, {"a.py": "1"}], ["OVERLOADED: 9", ""])
-    loop.run_group(green_cfg, g, log, backend)
-    assert backend.agents == ["core-builder", "core-builder"]
-    assert backend.briefs[0] == backend.briefs[1]
-    assert log.done() == {"g1"}
-    rows = _rows(green_cfg)
-    assert [r["mismatch_kind"] for r in rows if r["kind"] == "mismatch"] == ["refused"]
+    backend = fake_backend(outputs=["OVERLOADED: 9"])
+    with pytest.raises(RulingNeeded) as stop:
+        loop.run_group(green_cfg, g, log, backend)
+    assert stop.value.kind == "overload"
+    assert backend.agents == ["core-builder"]
+    assert not log.done()
 
 
 @pytest.mark.parametrize("load,tokens", [(None, None), (317, 842), (1, 0)])
@@ -443,13 +442,8 @@ def test_resume_reruns_from_named_step_on_kept_worktree_and_lands(
         design="docs/superpowers/specs/approved.md",
     )
     refusal = "REJECTED: STEERING too much"
-    with pytest.raises(WrongTest):
-        loop.run_group(
-            green_cfg,
-            g,
-            log,
-            fake_backend([{"a.py": "1"}], ["", refusal, refusal, _undetermined()]),
-        )
+    with pytest.raises(RulingNeeded):
+        loop.run_group(green_cfg, g, log, fake_backend([{"a.py": "1"}], ["", refusal]))
     assert log.kept("g1-s1") == ""
     backend = fake_backend([{"b.py": "2"}, {"c.py": "3"}])
     commit = loop.run_resume(green_cfg, g, "s2", EventLog(green_cfg), backend)
@@ -472,13 +466,8 @@ def test_resume_goes_through_review(green_cfg, log, fake_backend) -> None:
         design="docs/superpowers/specs/approved.md",
     )
     refusal = "REJECTED: STEERING too much"
-    with pytest.raises(WrongTest):
-        loop.run_group(
-            cfg,
-            g,
-            log,
-            fake_backend([{"a.py": "1"}], ["", refusal, refusal, _undetermined()]),
-        )
+    with pytest.raises(RulingNeeded):
+        loop.run_group(cfg, g, log, fake_backend([{"a.py": "1"}], ["", refusal]))
     backend = fake_backend([{"b.py": "2"}], ["", "FINDINGS 1\n  a.py:1 wrong\n"])
     with pytest.raises(FindingsToRule):
         loop.run_resume(cfg, g, "s2", log, backend)
@@ -1132,8 +1121,8 @@ def test_failed_red_rerun_invalidates_earlier_success(
     else:
         red = replace(red, views=["a.py"])
         cfg = replace(green_cfg, view_cmd=["false"])
-    if failure in ("rejected", "partial"):
-        # The Mismatches table's `refused` and `red report` rows: rerun, then judge.
+    if failure == "partial":
+        # The Mismatches table's `red report` row: rerun, then judge.
         cfg = replace(cfg, answer_rounds=1)
         rerun = fake_backend(outputs=[output, output, _undetermined()])
         group = make_group(red, design="docs/superpowers/specs/approved.md")
@@ -1320,7 +1309,7 @@ def test_upheld_batches_share_role_across_steps_and_keep_sources_separate(
     assert not log.done()
 
 
-@pytest.mark.parametrize("output", ["OVERLOADED: 6", "REJECTED: STEERING", "timeout"])
+@pytest.mark.parametrize("output", ["timeout"])
 def test_upheld_round_is_not_handled_until_every_batch_returns(
     green_cfg, log, fake_backend, output
 ):
@@ -2699,11 +2688,9 @@ def _cut_red_run(cfg, log, fake_backend, texts, outputs, design="design.md", **l
 
 
 @pytest.mark.parametrize("test", ["page", "files"])
-def test_red_brief_the_cut_refuses_is_logged_and_dispatched_whole(
+def test_red_brief_the_cut_refuses_stops_as_overload_with_nothing_dispatched(
     green_cfg, log, fake_backend, test
 ):
-    test_id = "tests/test_a.py::test_one"
-    report = red_report((1, test_id), (2, "tests/test_a.py::test_two"))
     cfg = replace(_viewing(green_cfg), page_chars=1 if test == "page" else 3000)
     paths = ["tests/test_a.py"]
     if test == "files":
@@ -2712,20 +2699,130 @@ def test_red_brief_the_cut_refuses_is_logged_and_dispatched_whole(
     g = make_group(red, make_step("later", ["b.py"]))
     wt = git.make_worktree(cfg, g.id)
     (wt / "a.py").write_text("stub")
-    backend = fake_backend(
-        [{"tests/test_a.py": "red"}, {"b.py": "built"}],
-        outputs=[report, ""],
+    backend = fake_backend()
+    with pytest.raises(RulingNeeded, match=f"OVERLOADED: {test}") as stop:
+        loop._steps(cfg, g, wt, log, backend, 0)
+    assert stop.value.kind == "overload"
+    assert "g1-r1" in str(stop.value)
+    assert backend.briefs == []
+
+
+def _cut_by_refusal(green_cfg, log, fake_backend, texts, outputs, files=None):
+    cfg = _viewing(green_cfg)
+    red = make_red("r1", texts, source="a.py")
+    g = make_group(red)
+    wt = git.make_worktree(cfg, g.id)
+    (wt / "a.py").write_text("stub")
+    backend = fake_backend(files or [], outputs=outputs)
+    return cfg, red, g, wt, backend
+
+
+def test_overloaded_red_part_is_cut_at_half_its_behaviors_and_dispatched_again(
+    green_cfg, log, fake_backend
+):
+    first, second = "tests/test_a.py::test_one", "tests/test_a.py::test_two"
+    outputs = [
+        "OVERLOADED: 4 files",
+        red_report((1, first)),
+        red_report((1, second)),
+    ]
+    cfg, red, g, wt, backend = _cut_by_refusal(
+        green_cfg,
+        log,
+        fake_backend,
+        ("One.", "Two."),
+        outputs,
+        [{}, {"tests/test_a.py": "red"}, {"tests/test_a.py": "red"}],
     )
     loop._steps(cfg, g, wt, log, backend, 0)
-    assert len(backend.briefs) == 2
+    assert len(backend.briefs) == 3
     assert backend.briefs[0].count("behavior:") == 2
-    assert log.kept("g1-r1-brief") == backend.briefs[0]
-    assert log.kept("g1-r1") == report + "\n"
-    assert (wt / "b.py").read_text() == "built"
-    mismatches = [r for r in _rows(cfg) if r["kind"] == "mismatch"]
-    assert [r["mismatch_kind"] for r in mismatches] == ["overload"]
-    assert f"OVERLOADED: {test}" in mismatches[0]["text"]
+    assert backend.briefs[1].count("behavior:") == 1
+    assert backend.briefs[2].count("behavior:") == 1
+    assert backend.briefs[1] != backend.briefs[2]
+    assert log.kept("g1-r1-parts") == "[1, 1]"
+    assert log.kept("g1-r1-brief").count("behavior:") == 2
+    assert log.kept("g1-r1-part-1") == outputs[1] + "\n"
+    assert log.kept("g1-r1-part-2") == outputs[2] + "\n"
+    assert log.kept("g1-r1-attempt-1") == "OVERLOADED: 4 files\n"
+    assert loop._red_evidence(cfg, red, "g1-r1", wt, log) == ((1, first), (2, second))
     assert _no_ruling(cfg)
+
+
+def test_overloaded_red_part_of_one_behavior_stops_as_overload(
+    green_cfg, log, fake_backend
+):
+    cfg, _, g, wt, backend = _cut_by_refusal(
+        green_cfg, log, fake_backend, ("One.",), ["OVERLOADED: 4 files"]
+    )
+    with pytest.raises(RulingNeeded) as stop:
+        loop._steps(cfg, g, wt, log, backend, 0)
+    assert stop.value.kind == "overload"
+    assert len(backend.briefs) == 1
+
+
+def test_rejected_red_part_stops_as_steering_with_no_rerun(
+    green_cfg, log, fake_backend
+):
+    cfg, _, g, wt, backend = _cut_by_refusal(
+        green_cfg, log, fake_backend, ("One.", "Two."), ["REJECTED: STEERING extra"]
+    )
+    with pytest.raises(RulingNeeded, match="extra") as stop:
+        loop._steps(cfg, g, wt, log, backend, 0)
+    assert stop.value.kind == "steering"
+    assert len(backend.briefs) == 1
+    assert backend.agents == ["test-writer"]
+
+
+def test_upheld_refused_batch_is_dispatched_again_under_a_round(
+    green_cfg, origin, log, fake_backend
+):
+    cfg, g, _key, lines = _refused_batch_setup(green_cfg, log)
+    backend = fake_backend(outputs=["OVERLOADED: 6", "", ""])
+    loop.run_upheld(cfg, g, "\n".join(lines), log, backend)
+    assert backend.briefs[:3] == [lines[0], lines[0], lines[1]]
+    log.kept("g1-review-diff-reviewer-batch-1-answer-1")
+    assert [r["mismatch_kind"] for r in _rows(cfg) if r["kind"] == "mismatch"] == [
+        "refused"
+    ]
+
+
+@pytest.mark.parametrize(
+    "output,kind", [("OVERLOADED: 6", "overload"), ("REJECTED: STEERING", "steering")]
+)
+def test_upheld_batch_refused_past_answer_rounds_stops_unhandled(
+    green_cfg, log, fake_backend, output, kind
+):
+    cfg, g, key, lines = _refused_batch_setup(green_cfg, log)
+    cfg = replace(cfg, answer_rounds=1)
+    backend = fake_backend(outputs=[output, output])
+    with pytest.raises(RulingNeeded) as stop:
+        loop.run_upheld(cfg, g, "\n".join(lines), log, backend)
+    assert stop.value.kind == kind
+    assert backend.briefs == [lines[0], lines[0]]
+    with pytest.raises(ConfigError):
+        log.kept(f"{key}-handled")
+
+
+def _refused_batch_setup(green_cfg, log):
+    cfg = replace(
+        green_cfg,
+        batch_budget=1,
+        reviewers=[Reviewer("diff-reviewer", ["gauntlet/core"])],
+    )
+    g = make_group(make_step("s1", ["gauntlet/core/a.py", "gauntlet/core/b.py"]))
+    wt = git.make_worktree(cfg, g.id)
+    (wt / "gauntlet/core").mkdir(parents=True)
+    for path in g.steps[0].paths:
+        (wt / path).write_text("value = 1\n")
+    lines = [
+        f"misplaced | {path}:1 | wrong | fails when: called"
+        for path in g.steps[0].paths
+    ]
+    key = "g1-review-diff-reviewer"
+    log.keep("g1-review-queue", json.dumps(asdict(g), sort_keys=True))
+    log.keep(key, "FINDINGS 2\n  " + "\n  ".join(lines) + "\n")
+    return cfg, g, key, lines
 
 
 def test_red_over_the_behavior_limit_is_cut_into_parts_of_whole_behaviors(
@@ -2985,29 +3082,6 @@ def test_round_reserves_answer_keys_counted_across_restarts(green_cfg, log):
     assert loop._round(cfg, EventLog(cfg), "g1-s2") == "g1-s2-answer-1"
 
 
-@pytest.mark.parametrize(
-    "refusal", ["REJECTED: STEERING extra fields", "OVERLOADED: 6 files"]
-)
-def test_refused_step_reruns_as_fresh_agent_from_its_before_snapshot(
-    green_cfg, log, fake_backend, refusal
-):
-    group = make_group(make_step("s1", ["a.py"]))
-    wt = git.make_worktree(green_cfg, group.id)
-    (wt / "a.py").write_text("orig")
-    backend = _seeing(fake_backend, "a.py")(
-        [{"a.py": "partial"}, {"a.py": "fixed"}], [refusal, ""]
-    )
-    loop._steps(green_cfg, group, wt, log, backend, 0)
-    assert backend.agents == ["core-builder", "core-builder"]
-    assert backend.briefs[0] == backend.briefs[1]
-    assert backend.seen == ["orig", "orig"]
-    assert (wt / "a.py").read_text() == "fixed"
-    log.kept("g1-s1-answer-1")
-    rows = _rows(green_cfg)
-    assert [r["mismatch_kind"] for r in rows if r["kind"] == "mismatch"] == ["refused"]
-    assert not [r for r in rows if r["kind"] == "ruling_needed"]
-
-
 def _red_step():
     return make_step(
         "red",
@@ -3044,7 +3118,7 @@ def test_rejected_red_evidence_reruns_red_step_from_its_before_snapshot(
     assert not [r for r in rows if r["kind"] == "ruling_needed"]
 
 
-@pytest.mark.parametrize("mismatch", ["refused", "red report"])
+@pytest.mark.parametrize("mismatch", ["red report"])
 def test_step_past_answer_rounds_opens_a_judgment_keeping_its_failure(
     green_cfg, log, fake_backend, mismatch
 ):
@@ -3075,18 +3149,18 @@ def test_step_past_answer_rounds_opens_a_judgment_keeping_its_failure(
 
 
 def test_step_answer_rounds_count_across_restarts(green_cfg, log, fake_backend):
-    cfg = replace(green_cfg, answer_rounds=1)
-    log.keep("g1-s1-answer-1", "")
-    group = make_group(
-        make_step("s1", ["a.py"]), design="docs/superpowers/specs/approved.md"
-    )
+    cfg = replace(_viewing(green_cfg), answer_rounds=1)
+    log.keep("g1-red-answer-1", "")
+    group = make_group(_red_step(), design="docs/superpowers/specs/approved.md")
     wt = git.make_worktree(cfg, group.id)
-    backend = fake_backend(outputs=["OVERLOADED: 6 files", _undetermined()])
+    (wt / "a.py").write_text("stub")
+    bad = red_report((1, "tests/test_a.py::test_new")).removesuffix("END TESTS")
+    backend = fake_backend(outputs=[bad, _undetermined()])
     with pytest.raises(WrongTest, match="Need owner evidence"):
         loop._steps(cfg, group, wt, EventLog(cfg), backend, 0)
-    assert backend.agents == ["core-builder", "juror"]
+    assert backend.agents == ["test-writer", "juror"]
     with pytest.raises(ConfigError):
-        log.kept("g1-s1-answer-2")
+        log.kept("g1-red-answer-2")
 
 
 def _mismatch_kinds(cfg: Config) -> list[str]:
