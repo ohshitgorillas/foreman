@@ -10,6 +10,9 @@ dev = ["pytest", "ruff"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# tests/smoke dispatches real agents; `make smoke` selects it explicitly.
+addopts = ["-m", "not smoke"]
+markers = ["smoke: end-to-end run against the real claude-local backend"]
 
 [tool.setuptools]
 packages = ["foreman"]
