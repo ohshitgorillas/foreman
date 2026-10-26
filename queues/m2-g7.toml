@@ -72,7 +72,11 @@ expect_code = 1
 origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["5"] }
 
 [[steps.5.form.behaviors]]
-text = "Replies are seeded literals, returned unchanged in call order; each fake retains its typed call history."
+text = "Replies are seeded literals, used unchanged in call order: a seeded ProcessError or LaunchError is raised in its turn, any other reply returned; each fake retains its typed call history."
+source = "gauntlet/seams/process.py"
+
+[[steps.5.form.behaviors]]
+text = "Every call enters that history before its reply is used, the call that raises RepliesExhaustedError included, so the history's length equals the count it carries."
 source = "gauntlet/seams/process.py"
 
 [[steps.5.form.behaviors]]
