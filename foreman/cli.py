@@ -95,6 +95,11 @@ def _preflight(groups: list[Group], cfg: config.Config, log: EventLog) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "stats" and not args.config.exists():
+            # No foreman.toml: there is no state_dir, so read the history
+            # alone. /dev/null/events.jsonl never exists, and stats only reads.
+            say(EventLog(Path(os.devnull)).stats(transcripts.dispatches(args.history)))
+            return EXIT_OK
         cfg = config.load(args.config)
         log = EventLog(cfg)
         if args.command == "status":

@@ -736,3 +736,35 @@ def test_hqptuner_spec_outside_spec_dir_is_refused(tmp_path: Path) -> None:
     cfg, queue_file = _hqptuner(tmp_path, queue)
     with pytest.raises(ConfigError, match="specs"):
         cli._load(queue_file, cfg)
+
+
+def test_stats_without_foreman_toml_reads_the_default_history(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    home = tmp_path / "home"
+    folder = home / ".claude" / "projects" / "-p" / "session-1" / "subagents"
+    folder.mkdir(parents=True)
+    (folder / "agent-a1.meta.json").write_text(
+        json.dumps({"agentType": "spec-scout", "description": "x", "finished": True})
+    )
+    usage = {"input_tokens": 300, "output_tokens": 200}
+    lines = [
+        {"type": "user", "timestamp": "2026-10-18T23:00:00.000Z"},
+        {
+            "type": "assistant",
+            "timestamp": "2026-10-18T23:00:00.000Z",
+            "message": {"id": "m1", "role": "assistant", "usage": usage},
+        },
+        {"type": "user", "timestamp": "2026-10-18T23:01:40.000Z"},
+    ]
+    (folder / "agent-a1.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(bare)
+    code = main(["stats"])
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert out.strip() == (
+        "spec-scout: tokens: 500.0 seconds: 100.0 overruns: 0 refusals: 0"
+    )
