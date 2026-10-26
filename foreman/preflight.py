@@ -70,7 +70,7 @@ def check_verbatim(step: Step, group: Group, cfg: Config) -> list[Finding]:
         return [found(f"cannot read design {group.design}: {e.strerror}", "Foreman")]
     designs = {group.design: _collapse(text)}
     for rel, cited in _cited(text, path, cfg.target_repo):
-        designs.setdefault(rel, cited)
+        designs.setdefault(rel, _collapse(cited))
     searched = ", ".join(designs)
     return [
         found(f"behavior not in {searched}: {b.text}", "architect")
@@ -83,7 +83,7 @@ _CITATION = re.compile(r"`([^`\s]+\.md)`")
 
 
 def _cited(text: str, design: Path, repo: Path) -> Iterator[tuple[str, str]]:
-    """Each design `text` cites by a backticked `.md` name, as (repo path, collapsed text).
+    """Each design `text` cites by a backticked `.md` name, as (repo path, text).
 
     A name resolves first against `design`'s folder, then the repo root; one
     that resolves to no readable file inside `repo` is skipped. Citations in
@@ -99,7 +99,7 @@ def _cited(text: str, design: Path, repo: Path) -> Iterator[tuple[str, str]]:
                 cited = path.read_text()
             except OSError:
                 continue
-            yield str(path.relative_to(root)), _collapse(cited)
+            yield str(path.relative_to(root)), cited
             break
 
 

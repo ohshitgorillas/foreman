@@ -102,6 +102,23 @@ def test_observable_prompt_carries_each_behavior_and_the_design(
     assert DESIGN_TEXT.strip() in prompt
 
 
+def test_observable_prompt_carries_a_behavior_defined_only_in_a_cited_design(
+    cfg: Config, repo: Path, fake
+):
+    write(repo, DESIGN, "Modules: `cited.md`.\n")
+    write(
+        repo,
+        "docs/superpowers/specs/cited.md",
+        "Cleanup fails when the worktree is locked.\n",
+    )
+    ask = fake("NONE")
+    step = red("5", "Failed cleanup raises ProcessError.")
+    assert check_observable(step, group(step), cfg) == []
+    [prompt] = ask.prompts
+    assert "Cleanup fails when the worktree is locked." in prompt
+    assert "Modules: `cited.md`." in prompt
+
+
 def test_observable_problems_become_architect_findings(cfg: Config, repo: Path, fake):
     fake(
         "PROBLEM: cleanup failure is undefined | architect\n"

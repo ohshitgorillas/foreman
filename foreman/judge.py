@@ -110,21 +110,25 @@ _OBSERVABLE_PROMPT = """\
 You are reviewing the behavior lines of a test step before any test is written.
 For each behavior line below, decide whether it states a concrete outcome that a
 test could observe and check, or whether it leaves undefined what counts as the
-outcome happening. Judge each line against the design document that follows; a
-line is a problem when neither the line nor the design defines what a test would
-have to set up or observe. For example, "Failed cleanup raises ProcessError" is a
-problem when the design never says what makes cleanup fail.
+outcome happening. Judge each line against the design documents that follow:
+the group's design first, then each design it cites. A line is a problem when
+neither the line nor any of the designs defines what a test would have to set up
+or observe. For example, "Failed cleanup raises ProcessError" is a problem when
+no design says what makes cleanup fail.
 
 Behavior lines:
 {behaviors}
 
-Design document {design}:
-<<<DESIGN
-{text}
-DESIGN>>>
+{designs}
 
 Name the behavior line in each problem. {answer}
 """
+
+_DESIGN_BLOCK = """\
+Design document {design}:
+<<<DESIGN
+{text}
+DESIGN>>>"""
 
 
 def check_observable(step: Step, group: Group, cfg: Config) -> list[Finding]:
@@ -137,14 +141,19 @@ def check_observable(step: Step, group: Group, cfg: Config) -> list[Finding]:
 
     if not group.design:
         return found(f"group {group.id} names no design file")
+    path = cfg.target_repo / group.design
     try:
-        text = (cfg.target_repo / group.design).read_text()
+        text = path.read_text()
     except OSError as e:
         return found(f"cannot read design {group.design}: {e.strerror}")
+    designs = {group.design: text}
+    for rel, cited in preflight._cited(text, path, cfg.target_repo):
+        designs.setdefault(rel, cited)
     prompt = _OBSERVABLE_PROMPT.format(
         behaviors="\n".join(f"- {b.text}" for b in step.form.behaviors),
-        design=group.design,
-        text=text,
+        designs="\n\n".join(
+            _DESIGN_BLOCK.format(design=rel, text=t) for rel, t in designs.items()
+        ),
         answer=_ANSWER_FORMAT.format(fixers='"architect"'),
     )
     return _judge(step, "observable", cfg, prompt, _OBSERVABLE_FIXERS)
