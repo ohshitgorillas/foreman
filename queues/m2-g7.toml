@@ -80,7 +80,7 @@ text = "Every call, the exhausting one included, enters it before its reply is u
 source = "gauntlet/seams/process.py"
 
 [[steps.5.form.behaviors]]
-text = "The test hands each fake its collaborator identity as a required keyword; exhaustion raises RepliesExhaustedError carrying that identity verbatim and the call count."
+text = "exhaustion raises RepliesExhaustedError carrying that identity verbatim and the call count."
 source = "gauntlet/seams/process.py"
 
 [[steps.5.form.behaviors]]
