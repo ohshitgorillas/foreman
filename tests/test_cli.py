@@ -214,7 +214,7 @@ def test_retest_wrong_test_exits_8(
     assert "foreman: builder stopped again" in captured.err
 
 
-@pytest.mark.parametrize("command", ["run", "upheld", "retest"])
+@pytest.mark.parametrize("command", ["run", "upheld", "retest", "resume"])
 def test_queue_review_must_match_config_before_dispatch(
     conf_file, steps_file, tmp_path, monkeypatch, capsys, command
 ):
@@ -226,10 +226,12 @@ def test_queue_review_must_match_config_before_dispatch(
     def unexpected(*args):
         pytest.fail("unconfigured reviewer reached dispatch")
 
-    for name in ["run_section", "run_upheld", "run_retest"]:
+    for name in ["run_section", "run_upheld", "run_retest", "run_resume"]:
         monkeypatch.setattr(loop, name, unexpected)
     argv = ["--config", str(conf_file), command, str(steps_file)]
-    if command != "run":
+    if command == "resume":
+        argv += ["g1", "--from", "s1"]
+    elif command != "run":
         argv += ["g1", str(path)]
     assert main(argv) == 2
     assert "diff-reviewer" in capsys.readouterr().err
@@ -262,7 +264,46 @@ def test_retest_cli_preserves_verdict_bytes(
     ) == (0 if newline == "\n" else 2)
 
 
-# Pre-flight gate: run, upheld and retest refuse on a finding unless overridden.
+def test_resume_forwards_step_and_prints_commit(
+    conf_file, steps_file, monkeypatch, capsys
+) -> None:
+    calls = []
+
+    def resumed(cfg, group, step_id, log):
+        calls.append((group.id, step_id))
+        return "landed-commit"
+
+    monkeypatch.setattr(loop, "run_resume", resumed)
+    argv = ["--config", str(conf_file), "resume", str(steps_file), "g1"]
+    assert main([*argv, "--from", "s1"]) == 0
+    assert calls == [("g1", "s1")]
+    assert capsys.readouterr().out == "landed-commit\n"
+
+
+def test_resume_requires_from(conf_file, steps_file, capsys) -> None:
+    with pytest.raises(SystemExit) as e:
+        main(["--config", str(conf_file), "resume", str(steps_file), "g1"])
+    assert e.value.code == 2
+    assert "--from" in capsys.readouterr().err
+
+
+def test_resume_unknown_step_exits_2(conf_file, steps_file, green_cfg, capsys):
+    argv = ["--config", str(conf_file), "resume", str(steps_file), "g1"]
+    assert main([*argv, "--from", "s9"]) == 2
+    assert "group g1 has no step 's9' (steps: s1)" in capsys.readouterr().err
+    assert not green_cfg.worktree_root.exists()
+
+
+def test_resume_without_kept_worktree_exits_2(
+    conf_file, steps_file, green_cfg, capsys
+) -> None:
+    argv = ["--config", str(conf_file), "resume", str(steps_file), "g1"]
+    assert main([*argv, "--from", "s1"]) == 2
+    assert "group g1 has no kept worktree to resume" in capsys.readouterr().err
+    assert not green_cfg.worktree_root.exists()
+
+
+# Pre-flight gate: run, upheld, retest and resume refuse on a finding unless overridden.
 
 
 @pytest.fixture
@@ -277,7 +318,7 @@ def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
         return record
 
-    for name in ["run_section", "run_group", "run_upheld", "run_retest"]:
+    for name in ["run_section", "run_group", "run_upheld", "run_retest", "run_resume"]:
         monkeypatch.setattr(loop, name, recorder(name))
     return calls
 
@@ -286,10 +327,12 @@ def gate_argv(conf_file: Path, steps_file: Path, tmp_path: Path, command: str):
     path = tmp_path / "continuation.txt"
     path.write_text("")
     argv = ["--config", str(conf_file), command, str(steps_file)]
+    if command == "resume":
+        return argv + ["g1", "--from", "s1"]
     return argv + (["g1", str(path)] if command != "run" else [])
 
 
-COMMANDS = ["run", "upheld", "retest"]
+COMMANDS = ["run", "upheld", "retest", "resume"]
 
 
 def test_preflight_failed_has_its_own_exit_code() -> None:
@@ -414,6 +457,7 @@ def test_arm_alert_off_and_silent_on_bad_argv(alert, monkeypatch, capsys) -> Non
         ("run", "q/m2.toml", "--group", "g1"),
         ("upheld", "q/m2.toml", "g1", "f.md"),
         ("retest", "q/m2.toml", "g1", "v.md"),
+        ("resume", "q/m2.toml", "g1", "--from", "s1"),
     ],
 )
 def test_arm_alert_starts_detached_watcher(alert, monkeypatch, args) -> None:

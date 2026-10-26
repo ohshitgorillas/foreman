@@ -391,6 +391,71 @@ def test_upheld_without_kept_worktree_raises(green_cfg, log, fake_backend) -> No
         )
 
 
+def test_resume_reruns_from_named_step_on_kept_worktree_and_lands(
+    green_cfg, origin, log, fake_backend
+) -> None:
+    g = make_group(
+        make_step("s1", ["a.py"]), make_step("s2", ["b.py"]), make_step("s3", ["c.py"])
+    )
+    with pytest.raises(RulingNeeded):
+        loop.run_group(
+            green_cfg,
+            g,
+            log,
+            fake_backend([{"a.py": "1"}], ["", "REJECTED: STEERING too much"]),
+        )
+    assert log.kept("g1-s1") == ""
+    backend = fake_backend([{"b.py": "2"}, {"c.py": "3"}])
+    commit = loop.run_resume(green_cfg, g, "s2", EventLog(green_cfg), backend)
+    assert backend.briefs == [
+        "stub\nApproved step s2\nb.py",
+        "stub\nApproved step s3\nc.py",
+    ]
+    assert run_ok(["git", "rev-parse", "foreman/g1"], origin).out.strip() == commit
+    files = run_ok(["git", "show", "--name-only", "--format=", commit], origin)
+    assert sorted(files.out.split()) == ["a.py", "b.py", "c.py"]
+    assert not (green_cfg.worktree_root / "g1").exists()
+    assert EventLog(green_cfg).done() == {"g1"}
+
+
+def test_resume_goes_through_review(green_cfg, log, fake_backend) -> None:
+    cfg = _reviewed(green_cfg)
+    g = make_group(make_step("s1", ["a.py"]), make_step("s2", ["b.py"]))
+    with pytest.raises(RulingNeeded):
+        loop.run_group(
+            cfg,
+            g,
+            log,
+            fake_backend([{"a.py": "1"}], ["", "REJECTED: STEERING too much"]),
+        )
+    backend = fake_backend([{"b.py": "2"}], ["", "FINDINGS 1\n  a.py:1 wrong\n"])
+    with pytest.raises(FindingsToRule):
+        loop.run_resume(cfg, g, "s2", log, backend)
+    assert (green_cfg.worktree_root / "g1").exists()
+
+
+def test_resume_unknown_step_raises_before_dispatch(
+    green_cfg, log, fake_backend
+) -> None:
+    g = make_group(make_step("s1", ["a.py"]))
+    git.make_worktree(green_cfg, "g1")
+    backend = fake_backend()
+    with pytest.raises(ConfigError, match=r"group g1 has no step 'zz' \(steps: s1\)"):
+        loop.run_resume(green_cfg, g, "zz", log, backend)
+    assert backend.briefs == []
+
+
+def test_resume_without_kept_worktree_raises_before_dispatch(
+    green_cfg, log, fake_backend
+) -> None:
+    g = make_group(make_step("s1", ["a.py"]))
+    backend = fake_backend()
+    with pytest.raises(ConfigError, match="group g1 has no kept worktree to resume"):
+        loop.run_resume(green_cfg, g, "s1", log, backend)
+    assert backend.briefs == []
+    assert not (green_cfg.worktree_root / "g1").exists()
+
+
 def test_run_section_runs_in_order_and_notifies_owner(
     green_cfg, origin, log, fake_backend, capsys
 ) -> None:

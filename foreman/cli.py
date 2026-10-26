@@ -34,7 +34,19 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("step_file", type=Path)
     t.add_argument("group_id")
     t.add_argument("verdict", type=Path)
-    for command in (r, u, t):
+    s = sub.add_parser(
+        "resume", help="rerun a kept group from a named step on its worktree"
+    )
+    s.add_argument("step_file", type=Path)
+    s.add_argument("group_id")
+    s.add_argument(
+        "--from",
+        dest="step_id",
+        required=True,
+        metavar="STEP_ID",
+        help="the step to rerun from; earlier steps keep their state",
+    )
+    for command in (r, u, t, s):
         command.add_argument(
             "--override-preflight",
             action="store_true",
@@ -111,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
             say(loop.run_upheld(cfg, pending[0], text, log))
         elif args.command == "retest":
             say(loop.run_retest(cfg, pending[0], text, log))
+        elif args.command == "resume":
+            say(loop.run_resume(cfg, pending[0], args.step_id, log))
         elif args.group_id:
             say(loop.run_group(cfg, pending[0], log, backends.get(cfg)))
         else:
@@ -135,7 +149,7 @@ rm -f "$2"
 
 
 def _arm_alert() -> tuple[str, str] | None:
-    """Start the exit watcher for run/upheld/retest; return its status file."""
+    """Start the exit watcher for run/upheld/retest/resume; return its status file."""
     ping = os.path.expanduser("~/.local/bin/claude-ping")
     if os.environ.get("FOREMAN_NO_ALERT") or not os.access(ping, os.X_OK):
         return None

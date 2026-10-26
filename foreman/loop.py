@@ -11,6 +11,7 @@ from foreman.errors import (
     BackendError,
     ConfigError,
     FindingsToRule,
+    ForemanError,
     RulingNeeded,
     WrongTest,
 )
@@ -750,6 +751,31 @@ def run_group(cfg: Config, group: Group, log: EventLog, backend: Backend) -> str
     wt = git.make_worktree(cfg, group.id)
     log.emit("group_started", group.id)
     _steps(cfg, group, wt, log, backend, 0)
+    return _check_review_land(cfg, group, wt, log, backend)
+
+
+def run_resume(
+    cfg: Config,
+    group: Group,
+    step_id: str,
+    log: EventLog,
+    backend: Backend | None = None,
+) -> str:
+    """Rerun a kept group from step_id on its worktree; earlier steps' state stays."""
+    first = next((i for i, s in enumerate(group.steps) if s.id == step_id), None)
+    if first is None:
+        known = ", ".join(s.id for s in group.steps)
+        raise ConfigError(f"group {group.id} has no step {step_id!r} (steps: {known})")
+    try:
+        wt = git.worktree(cfg, group.id)
+    except ForemanError as error:
+        raise ConfigError(
+            f"group {group.id} has no kept worktree to resume ({error});"
+            " start it with foreman run --group"
+        ) from error
+    backend = backend or backends.get(cfg)
+    log.emit("group_started", group.id)
+    _steps(cfg, group, wt, log, backend, first)
     return _check_review_land(cfg, group, wt, log, backend)
 
 
