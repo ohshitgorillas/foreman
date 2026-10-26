@@ -4,8 +4,14 @@ from pathlib import Path
 import pytest
 
 from foreman import forms, preflight
-from foreman.config import Config
-from foreman.preflight import Finding, check_scope, check_verbatim, write_scope
+from foreman.config import Config, Reviewer
+from foreman.preflight import (
+    Finding,
+    check_scope,
+    check_verbatim,
+    dispatched_roles,
+    write_scope,
+)
 from foreman.steps import Group, Step
 
 DESIGN = "docs/superpowers/specs/design.md"
@@ -173,6 +179,51 @@ def test_unreadable_role_scope_is_one_finding_for_the_role_author(
     step = stub("6", "spiker", ["gauntlet/a.py", "tests/b.py"])
     found = check_scope(step, group(step), cfg)
     assert [(f.check, f.fixer) for f in found] == [("scope", "role author")]
+
+
+# dispatched roles
+
+
+def test_dispatched_roles_lists_each_dispatching_source_once(cfg: Config):
+    cfg = replace(
+        cfg,
+        reviewers=[
+            Reviewer("diff-reviewer", ["gauntlet/"]),
+            Reviewer("test-reviewer", ["tests/"]),
+        ],
+    )
+    seam = stub("4", "seam-builder", ["gauntlet/seams/a.py"])
+    tests = red("5", "A behavior.")
+    build = stub("6", "builder", ["gauntlet/b.py"])
+    assert dispatched_roles(seam, group(seam, tests, build), cfg) == [
+        "seam-builder",
+        "diff-reviewer",
+        "test-reviewer",
+        "juror",
+        "test-writer",
+        "builder",
+    ]
+
+
+def test_no_red_producer_means_no_repair_test_writer(cfg: Config):
+    step = stub("4", "seam-builder", ["gauntlet/a.py"])
+    assert dispatched_roles(step, group(step), cfg) == ["seam-builder", "juror"]
+
+
+def test_step_whose_paths_later_steps_all_hold_gets_no_fix(cfg: Config):
+    early = stub("4", "seam-builder", ["gauntlet/a.py", "gauntlet/b.py"])
+    late = stub("6", "builder", ["gauntlet/"])
+    assert dispatched_roles(late, group(early, late), cfg) == ["builder", "juror"]
+
+
+def test_step_keeping_one_unheld_path_gets_fixes(cfg: Config):
+    early = stub("4", "seam-builder", ["gauntlet/a.py", "docs/x.md"])
+    late = stub("6", "builder", ["gauntlet/"])
+    assert dispatched_roles(late, group(early, late), cfg) == [
+        "builder",
+        "juror",
+        "seam-builder",
+    ]
 
 
 # the command

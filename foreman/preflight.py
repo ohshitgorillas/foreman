@@ -304,6 +304,32 @@ def check_hooks(step: Step, group: Group, cfg: Config) -> list[Finding]:
     return findings
 
 
+def dispatched_roles(step: Step, group: Group, cfg: Config) -> list[str]:
+    """Every role Foreman may dispatch for `step` and its group, first use first.
+
+    The step's own role; each configured reviewer's; `juror`, which judges
+    any failing step or group check; `test-writer` when the group holds a red
+    producer it could repair; and the role of each group step that can own an
+    upheld finding's path, which batches.cut hands the fix to.
+    """
+    roles = [step.role, *(r.role for r in cfg.reviewers), "juror"]
+    if any(
+        s.role == "test-writer" and isinstance(s.form, forms.Red) for s in group.steps
+    ):
+        roles.append("test-writer")
+    roles += [
+        s.role
+        for i, s in enumerate(group.steps)
+        # steps.owner picks the last step holding a path, so a step owns
+        # nothing when later steps hold every one of its paths.
+        if any(
+            not any(steps.holds(later.paths, p) for later in group.steps[i + 1 :])
+            for p in s.paths
+        )
+    ]
+    return list(dict.fromkeys(roles))
+
+
 CHECKS: tuple[Check, ...] = (check_verbatim, check_scope, check_hooks)
 
 
