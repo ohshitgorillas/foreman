@@ -1,4 +1,4 @@
-Status: proposed, for the owner's approval. Questions below block the affected shapes; this document does not amend a Gauntlet role.
+Status: approved. Questions below block the affected shapes; this document does not amend a Gauntlet role.
 The design is approved for build.
 
 ## Why
@@ -134,10 +134,10 @@ def mismatched(self, group_id: str | None, name: str, kind: str, text: str) -> N
 
 ```python
 class WrongTest(ForemanError): exit_code = 8     # spec defect, undetermined judgment or juror cap; owner acts
-class RulingNeeded(ForemanError): exit_code = 6  # never raised for a Mismatches-table row
+class RulingNeeded(ForemanError): exit_code = 6  # for a Mismatches-table row, only for a reviewer past answer_rounds
 ```
 
-`foreman/backends.py`: each adapter reports the token count of a finished job and passes required `Config.dispatch_seconds` to `run.run(timeout=...)`. Both adapters remain fresh-agent launches. `ClaudeLocal` runs `claude -p --output-format json`, returns the result text as `Result.out` and reads its usage totals. `CodexLocal` runs `exec --json`, reads usage from its event stream and retains its existing last-message file as `Result.out` (`foreman/backends.py:215-238`). Structured transport records never become report prose. `tokens(job)` remains available after `wait(job)`; missing usage returns `None`, never a guessed count. Incomplete structured output from a timed-out process must still return `TIMEOUT_CODE`, preserving available text and usage, so logging and the timeout stop occur.
+`foreman/backends.py`: each adapter reports the token count of a finished job and passes required `Config.dispatch_seconds` to `run.run(timeout=...)`. Both adapters remain fresh-agent launches (`foreman/backends.py:166-169`, `foreman/backends.py:199-243`); no adapter resumes a session or answers a job. `ClaudeLocal` runs `claude -p --output-format json`, returns the result text as `Result.out` and reads its usage totals. `CodexLocal` runs `exec --json`, reads usage from its event stream and retains its existing last-message file as `Result.out` (`foreman/backends.py:215-238`). Structured transport records never become report prose. `tokens(job)` remains available after `wait(job)`; missing usage returns `None`, never a guessed count. Incomplete structured output from a timed-out process must still return `TIMEOUT_CODE`, preserving available text and usage, so logging and the timeout stop occur.
 
 ```python
 class ClaudeLocal:
@@ -183,11 +183,21 @@ def _dispatch(group: Group, wt: Path, log: EventLog, backend: Backend,
     # one kept report and dispatch record; TIMEOUT_CODE logs overran and raises RulingNeeded;
     # a refused report logs refused and returns to the caller
 
+def _round(cfg: Config, log: EventLog, name: str) -> str | None: ...
+    # the one rerun counter: reserves <name>-answer-<n> with EventLog.keep, counted across
+    # restarts from the kept keys; returns that key, or None once cfg.answer_rounds are used
+
 def _answer(cfg: Config, group: Group, index: int, wt: Path, log: EventLog,
             backend: Backend, kind: str, kept: str) -> None: ...
-    # logs the mismatch, reserves <group>-<step>-answer-<n> with EventLog.keep, restores the
-    # step's paths from <group>-<step>-before and reruns _step while rounds <= cfg.answer_rounds;
+    # logs the mismatch, takes a round from _round(cfg, log, "<group>-<step>"), restores the
+    # step's paths from <group>-<step>-before and reruns _step as a fresh agent;
     # past the cap opens a judgment whose failure report is kept
+
+def _review(cfg: Config, group: Group, wt: Path, log: EventLog,
+            backend: Backend) -> None: ...
+    # a refused reviewer report is logged as "refused" and the reviewer is dispatched again,
+    # fresh, with the same rendered text under a round from _round(cfg, log, "<group>-review-<role>");
+    # past the cap stops with RulingNeeded naming the kept report and worktree
 
 def _step(cfg: Config, group: Group, index: int, wt: Path, log: EventLog,
           backend: Backend, *, juror_reasons: tuple[str, ...] = ()) -> None: ...
@@ -206,7 +216,7 @@ def run_retest(cfg: Config, group: Group, text: str, log: EventLog,
 
 #### Mismatches
 
-A build stops only on a juror verdict or owner stop, or on an infrastructure stop: a timeout, a backend error or failed view generation. A report or rule mismatch with no failing check behind it never raises `RulingNeeded` or `PreflightFailed`; each one is logged once through `EventLog.mismatched` and handled by its row:
+A build stops only on a juror verdict or owner stop, on an infrastructure stop (a timeout, a backend error or failed view generation), or on a reviewer still refusing past `answer_rounds`. A report or rule mismatch with no failing check behind it never raises `PreflightFailed`, and raises `RulingNeeded` only for a reviewer past `answer_rounds`; each one is logged once through `EventLog.mismatched` and handled by its row:
 
 | Mismatch | Kind | Handling |
 |---|---|---|
@@ -219,8 +229,9 @@ A build stops only on a juror verdict or owner stop, or on an infrastructure sto
 | A refused juror, a verdict `reports.verdict` (`foreman/reports.py:42`) rejects, or a verdict target or evidence `_follow_verdict` (`foreman/loop.py:530`) finds outside its judgment | `verdict` | uses that juror round; the next attempt follows, and `juror_rounds` ends in the existing owner stop |
 | A test-writer repair's refused report, or repair evidence `verify.validate_repair` (`foreman/verify.py:188`) rejects | `repair evidence` | the next judgment attempt on the same context |
 | Findings from `_preflight` (`foreman/cli.py:86`) | `preflight` | printed as warnings and logged; dispatch proceeds |
+| A reviewer's refused report, returned by `_dispatch` in `_review` (`foreman/loop.py:826`) | `refused` | the reviewer is dispatched again, fresh, with the same rendered text while `_round` grants a round; past `answer_rounds`, `RulingNeeded` |
 
-`_answer` counts rounds per step across restarts through its kept keys, as `_judge` counts juror rounds (`foreman/loop.py:496-508`). A rerun step is a fresh agent with the same rendered brief. `_review` (`foreman/loop.py:804`) and `run_upheld` (`foreman/loop.py:890`) are outside this table.
+`_round` is the one rerun counter, for steps and reviewers alike; it counts rounds across restarts through its kept keys, as `_judge` counts juror rounds (`foreman/loop.py:496-508`). A rerun is a fresh agent with the same rendered brief, launched through `_dispatch`; no agent session is resumed. A group lands only after every configured reviewer whose paths it touches has returned a report. Two checks in `run_upheld` (`foreman/loop.py:890`) guard the dispatcher's own input, sit outside this table and keep their `RulingNeeded` stop: an upheld line no step owns (`foreman/loop.py:931-938`) and a batch outside its upheld source (`foreman/loop.py:946`).
 
 `foreman/config.py`: reviewer roster entries become just `role` and `paths` (selection/order). Reject `spec`, even `false`, with a migration error. Only the two reviewed role contracts are registered here; a roster entry naming a role without a supplied contract, such as `spec-reviewer` or `gatesmith`, fails load with a diagnostic and is never reinterpreted. Adds required `batch_budget` and `dispatch_seconds`, and optional `juror_rounds` and `answer_rounds`; a bool, non-integer or value below 1 is a `ConfigError`. The example sets `batch_budget = 300` enclosing-unit lines, an unmeasured starting value tuned by the owner from the dispatch record, and `dispatch_seconds = 600`, the ten-minute agent cap. Required keys have no loader fallback. Shared `cfg` and config-file fixtures carry integer values, not quoted numbers (`tests/conftest.py:36-51`, `tests/conftest.py:60`).
 
@@ -231,7 +242,7 @@ class Config:
     batch_budget: int           # required; example 300, unmeasured, tuned from dispatch records
     dispatch_seconds: int       # required; example 600, the backend run timeout
     juror_rounds: int = 2       # rounds per failing step or group-check context before the owner arbitrates
-    answer_rounds: int = 2      # reruns per step for a refused report or rejected red evidence; unmeasured
+    answer_rounds: int = 2      # reruns per step or reviewer for a refused report or rejected red evidence; unmeasured
 ```
 
 `foreman/cli.py`: all run/continue commands receive fully validated groups, matched against the loaded configuration before dispatch. `retest STEP_FILE GROUP FILE` is the owner's continuation of a group stopped by `WrongTest`, calling `loop.run_retest`; FILE holds the owner's verdict in the juror's verdict grammar. `reports.verdict` reads it, and the same verdict handler follows it without dispatcher adjudication. Empty, malformed or ambiguous content raises `ConfigError` before dispatch; an empty file no longer skips a repair. Keep the supplied verdict with `EventLog.keep`. No raw brief reaches a role through it. Pre-flight findings print as warnings and go to `EventLog.mismatched` with kind `preflight`, and dispatch proceeds; `--override-preflight` is removed. `python -m foreman.preflight` keeps its own exit codes (`foreman/preflight.py:692-715`).
@@ -423,7 +434,7 @@ M2 `28 dependency` and the checked-in `queues/m1.toml` belong to gatesmith, whic
 | Combined-tree failure and following a judgment | `forms.Judgment`, rendered by `brief.render`; `reports.verdict` decodes juror output and owner FILE; `loop._follow_verdict` follows either | Dispatcher adjudication; automatic gate repair before judgment; a TEST WRONG-only trigger; a second verdict codec/handler; Foreman inventing failure evidence or editing specifications; a literal round cap |
 | Step and combined-tree checks | Existing `foreman/verify.py:23` (`verify`) and `foreman/verify.py:32` (`check_step`), called by loop | Check commands run in a verdict decoder, CLI or juror; expected producer red treated as a combined-tree failure |
 | Specification defect, undecidable judgment or exhausted juror rounds | `WrongTest` and `notify_owner("test_wrong", ...)` | Automatic test weakening or specification edits; dispatcher decisions substituted for the owner |
-| Report and rule mismatches | The Mismatches table: `loop._answer` under `Config.answer_rounds`, then judgment; each logged once by `EventLog.mismatched` | `RulingNeeded` or `PreflightFailed` raised for a table row; a second rerun counter; a mismatch logged outside `EventLog.mismatched`; `--override-preflight` |
+| Report and rule mismatches | The Mismatches table: `loop._answer` for steps and `loop._review` for reviewers, both counting through `loop._round` under `Config.answer_rounds`; each logged once by `EventLog.mismatched` | `PreflightFailed` raised for a table row; `RulingNeeded` for a table row except a reviewer past `answer_rounds`; a second rerun counter; resuming an agent session or a `Backend` answer path; a group landing without a reviewer's report; a mismatch logged outside `EventLog.mismatched`; `--override-preflight` |
 | Evidence lifetime and dispatch resolution | `foreman/loop.py` through existing `EventLog.keep/kept` | Another id store, file-level fallback, cross-group report reuse |
 | Reviewer selection | `foreman/config.py` roster; per-group review forms in step file | Generic `spec` boolean or unvalidated role-specific suffix |
 | Approval, brief provenance and legal-shape rulings | Owner and dispatcher | Foreman deciding that a passing test is red, that a role grammar changed, or that an Order mismatch authorizes a new shape |
@@ -462,14 +473,10 @@ Each row is one dispatch, one agent, at most five written files and exactly one 
 | 22 | `builder` | `foreman/brief.py`, `foreman/reports.py`, `tests/test_brief.py`, `tests/test_reports.py` | Remove `brief.finding`, `brief.review` and `reports.route` after all callers move. | `uv run pytest -q tests/test_brief.py tests/test_reports.py` |
 | 23 | `builder` | `foreman/config.py`, `foreman.example.toml`, `tests/test_config.py`, `tests/conftest.py` | Optional `answer_rounds` defaulting to 2; reject bools, non-integers and values below 1; shared cfg and config serialization carry it. | `uv run pytest -q tests/test_config.py` |
 | 24 | `builder` | `foreman/events.py`, `tests/test_events.py` | `EventLog.mismatched` writes one `mismatch` event; a kind outside `MISMATCH_KINDS` is `ValueError`. | `uv run pytest -q tests/test_events.py` |
-| 25 | `builder` | `foreman/loop.py`, `tests/test_loop.py` | `_dispatch` returns refused reports; `_answer` reruns a step on a refused report or rejected red evidence from its restored before-snapshot, counted across restarts, and opens a judgment past `answer_rounds`. | `uv run pytest -q tests/test_loop.py` |
+| 25 | `builder` | `foreman/loop.py`, `tests/test_loop.py` | `_dispatch` returns refused reports; `_round` reserves rounds counted across restarts; `_answer` reruns a step as a fresh agent on a refused report or rejected red evidence from its restored before-snapshot, and opens a judgment past `answer_rounds`. | `uv run pytest -q tests/test_loop.py` |
 | 26 | `builder` | `foreman/loop.py`, `tests/test_loop.py` | Unresolved producer evidence opens a judgment before a build or leaves its ids out of a judgment; a refused juror or a rejected or out-of-judgment verdict uses its round; a refused repair or rejected repair evidence opens the next judgment attempt. | `uv run pytest -q tests/test_loop.py` |
 | 27 | `builder` | `foreman/loop.py`, `tests/test_loop.py` | Red and repair output outside declared paths is logged and restored and the build goes on; a red brief the cut refuses is logged and dispatched whole. | `uv run pytest -q tests/test_loop.py` |
 | 28 | `builder` | `foreman/cli.py`, `foreman/errors.py`, `tests/test_cli.py` | Pre-flight findings print as warnings, are logged and dispatch proceeds; remove `--override-preflight`, `PreflightFailed` and exit code 9. | `uv run pytest -q tests/test_cli.py` |
+| 29 | `builder` | `foreman/loop.py`, `tests/test_loop.py` | `_review` logs a refused reviewer report and dispatches the reviewer again, fresh, through `_round`; past `answer_rounds` it stops with `RulingNeeded`; the group never lands without the report; the two `run_upheld` input checks keep their stop. | `uv run pytest -q tests/test_loop.py` |
 
-Intermediate rows may temporarily leave other consumers awaiting their listed migration; they are not runnable milestone releases. After row 28 the dispatcher runs the repository's normal final gate as a separate bounded verification step, not a second done-check appended to a builder brief. If measured size makes a row exceed its dispatch cap, re-cut it under 7.1f before dispatch. Queue migration is the dispatcher's work after the M2 Order amendment, outside `builder`'s writes; no row edits the read-only external queue or role sources.
-
-## Decisions for the owner
-
-1. **How a step answers again.** Both adapters launch a fresh agent per dispatch (`foreman/backends.py:1`, `foreman/backends.py:166-169`), so `_answer` reruns the whole step from its before-snapshot. Recommend: keep the fresh rerun; no new backend capability; cost: each round repeats the step's work, unmeasured. Alternative: add `Backend.answer(job, text) -> Result`, resuming the same session (Claude's job handle is its session id, `foreman/backends.py:168`) with the mismatch line so the worker re-reports without redoing work; cost: a second launch path in each adapter, and Codex resume is unsurveyed.
-2. **Mismatches on the review path.** A refused reviewer report (`foreman/loop.py:826`, through `foreman/loop.py:93-94`), an upheld line no step owns (`foreman/loop.py:931-938`) and a batch outside its source (`foreman/loop.py:946`) still stop with `RulingNeeded`. Recommend: a refused review reruns under `answer_rounds` and then stops; the two upheld checks keep their stop, since they guard the dispatcher's own input; cost unmeasured. Alternative: every review-path mismatch is logged and the group lands; cost: a group can land without a review or with an upheld finding unsent.
+Intermediate rows may temporarily leave other consumers awaiting their listed migration; they are not runnable milestone releases. After row 29 the dispatcher runs the repository's normal final gate as a separate bounded verification step, not a second done-check appended to a builder brief. If measured size makes a row exceed its dispatch cap, re-cut it under 7.1f before dispatch. Queue migration is the dispatcher's work after the M2 Order amendment, outside `builder`'s writes; no row edits the read-only external queue or role sources.
