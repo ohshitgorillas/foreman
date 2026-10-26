@@ -1,6 +1,6 @@
 """`foreman stats`: per role, tokens and seconds per finished dispatch, with
 overrun and refusal counts, read from Foreman's existing event log and from
-Claude Code's subagent history."""
+Claude Code's subagent history and top-level agent sessions."""
 
 import json
 import re
@@ -246,3 +246,103 @@ def test_stats_merges_a_role_found_in_both_sources(
     assert figure(line, "token") == 2000
     assert figure(line, "sec") == 30
     assert figure(line, "overr") == 1
+
+
+def session(
+    root: Path,
+    name: str,
+    role: str,
+    usages: list[dict],
+    start: str,
+    end: str,
+    finished: bool = True,
+) -> None:
+    """One top-level `claude -p --agent <role>` session file under root."""
+    folder = root / "-some-project"
+    folder.mkdir(parents=True, exist_ok=True)
+    lines: list[dict] = [
+        {"type": "agent-setting", "agentSetting": role, "sessionId": name},
+        {"type": "user", "timestamp": start, "message": {"role": "user"}},
+    ]
+    for i, use in enumerate(usages):
+        message = {"id": f"msg_{name}_{i}", "role": "assistant", "usage": use}
+        # A streamed message repeats its usage on each content line.
+        lines += [{"type": "assistant", "timestamp": start, "message": message}] * 2
+    lines.append({"type": "agent-setting", "agentSetting": role, "sessionId": name})
+    lines.append({"type": "user", "timestamp": end, "message": {"role": "user"}})
+    if finished:
+        lines.append({"type": "cost-state", "sessionId": name, "totalCostUSD": 0.1})
+    (folder / f"{name}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+
+
+def test_stats_reads_top_level_agent_sessions(conf_file: Path, capsys) -> None:
+    root = history(conf_file)
+    session(
+        root,
+        "s-lead",
+        "lead",
+        [usage(10000, 2000, 3000, 5000)],
+        "2026-10-26T10:00:00Z",
+        "2026-10-26T10:20:00Z",
+    )
+    session(
+        root,
+        "s-divvy-1",
+        "divvyer",
+        [usage(100, 200), usage(300, 400)],
+        "2026-10-26T11:00:00Z",
+        "2026-10-26T11:01:00Z",
+    )
+    session(
+        root,
+        "s-divvy-2",
+        "divvyer",
+        [usage(1000, 1000)],
+        "2026-10-26T12:00:00Z",
+        "2026-10-26T12:03:00Z",
+    )
+    code, out = stats(conf_file, capsys)
+    assert code == 0
+    lead = role_line(out, "lead")
+    assert figure(lead, "token") == 20000
+    assert figure(lead, "sec") == 1200
+    assert figure(lead, "overr") == 0
+    assert figure(lead, "refus") == 0
+    divvyer = role_line(out, "divvyer")
+    assert figure(divvyer, "token") == 1500
+    assert figure(divvyer, "sec") == 120
+
+
+def test_stats_leaves_out_an_unfinished_session_and_one_with_no_agent(
+    conf_file: Path, capsys
+) -> None:
+    root = history(conf_file)
+    session(
+        root,
+        "s-done",
+        "architect",
+        [usage(500, 500)],
+        "2026-10-26T10:00:00Z",
+        "2026-10-26T10:00:40Z",
+    )
+    session(
+        root,
+        "s-open",
+        "architect",
+        [usage(90000, 9000)],
+        "2026-10-26T11:00:00Z",
+        "2026-10-26T11:09:00Z",
+        finished=False,
+    )
+    plain = root / "-some-project" / "s-plain.jsonl"
+    plain.write_text(
+        json.dumps({"type": "user", "timestamp": "2026-10-26T09:00:00Z"})
+        + "\n"
+        + json.dumps({"type": "cost-state", "sessionId": "s-plain"})
+        + "\n"
+    )
+    code, out = stats(conf_file, capsys)
+    assert code == 0
+    line = role_line(out, "architect")
+    assert figure(line, "token") == 1000
+    assert figure(line, "sec") == 40

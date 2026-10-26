@@ -1,4 +1,5 @@
-"""Claude Code's subagent history, read as finished dispatch rows for stats."""
+"""Claude Code's history, read as finished dispatch rows for stats: subagent
+transcripts and top-level `claude -p --agent <role>` sessions."""
 
 import json
 from datetime import datetime
@@ -34,16 +35,8 @@ def _stamp(value: object) -> float | None:
         return None
 
 
-def _row(path: Path) -> dict | None:
-    """One transcript as a dispatch row, or None when it has no role or is open."""
-    try:
-        meta = json.loads(path.with_suffix(".meta.json").read_text(encoding="utf-8"))
-        records = _records(path)
-    except (OSError, ValueError):
-        return None
-    role = meta.get("agentType") if isinstance(meta, dict) else None
-    if not isinstance(role, str) or not role or meta.get("finished") is False:
-        return None
+def _figures(role: str, records: list[dict]) -> dict | None:
+    """The dispatch row for role from one history file's records."""
     usage: dict[object, int] = {}
     for i, r in enumerate(records):
         message = r.get("message")
@@ -64,8 +57,43 @@ def _row(path: Path) -> dict | None:
     }
 
 
+def _row(path: Path) -> dict | None:
+    """One transcript as a dispatch row, or None when it has no role or is open."""
+    try:
+        meta = json.loads(path.with_suffix(".meta.json").read_text(encoding="utf-8"))
+        records = _records(path)
+    except (OSError, ValueError):
+        return None
+    role = meta.get("agentType") if isinstance(meta, dict) else None
+    if not isinstance(role, str) or not role or meta.get("finished") is False:
+        return None
+    return _figures(role, records)
+
+
+def _session_row(path: Path) -> dict | None:
+    """One top-level session as a dispatch row, or None when it was not started
+    with `--agent` or has not finished.
+
+    The role is the `agentSetting` of the session's `agent-setting` records;
+    Claude Code writes the `cost-state` record when the session ends.
+    """
+    try:
+        records = _records(path)
+    except OSError:
+        return None
+    roles = [r.get("agentSetting") for r in records if r.get("type") == "agent-setting"]
+    role = roles[-1] if roles else None
+    if not isinstance(role, str) or not role:
+        return None
+    if not any(r.get("type") == "cost-state" for r in records):
+        return None
+    return _figures(role, records)
+
+
 def dispatches(root: Path = DEFAULT_ROOT) -> list[dict]:
-    """Every finished subagent transcript under root as a dispatch row."""
+    """Every finished subagent transcript and top-level agent session under
+    root as a dispatch row."""
     root = root.expanduser()
-    rows = (_row(p) for p in sorted(root.glob("*/*/subagents/agent-*.jsonl")))
+    rows = [_row(p) for p in sorted(root.glob("*/*/subagents/agent-*.jsonl"))]
+    rows += [_session_row(p) for p in sorted(root.glob("*/*.jsonl"))]
     return [r for r in rows if r is not None]
