@@ -263,10 +263,14 @@ def test_red_gate_juror_cap_notifies_owner_and_keeps_worktree(
         make_step("s1", ["a.py"]), design="docs/superpowers/specs/approved.md"
     )
     backend = fake_backend([{"a.py": "1"}], ["", "malformed verdict"])
-    with pytest.raises(RulingNeeded, match="verdict"):
+    # The Mismatches table's `verdict` row: the refused round is used, and
+    # `juror_rounds` ends in the existing owner stop, not a ruling.
+    with pytest.raises(WrongTest, match="juror rounds exhausted"):
         loop.run_group(cfg, g, log, backend)
     assert backend.agents == ["core-builder", "juror"]
     assert log.kept("g1-group-check-juror-1").strip() == "malformed verdict"
+    assert _mismatch_kinds(cfg) == ["verdict"]
+    assert _no_ruling(cfg)
     wt = git.worktree(cfg, g.id)
     resumed = fake_backend()
     with pytest.raises(WrongTest, match="juror rounds exhausted"):
@@ -940,7 +944,6 @@ def test_build_resolves_filtered_multiple_producers_after_log_reload(
         "scope",
         "duplicate",
         "excluded-invalid",
-        "empty-selection",
     ],
 )
 def test_invalid_red_evidence_stops_before_builder(green_cfg, log, fake_backend, case):
@@ -972,38 +975,23 @@ def test_invalid_red_evidence_stops_before_builder(green_cfg, log, fake_backend,
         form=forms.Build(
             "core-builder",
             "Approved build",
-            (
-                forms.RedSelection(
-                    "red",
-                    (
-                        "tests/test_b.py"
-                        if case == "empty-selection"
-                        else "tests/test_a.py",
-                    ),
-                ),
-            ),
+            (forms.RedSelection("red", ("tests/test_a.py",)),),
         ),
     )
     green_cfg = replace(green_cfg, answer_rounds=1)
     g = make_group(red, build, design="docs/superpowers/specs/approved.md")
     wt = git.make_worktree(green_cfg, g.id)
     (wt / "a.py").write_text("stub")
-    if case == "empty-selection":
-        backend = fake_backend(outputs=[report])
-        with pytest.raises(RulingNeeded, match="g1-red.txt"):
-            loop._steps(green_cfg, g, wt, log, backend, 0)
-        assert backend.agents == ["test-writer"]
-    else:
-        # Rejected red evidence is the Mismatches table's `red report` row.
-        backend = fake_backend(outputs=[report, report, _undetermined()])
-        with pytest.raises(WrongTest, match="Need owner evidence"):
-            loop._steps(green_cfg, g, wt, log, backend, 0)
-        assert backend.agents == ["test-writer", "test-writer", "juror"]
-        rows = _rows(green_cfg)
-        assert [r["mismatch_kind"] for r in rows if r["kind"] == "mismatch"] == [
-            "red report",
-            "red report",
-        ]
+    # Rejected red evidence is the Mismatches table's `red report` row.
+    backend = fake_backend(outputs=[report, report, _undetermined()])
+    with pytest.raises(WrongTest, match="Need owner evidence"):
+        loop._steps(green_cfg, g, wt, log, backend, 0)
+    assert backend.agents == ["test-writer", "test-writer", "juror"]
+    rows = _rows(green_cfg)
+    assert [r["mismatch_kind"] for r in rows if r["kind"] == "mismatch"] == [
+        "red report",
+        "red report",
+    ]
     assert log.kept("g1-red") == report.rstrip("\n") + "\n"
 
 
@@ -1114,10 +1102,18 @@ def test_red_rerun_replaces_ids_and_overlapping_producers_stop(
             build.form, red=(forms.RedSelection("red"), forms.RedSelection("other"))
         ),
     )
-    backend = fake_backend()
-    with pytest.raises(RulingNeeded, match="overlapping red test ids"):
-        loop._steps(green_cfg, make_group(red, other, build), wt, log, backend, 2)
-    assert backend.briefs == []
+    # The Mismatches table's first `evidence` row: ids `_red_ids` cannot resolve
+    # for a build go to a judgment on the build before the builder starts.
+    backend = fake_backend(outputs=[_undetermined()])
+    group = make_group(red, other, build, design="docs/superpowers/specs/approved.md")
+    with pytest.raises(WrongTest, match="Need owner evidence"):
+        loop._steps(green_cfg, group, wt, log, backend, 2)
+    assert backend.agents == ["juror"]
+    assert _mismatch_kinds(green_cfg) == ["evidence"]
+    assert _no_ruling(green_cfg)
+    judgment = json.loads(log.kept("g1-build-judgment"))
+    assert judgment["red_ids"] == ["tests/test_a.py::test_new"]
+    assert str(green_cfg.state_dir / "g1-other.txt") in judgment["reports"]
 
 
 def test_missing_red_report_stops_before_builder(green_cfg, log, fake_backend):
@@ -1288,8 +1284,8 @@ def test_upheld_invalid_typed_finding_stops_before_any_batch(
         ("spec wrong", "owner", None, WrongTest),
         ("undetermined", "owner", None, WrongTest),
         ("build wrong", "retry", "build", None),
-        ("build wrong", "retry", "stub", RulingNeeded),
-        ("build wrong", "retry", "absent", RulingNeeded),
+        ("build wrong", "retry", "stub", WrongTest),
+        ("build wrong", "retry", "absent", WrongTest),
     ],
 )
 def test_juror_follows_owner_and_build_verdicts(
@@ -1342,7 +1338,13 @@ def test_juror_follows_owner_and_build_verdicts(
             {"gauntlet/core/a.py": "fixed"},
             {"later.py": "later"},
         ],
-        ["", _red_report(test_id), f"TEST WRONG 1:\n  {test_id} | mismatch\n", verdict],
+        [
+            "",
+            _red_report(test_id),
+            f"TEST WRONG 1:\n  {test_id} | mismatch\n",
+            verdict,
+            verdict,
+        ],
     )
     restored = []
     restore = git.restore
@@ -1353,19 +1355,25 @@ def test_juror_follows_owner_and_build_verdicts(
 
     monkeypatch.setattr(git, "restore", observe_restore)
     if expected is not None:
-        with pytest.raises(expected):
+        with pytest.raises(
+            expected, match="juror rounds exhausted" if target else None
+        ):
             loop.run_group(cfg, group, log, backend)
         assert not log.done()
         assert git.worktree(cfg, "g1").is_dir()
-        assert backend.agents == [
-            "core-builder",
-            "test-writer",
-            "core-builder",
-            "juror",
-        ]
+        agents = ["core-builder", "test-writer", "core-builder", "juror"]
+        if target is None:
+            assert _mismatch_kinds(cfg) == []
+        else:
+            # The Mismatches table's `verdict` row: a target outside the judgment
+            # (a stub or an absent step) uses a juror round; the next follows, and
+            # `juror_rounds` ends in the owner stop.
+            agents.append("juror")
+            assert _mismatch_kinds(cfg) == ["verdict", "verdict"]
+            assert _no_ruling(cfg)
+        assert backend.agents == agents
         assert restored == []
-        if expected is WrongTest:
-            assert "[test_wrong] g1:" in capsys.readouterr().err
+        assert "[test_wrong] g1:" in capsys.readouterr().err
     else:
         loop.run_group(cfg, group, log, backend)
         assert log.done() == {"g1"}
@@ -1507,7 +1515,7 @@ def test_juror_start_failure_does_not_use_a_round(green_cfg, log, fake_backend):
         loop._judge(cfg, group, "build", judgment, wt, EventLog(cfg), failing)
     assert failing.inner.agents == []
     started = fake_backend(outputs=["malformed verdict"])
-    with pytest.raises(RulingNeeded):
+    with pytest.raises(WrongTest, match="juror rounds exhausted"):
         loop._judge(cfg, group, "build", judgment, wt, EventLog(cfg), started)
     assert started.agents == ["juror"]
     fresh = fake_backend()
@@ -1547,7 +1555,11 @@ def test_juror_attempts_survive_restart_and_stop_at_configured_cap(
     # Include a prior reservation without a completed dispatch.
     log.keep("g1-build-juror-1", "")
     backend = fake_backend(outputs=[output], codes=[code])
-    with pytest.raises(RulingNeeded):
+    if code == TIMEOUT_CODE:
+        stop = pytest.raises(RulingNeeded)
+    else:
+        stop = pytest.raises(WrongTest, match="juror rounds exhausted")
+    with stop:
         loop._judge(cfg, group, "build", judgment, wt, EventLog(cfg), backend)
     assert backend.agents == ["juror"]
     assert log.kept("g1-build-juror-2").strip() == output
@@ -1647,17 +1659,19 @@ def test_juror_repair_preserves_producer_and_restores_builder(
                 )
             return super().start(brief, worktree, agent)
 
+    rejected = change not in ("machinery", "outside")
     backend = Spy(
         [
             {"a.py": "partial", "new.py": "remove", "stray": "keep"},
             {},
             files,
-            {"a.py": "finished"},
+            {} if rejected else {"a.py": "finished"},
         ],
         [
             f"TEST WRONG 1:\n  {test_id} | wrong machinery\n",
             verdict,
             "RUN after all green",
+            _undetermined() if rejected else "",
         ],
     )
     if change == "machinery":
@@ -1668,14 +1682,26 @@ def test_juror_repair_preserves_producer_and_restores_builder(
             test_id,
             "tests/test_b.py::test_new",
         ]
-    else:
+    elif change == "outside":
         with pytest.raises(RulingNeeded) as error:
             loop._step(cfg, group, 1, wt, log, backend)
         assert ".ruff_cache" not in str(error.value)
-        if change == "outside":
-            assert "other.py" in str(error.value)
+        assert "other.py" in str(error.value)
         assert len(backend.briefs) == 3
         assert (wt / "a.py").read_text() == "partial"
+    else:
+        # The Mismatches table's `repair evidence` row: the next judgment
+        # attempt on the same context, never a stop.
+        with pytest.raises(WrongTest, match="Need owner evidence"):
+            loop._step(cfg, group, 1, wt, log, backend)
+        assert backend.agents == ["core-builder", "juror", "test-writer", "juror"]
+        assert log.kept("g1-build-juror-2").strip() == _undetermined()
+        assert (wt / "a.py").read_text() == "partial"
+        rows = _rows(cfg)
+        assert [r["mismatch_kind"] for r in rows if r["kind"] == "mismatch"] == [
+            "repair evidence"
+        ]
+        assert not [r for r in rows if r["kind"] == "ruling_needed"]
     assert backend.briefs[2] == (
         f"repair\nfiles: tests/test_a.py\nfiles: tests/test_b.py\nview: {cfg.view_root}/g1/a.pyi\n"
         "failure: fixture provided wrong value"
@@ -1987,7 +2013,7 @@ def test_judgment_check_timeouts_remain_rulings(green_cfg, log, fake_backend, tr
     assert not log.done()
 
 
-@pytest.mark.parametrize("invalid", ["missing-spec", "stale-producer"])
+@pytest.mark.parametrize("invalid", ["missing-spec"])
 def test_judgment_group_rejects_missing_spec_or_stale_evidence(
     green_cfg, log, fake_backend, invalid
 ):
@@ -2903,3 +2929,213 @@ def test_step_answer_rounds_count_across_restarts(green_cfg, log, fake_backend):
     assert backend.agents == ["core-builder", "juror"]
     with pytest.raises(ConfigError):
         log.kept("g1-s1-answer-2")
+
+
+def _mismatch_kinds(cfg: Config) -> list[str]:
+    return [r["mismatch_kind"] for r in _rows(cfg) if r["kind"] == "mismatch"]
+
+
+def _no_ruling(cfg: Config) -> bool:
+    return not [r for r in _rows(cfg) if r["kind"] == "ruling_needed"]
+
+
+@pytest.mark.parametrize("case", ["stale", "empty-selection"])
+def test_unresolved_producer_evidence_opens_a_judgment_before_the_builder(
+    green_cfg, log, fake_backend, case
+):
+    cfg = _viewing(green_cfg)
+    red = make_step(
+        "red",
+        ["tests/test_a.py", "tests/test_b.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("A behavior", "a.py"),)),
+        views=["a.py"],
+    )
+    files = ("tests/test_b.py",) if case == "empty-selection" else None
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red", files),)
+        ),
+    )
+    wt = git.make_worktree(cfg, "g1")
+    (wt / "a.py").write_text("stub")
+    loop._steps(
+        cfg,
+        make_group(red),
+        wt,
+        log,
+        fake_backend(outputs=[_red_report("tests/test_a.py::test_new")]),
+        0,
+    )
+    if case == "stale":
+        log.keep("g1-red-evidence", "")
+    group = make_group(red, build, design="docs/superpowers/specs/approved.md")
+    backend = fake_backend(outputs=[_undetermined()])
+    with pytest.raises(WrongTest, match="Need owner evidence"):
+        loop._steps(cfg, group, wt, EventLog(cfg), backend, 1)
+    assert backend.agents == ["juror"]
+    with pytest.raises(ConfigError):
+        log.kept("g1-build-brief")
+    judgment = json.loads(log.kept("g1-build-judgment"))
+    assert judgment["steps"] == ["red", "build"]
+    assert judgment["red_ids"] == []
+    assert str(cfg.state_dir / "g1-red.txt") in judgment["reports"]
+    assert "evidence" in _mismatch_kinds(cfg)
+    assert _no_ruling(cfg)
+
+
+@pytest.mark.parametrize("context", ["step", "group"])
+def test_judgment_leaves_unresolved_producer_ids_out_and_keeps_its_report(
+    green_cfg, log, fake_backend, context
+):
+    cfg = _viewing(green_cfg)
+    red_a = make_step(
+        "red-a",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("A behavior", "a.py"),)),
+        views=["a.py"],
+    )
+    red_b = replace(red_a, id="red-b", paths=["tests/test_b.py"])
+    build = make_step(
+        "build",
+        form=forms.Build(
+            "core-builder",
+            "Approved build",
+            (forms.RedSelection("red-a"), forms.RedSelection("red-b")),
+        ),
+    )
+    wt = git.make_worktree(cfg, "g1")
+    (wt / "a.py").write_text("stub")
+    loop._steps(
+        cfg,
+        make_group(red_a, red_b),
+        wt,
+        log,
+        fake_backend(
+            outputs=[
+                _red_report("tests/test_a.py::test_new"),
+                _red_report("tests/test_b.py::test_new"),
+            ]
+        ),
+        0,
+    )
+    log.keep("g1-build", "done\n")
+    failure = str(log.keep("g1-build-check", "a.py:1 bad\n"))
+    log.keep("g1-red-b-evidence", "")
+    group = make_group(red_a, red_b, build, design="docs/superpowers/specs/approved.md")
+    judgment = loop._judgment(
+        group,
+        2 if context == "step" else None,
+        wt,
+        EventLog(cfg),
+        failure=failure,
+        spec_dir=cfg.spec_dir,
+    )
+    assert judgment.red_ids == ("tests/test_a.py::test_new",)
+    assert str(cfg.state_dir / "g1-red-b.txt") in judgment.reports
+    assert failure in judgment.reports
+    assert "evidence" in _mismatch_kinds(cfg)
+    assert _no_ruling(cfg)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "REJECTED: STEERING missing evidence",
+        "OVERLOADED: 6 paths",
+        "malformed verdict",
+        (
+            "VERDICT build wrong\nACTION retry\nSTEP other\nREASON Fix it\n"
+            "EVIDENCE a.py:1 | broken\nEND JUDGMENT"
+        ),
+        (
+            "VERDICT undetermined\nACTION owner\nREASON Need other evidence\n"
+            "EVIDENCE /elsewhere/report.txt:1 | not in this judgment\nEND JUDGMENT"
+        ),
+    ],
+    ids=["refused", "overloaded", "malformed", "target-outside", "evidence-outside"],
+)
+def test_refused_or_rejected_juror_uses_its_round_and_the_next_attempt_follows(
+    green_cfg, log, fake_backend, capsys, bad
+):
+    cfg = replace(green_cfg, juror_rounds=2)
+    group = make_group(make_step("build"), make_step("other", ["b.py"]))
+    wt = git.make_worktree(cfg, group.id)
+    path = log.keep("g1-build", "failure")
+    judgment = forms.Judgment(
+        "docs/superpowers/specs/approved.md",
+        ("build",),
+        "Approved build",
+        (),
+        (str(path),),
+    )
+    backend = fake_backend(outputs=[bad, _undetermined()])
+    with pytest.raises(WrongTest, match="Need owner evidence"):
+        loop._judge(cfg, group, "build", judgment, wt, log, backend)
+    assert backend.agents == ["juror", "juror"]
+    assert backend.briefs[0] == backend.briefs[1]
+    assert log.kept("g1-build-juror-1").strip() == bad
+    assert log.kept("g1-build-juror-2").strip() == _undetermined()
+    assert _mismatch_kinds(cfg) == ["verdict"]
+    assert _no_ruling(cfg)
+    capsys.readouterr()
+
+
+def test_refused_repair_opens_the_next_judgment_attempt_on_the_same_context(
+    green_cfg, log, fake_backend
+):
+    cfg = replace(_viewing(green_cfg), juror_rounds=2)
+    test_id = "tests/test_a.py::test_new"
+    original = "def test_new():\n    value = 1\n    assert value == 1\n"
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        views=["a.py"],
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        check=["false"],
+        expect_code=1,
+    )
+    build = make_step(
+        "build",
+        ["a.py"],
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red"),)
+        ),
+        check=["true"],
+    )
+    group = make_group(red, build, design="docs/superpowers/specs/approved.md")
+    wt = git.make_worktree(cfg, group.id)
+    (wt / "a.py").write_text("original")
+    loop._steps(
+        cfg,
+        make_group(red),
+        wt,
+        log,
+        fake_backend([{"tests/test_a.py": original}], [_red_report(test_id)]),
+        0,
+    )
+    verdict = (
+        "VERDICT tests wrong\nACTION repair\nSTEP red\n"
+        "REASON Machinery misrepresents approved behavior\n"
+        "EVIDENCE tests/test_a.py:2 | wrong fixture value\n"
+        "FAILURE fixture provided wrong value\nEND JUDGMENT"
+    )
+    backend = fake_backend(
+        [{"a.py": "partial"}, {}, {}, {}],
+        [
+            f"TEST WRONG 1:\n  {test_id} | wrong machinery\n",
+            verdict,
+            "REJECTED: STEERING failure lines",
+            _undetermined(),
+        ],
+    )
+    with pytest.raises(WrongTest, match="Need owner evidence"):
+        loop._step(cfg, group, 1, wt, log, backend)
+    assert backend.agents == ["core-builder", "juror", "test-writer", "juror"]
+    assert log.kept("g1-build-juror-2").strip() == _undetermined()
+    assert (wt / "tests/test_a.py").read_text() == original
+    assert _mismatch_kinds(cfg) == ["repair evidence"]
+    assert _no_ruling(cfg)

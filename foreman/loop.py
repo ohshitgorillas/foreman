@@ -242,29 +242,66 @@ def _current_red_evidence(
     return evidence
 
 
-def _red_ids(group: Group, index: int, wt: Path, log: EventLog) -> list[str]:
+def _settle(
+    group: Group,
+    wt: Path,
+    log: EventLog,
+    found: dict[str, str],
+    unresolved: dict[str, str] | None,
+) -> None:
+    """Hand unresolved producers to the caller's collector, or stop on the first."""
+    if unresolved is not None:
+        for name, reason in found.items():
+            unresolved.setdefault(name, reason)
+    elif found:
+        name, reason = next(iter(found.items()))
+        raise _rule(log, group, wt, f"{name}.txt", reason)
+
+
+def _red_ids(
+    group: Group,
+    index: int,
+    wt: Path,
+    log: EventLog,
+    *,
+    unresolved: dict[str, str] | None = None,
+) -> list[str]:
+    """Resolve a build's selected ids, producer by producer.
+
+    A producer whose evidence does not resolve contributes no ids. Given an
+    `unresolved` collector, its kept report name and reason go there for the
+    Mismatches table's `evidence` rows; without one, the first stops. A selection
+    the queue could not have declared always stops.
+    """
     step = group.steps[index]
-    if not isinstance(step.form, forms.Build):
-        return []
     ids: list[str] = []
+    found: dict[str, str] = {}
+    if not isinstance(step.form, forms.Build):
+        return ids
     for selection in step.form.red:
         name = f"{group.id}-{selection.step}"
-        try:
-            producer = next(
-                (s for s in group.steps[:index] if s.id == selection.step), None
+        producer = next(
+            (s for s in group.steps[:index] if s.id == selection.step), None
+        )
+        if (
+            producer is None
+            or producer.role != "test-writer"
+            or not isinstance(producer.form, forms.Red)
+        ):
+            raise _rule(
+                log,
+                group,
+                wt,
+                f"{name}.txt",
+                "reference is not an earlier red producer",
             )
-            if (
-                producer is None
-                or producer.role != "test-writer"
-                or not isinstance(producer.form, forms.Red)
-            ):
-                raise ConfigError("reference is not an earlier red producer")
-            if selection.files is not None and (
-                not selection.files
-                or len(set(selection.files)) != len(selection.files)
-                or not set(selection.files) <= set(producer.paths)
-            ):
-                raise ConfigError("invalid red file filter")
+        if selection.files is not None and (
+            not selection.files
+            or len(set(selection.files)) != len(selection.files)
+            or not set(selection.files) <= set(producer.paths)
+        ):
+            raise _rule(log, group, wt, f"{name}.txt", "invalid red file filter")
+        try:
             evidence = _current_red_evidence(producer, name, wt, log)
             selected = [
                 item.test_id
@@ -276,27 +313,41 @@ def _red_ids(group: Group, index: int, wt: Path, log: EventLog) -> list[str]:
                 raise ConfigError("red selection contains no new ids")
             if set(ids).intersection(selected):
                 raise ConfigError("overlapping red test ids")
-            ids.extend(selected)
         except (ConfigError, RulingNeeded) as error:
-            raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+            found.setdefault(name, str(error))
+            continue
+        ids.extend(selected)
+    _settle(group, wt, log, found, unresolved)
     return ids
 
 
-def _group_red_ids(group: Group, wt: Path, log: EventLog) -> list[str]:
+def _group_red_ids(
+    group: Group,
+    wt: Path,
+    log: EventLog,
+    *,
+    unresolved: dict[str, str] | None = None,
+) -> list[str]:
     """Resolve complete-group evidence through the same producer/build checks."""
-    ids: list[str] = []
+    produced: dict[str, list[str]] = {}
+    found: dict[str, str] = {}
     for candidate in group.steps:
         if isinstance(candidate.form, forms.Red):
             name = f"{group.id}-{candidate.id}"
             try:
                 evidence = _current_red_evidence(candidate, name, wt, log)
             except (ConfigError, RulingNeeded) as error:
-                raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
-            for item in evidence:
-                if item.test_id not in ids:
-                    ids.append(item.test_id)
+                found.setdefault(name, str(error))
+                continue
+            produced[name] = [item.test_id for item in evidence]
     for index in range(len(group.steps)):
-        _red_ids(group, index, wt, log)
+        _red_ids(group, index, wt, log, unresolved=found)
+    _settle(group, wt, log, found, unresolved)
+    # A producer a build cannot resolve contributes none of its ids.
+    ids: list[str] = []
+    for name, produced_ids in produced.items():
+        if name not in found:
+            ids.extend(i for i in produced_ids if i not in ids)
     return ids
 
 
@@ -353,8 +404,28 @@ def _step(
     """Execute one step without replacing its original restoration point."""
     step = group.steps[index]
     view_paths = _view_paths(cfg, group, step, wt, log, f"{group.id}-{step.id}")
-    red_ids = _red_ids(group, index, wt, log)
     name = f"{group.id}-{step.id}"
+    # Kept before evidence resolves, so a verdict on an unstarted build can restore.
+    before = git.snapshot(wt)
+    try:
+        log.kept(f"{name}-before")
+    except ConfigError:
+        log.keep(f"{name}-before", before)
+    unresolved: dict[str, str] = {}
+    red_ids = _red_ids(group, index, wt, log, unresolved=unresolved)
+    for producer, reason in unresolved.items():
+        try:
+            log.kept(f"{producer}-brief")
+        except ConfigError:
+            # A producer that never dispatched leaves no report to judge.
+            raise _rule(log, group, wt, f"{producer}.txt", reason) from None
+    if unresolved:
+        # The Mismatches table's `evidence` row: judge the build before it starts.
+        judgment = _judgment(
+            group, index, wt, log, spec_dir=cfg.spec_dir, dispatched=False
+        )
+        _judge(cfg, group, step.id, judgment, wt, log, backend)
+        return
     cut = None
     if isinstance(step.form, forms.Red):
         cut = overload.cut_red(
@@ -363,11 +434,6 @@ def _step(
         if cut.refused:
             lines = "; ".join(o.line() for o in cut.refused)
             raise _rule(log, group, wt, "none", f"step {step.id} refused: {lines}")
-    before = git.snapshot(wt)
-    try:
-        log.kept(f"{name}-before")
-    except ConfigError:
-        log.keep(f"{name}-before", before)
 
     def render(form: forms.Form) -> str:
         return brief.render(
@@ -477,16 +543,23 @@ def _judgment(
     *,
     failure: str | None = None,
     spec_dir: str = forms.GAUNTLET_SPEC_DIR,
+    dispatched: bool = True,
 ) -> forms.Judgment:
-    """Resolve a failed step or completed group through the same evidence path."""
+    """Resolve a failed step or completed group through the same evidence path.
+
+    A producer whose evidence does not resolve is logged as an `evidence`
+    mismatch and its ids are left out; its kept report stays among the reports.
+    `dispatched=False` judges a step that has kept no report of its own.
+    """
+    unresolved: dict[str, str] = {}
     if index is None:
         name = f"{group.id}-group-check"
         candidates = group.steps
-        red_ids = _group_red_ids(group, wt, log)
+        red_ids = _group_red_ids(group, wt, log, unresolved=unresolved)
     else:
         step = group.steps[index]
         name = f"{group.id}-{step.id}"
-        red_ids = _red_ids(group, index, wt, log)
+        red_ids = _red_ids(group, index, wt, log, unresolved=unresolved)
         selected = (
             {r.step for r in step.form.red}
             if isinstance(step.form, forms.Build)
@@ -495,6 +568,13 @@ def _judgment(
         candidates = [
             s for s in group.steps[: index + 1] if s.id in selected or s.id == step.id
         ]
+    for producer, reason in unresolved.items():
+        log.mismatched(
+            group.id,
+            producer,
+            "evidence",
+            f"producer evidence unresolved: {reason}; kept {producer}",
+        )
     blocks = []
     paths = []
     try:
@@ -515,9 +595,9 @@ def _judgment(
                 try:
                     text = log.kept(n)
                 except ConfigError:
-                    if n == key:
+                    if n == key and (dispatched or n != name):
                         raise
-                    text = ""
+                    continue
                 if text or n == key:
                     paths.append(str(log.keep(n, text)))
         if failure is not None and failure not in paths:
@@ -533,7 +613,9 @@ def _judgment(
         if problems:
             raise ConfigError("; ".join(problems))
     except (ConfigError, RulingNeeded) as error:
-        raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+        # A step judged before it dispatched has no report; its producer's names it.
+        kept = name if dispatched or not unresolved else next(iter(unresolved))
+        raise _rule(log, group, wt, f"{kept}.txt", str(error)) from error
     log.keep(f"{name}-judgment", json.dumps(asdict(judgment)))
     return judgment
 
@@ -574,29 +656,38 @@ def _judge(
         ),
     )
     log.keep(f"{group.id}-owner-judgment", "")
-    number = 1
-    used = 0
     while True:
-        name = f"{group.id}-{context}-juror-{number}"
-        try:
-            log.kept(name)
-        except ConfigError:
+        number = 1
+        used = 0
+        while True:
+            name = f"{group.id}-{context}-juror-{number}"
+            try:
+                log.kept(name)
+            except ConfigError:
+                break
+            try:
+                log.kept(f"{name}-unstarted")
+            except ConfigError:
+                used += 1
+            number += 1
+        if used >= cfg.juror_rounds:
+            raise _owner_stop(group, judgment, wt, log, "juror rounds exhausted")
+        text = brief.render(judgment, paths=[], view_paths={}, red_ids=[])
+        path = log.keep(name, "")
+        report = _dispatch(group, wt, log, backend, name, text, "juror")
+        if report.kind != "done":
+            problem = f"juror {report.kind}"
+        else:
+            try:
+                verdict = reports.verdict(log.kept(name))
+            except ConfigError as error:
+                problem = str(error)
+            else:
+                problem = _outside_judgment(group, judgment, verdict)
+        if problem is None:
             break
-        try:
-            log.kept(f"{name}-unstarted")
-        except ConfigError:
-            used += 1
-        number += 1
-    if used >= cfg.juror_rounds:
-        raise _owner_stop(group, judgment, wt, log, "juror rounds exhausted")
-    text = brief.render(judgment, paths=[], view_paths={}, red_ids=[])
-    log.keep(name, "")
-    report = _dispatch(group, wt, log, backend, name, text, "juror")
-    _refusal_stops(cfg, group, wt, log, name, "juror", report)
-    try:
-        verdict = reports.verdict(log.kept(name))
-    except ConfigError as error:
-        raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
+        # The Mismatches table's `verdict` row: the round is used; the next follows.
+        log.mismatched(group.id, name, "verdict", f"{problem}; kept {path}")
     _follow_verdict(
         cfg,
         group,
@@ -607,6 +698,33 @@ def _judge(
         verdict,
         completed=completed or context == "group-check",
     )
+
+
+def _target(
+    group: Group, judgment: forms.Judgment, verdict: reports.Verdict
+) -> int | None:
+    """The group index of the verdict's step when it is a judgment candidate."""
+    return next(
+        (
+            i
+            for i, s in enumerate(group.steps)
+            if s.id == verdict.step and s.id in judgment.steps
+        ),
+        None,
+    )
+
+
+def _outside_judgment(
+    group: Group, judgment: forms.Judgment, verdict: reports.Verdict
+) -> str | None:
+    """Why a verdict's evidence or target lies outside its judgment, if it does."""
+    for evidence in verdict.evidence:
+        path = evidence.partition(" | ")[0].rpartition(":")[0]
+        if path.startswith("/") and path not in judgment.reports:
+            return "verdict evidence is not a judgment report"
+    if verdict.action != "owner" and _target(group, judgment, verdict) is None:
+        return "verdict target is not a judgment candidate"
+    return None
 
 
 def _follow_verdict(
@@ -621,34 +739,13 @@ def _follow_verdict(
     completed: bool = False,
 ) -> None:
     """Follow a decoded verdict; never substitute a local fault decision."""
-    for evidence in verdict.evidence:
-        path = evidence.partition(" | ")[0].rpartition(":")[0]
-        if path.startswith("/") and path not in judgment.reports:
-            raise _rule(
-                log,
-                group,
-                wt,
-                ", ".join(judgment.reports),
-                "verdict evidence is not a judgment report",
-            )
+    problem = _outside_judgment(group, judgment, verdict)
+    if problem is not None:
+        raise _rule(log, group, wt, ", ".join(judgment.reports), problem)
     if verdict.action == "owner":
         raise _owner_stop(group, judgment, wt, log, "; ".join(verdict.reasons))
-    target = next(
-        (
-            i
-            for i, s in enumerate(group.steps)
-            if s.id == verdict.step and s.id in judgment.steps
-        ),
-        None,
-    )
-    if target is None:
-        raise _rule(
-            log,
-            group,
-            wt,
-            ", ".join(judgment.reports),
-            "verdict target is not a judgment candidate",
-        )
+    target = _target(group, judgment, verdict)
+    assert target is not None
     step = group.steps[target]
     if verdict.kind == "build wrong" and verdict.action == "retry":
         # Before the group completes, replay only through the judged step; later
@@ -690,7 +787,15 @@ def _follow_verdict(
         return
     if verdict.kind == "tests wrong" and verdict.action == "repair":
         _repair(
-            cfg, group, target, judgment, wt, log, backend, verdict, completed=completed
+            cfg,
+            group,
+            target,
+            judgment,
+            wt,
+            log,
+            backend,
+            verdict,
+            completed=completed,
         )
         return
     if verdict.kind == "tests wrong" and verdict.action == "redo red":
@@ -790,7 +895,11 @@ def _repair(
     *,
     completed: bool = False,
 ) -> None:
-    """Repair machinery against preserved producer evidence, then retry its build."""
+    """Repair machinery against preserved producer evidence, then retry its build.
+
+    A refused repair or rejected repair evidence is the Mismatches table's
+    `repair evidence` row: the next judgment attempt opens on the same context.
+    """
     producer = group.steps[target]
     name = f"{group.id}-{producer.id}"
     kept = ", ".join(judgment.reports)
@@ -840,7 +949,20 @@ def _repair(
     text = brief.render(form, paths=producer.paths, view_paths=view_paths, red_ids=[])
     before_repair = git.snapshot(wt)
     report = _dispatch(group, wt, log, backend, repair_name, text, "test-writer")
-    _refusal_stops(cfg, group, wt, log, repair_name, "test-writer", report)
+    repair_path = str(cfg.state_dir / f"{repair_name}.txt")
+    if report.kind != "done":
+        _next_judgment(
+            cfg,
+            group,
+            judgment,
+            wt,
+            log,
+            backend,
+            producer,
+            f"test-writer repair {report.kind}; kept {repair_path}",
+            completed=completed,
+        )
+        return
     outside = [
         p
         for p in git.changed_since(wt, before_repair, include_ignored=False)
@@ -857,7 +979,18 @@ def _repair(
     try:
         verify.validate_repair(original, wt)
     except RulingNeeded as error:
-        raise _rule(log, group, wt, f"{repair_name}.txt", str(error)) from error
+        _next_judgment(
+            cfg,
+            group,
+            judgment,
+            wt,
+            log,
+            backend,
+            producer,
+            f"{error}; kept {repair_path}",
+            completed=completed,
+        )
+        return
     if completed:
         for index, step in enumerate(group.steps):
             if isinstance(step.form, forms.Build) and any(
@@ -868,6 +1001,38 @@ def _repair(
         assert stopped is not None
         git.restore(wt, before_build, build.paths)
         _step(cfg, group, stopped, wt, log, backend)
+
+
+def _next_judgment(
+    cfg: Config,
+    group: Group,
+    judgment: forms.Judgment,
+    wt: Path,
+    log: EventLog,
+    backend: Backend,
+    producer: Step,
+    why: str,
+    *,
+    completed: bool,
+) -> None:
+    """Log a rejected repair and judge the same context again.
+
+    The context is the one `_judge` or `run_retest` kept with this judgment. The
+    repair's writes stay in the tree for the juror; a later repair still checks
+    them against the preserved producer evidence.
+    """
+    name = f"{group.id}-{producer.id}-repair"
+    log.mismatched(group.id, name, "repair evidence", why)
+    try:
+        pending = json.loads(log.kept(f"{group.id}-pending-judgment"))
+        if pending["judgment"] != json.loads(json.dumps(asdict(judgment))):
+            raise ValueError("pending judgment is not this judgment")
+        context = pending["context"]
+        if not isinstance(context, str):
+            raise TypeError("pending judgment has no context")
+    except (ConfigError, KeyError, TypeError, ValueError) as error:
+        raise _rule(log, group, wt, ", ".join(judgment.reports), str(error)) from error
+    _judge(cfg, group, context, judgment, wt, log, backend, completed=completed)
 
 
 def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) -> None:
@@ -1098,10 +1263,10 @@ def run_retest(
         if pending.get("queue") != _queue_identity(group):
             raise ConfigError("owner judgment queue changed; rerun producer evidence")
         if context == "group-check":
-            current_ids = _group_red_ids(group, wt, log)
+            current_ids = _group_red_ids(group, wt, log, unresolved={})
         else:
             assert index is not None
-            current_ids = _red_ids(group, index, wt, log)
+            current_ids = _red_ids(group, index, wt, log, unresolved={})
         if tuple(current_ids) != judgment.red_ids:
             raise ConfigError("owner judgment red selectors changed; refresh judgment")
     except (ConfigError, RulingNeeded) as error:
@@ -1109,7 +1274,14 @@ def run_retest(
     log.keep(f"{group.id}-retest-verdict", text)
     backend = backend or backends.get(cfg)
     _follow_verdict(
-        cfg, group, judgment, wt, log, backend, verdict, completed=pending["completed"]
+        cfg,
+        group,
+        judgment,
+        wt,
+        log,
+        backend,
+        verdict,
+        completed=pending["completed"],
     )
     log.keep(f"{group.id}-owner-judgment", "")
     log.keep(f"{group.id}-pending-judgment", "")
