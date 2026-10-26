@@ -11,8 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import NoReturn
 
-from foreman import backends, config, events, loop, steps
-from foreman.errors import EXIT_OK, ConfigError, ForemanError
+from foreman import backends, config, events, loop, preflight, steps
+from foreman.errors import EXIT_OK, ConfigError, ForemanError, PreflightFailed
 from foreman.events import EventLog, fail, say
 from foreman.steps import Group
 
@@ -34,6 +34,12 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("step_file", type=Path)
     t.add_argument("group_id")
     t.add_argument("verdict", type=Path)
+    for command in (r, u, t):
+        command.add_argument(
+            "--override-preflight",
+            action="store_true",
+            help="dispatch despite pre-flight findings, printing them as a warning",
+        )
     sub.add_parser("status", help="print the one-line status")
     return p
 
@@ -65,6 +71,23 @@ def _read(path: Path) -> str:
         raise ConfigError(f"cannot read {path}: {e}") from e
 
 
+def _preflight(groups: list[Group], cfg: config.Config, override: bool) -> None:
+    """Run pre-flight's default checks over `groups`; refuse on any finding unless overridden."""
+    findings = preflight.preflight(groups, cfg, None, preflight.CHECKS)
+    if not findings:
+        return
+    if override:
+        for f in findings:
+            fail(f"warning: pre-flight finding overridden: {f.line()}")
+        return
+    for f in findings:
+        fail(f.line())
+    raise PreflightFailed(
+        f"pre-flight reported {len(findings)} finding(s); nothing dispatched"
+        " (pass --override-preflight to run anyway)"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -74,18 +97,22 @@ def main(argv: list[str] | None = None) -> int:
             say(log.status())
             return EXIT_OK
         groups = _load(args.step_file, cfg)
+        if args.command == "run" and not args.group_id:
+            done = log.done()
+            pending = [g for g in groups if g.id not in done]
+        else:
+            pending = [_find(groups, args.group_id)]
         if args.command == "upheld":
             text = _read(args.findings)
-            say(loop.run_upheld(cfg, _find(groups, args.group_id), text, log))
         elif args.command == "retest":
             text = _read(args.verdict)
-            say(loop.run_retest(cfg, _find(groups, args.group_id), text, log))
+        _preflight(pending, cfg, args.override_preflight)
+        if args.command == "upheld":
+            say(loop.run_upheld(cfg, pending[0], text, log))
+        elif args.command == "retest":
+            say(loop.run_retest(cfg, pending[0], text, log))
         elif args.group_id:
-            say(
-                loop.run_group(
-                    cfg, _find(groups, args.group_id), log, backends.get(cfg)
-                )
-            )
+            say(loop.run_group(cfg, pending[0], log, backends.get(cfg)))
         else:
             for commit in loop.run_section(cfg, groups, log):
                 say(commit)

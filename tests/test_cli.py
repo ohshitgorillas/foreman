@@ -8,15 +8,42 @@ from types import SimpleNamespace
 
 import pytest
 
-from foreman import backends, cli, events, loop
+from foreman import backends, cli, events, loop, preflight
 from foreman.cli import main
-from foreman.errors import WrongTest
+from foreman.config import Config
+from foreman.errors import PreflightFailed, WrongTest
 from foreman.run import run_ok
 
 GROUP_FILE = (
     '[steps.s1]\nrole = "core-builder"\nshape = "stub"\nform = {step = "Approved step"}\npaths = ["gauntlet/core/a.py"]\n'
     '[groups.g1]\nsteps = ["s1"]\n'
 )
+
+
+ROLE = ".claude/agents/core-builder.md"
+
+
+def role_file(cfg: Config, scope: str) -> None:
+    path = cfg.target_repo / ROLE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nname: core-builder\ndescription: Writes under `{scope}` only.\n---\n"
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_host_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep pre-flight's hooks check off this host's real ~/.claude settings."""
+    monkeypatch.setattr(preflight, "USER_SETTINGS", ())
+
+
+@pytest.fixture
+def conf_file(conf_file: Path, green_cfg: Config) -> Path:
+    """The shared conf_file, its target repo carrying a role file pre-flight passes."""
+    role_file(green_cfg, "gauntlet/")
+    run_ok(["git", "add", ROLE], green_cfg.target_repo)
+    run_ok(["git", "commit", "-q", "-m", "role"], green_cfg.target_repo)
+    return conf_file
 
 
 @pytest.fixture
@@ -207,6 +234,87 @@ def test_retest_cli_preserves_verdict_bytes(
     assert main(
         ["--config", str(conf_file), "retest", str(steps_file), "g1", str(path)]
     ) == (0 if newline == "\n" else 2)
+
+
+# Pre-flight gate: run, upheld and retest refuse on a finding unless overridden.
+
+
+@pytest.fixture
+def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace every loop entry point with a recorder, so nothing is dispatched."""
+    calls: list[str] = []
+
+    def recorder(name: str):
+        def record(*args):
+            calls.append(name)
+            return [] if name == "run_section" else "landed"
+
+        return record
+
+    for name in ["run_section", "run_group", "run_upheld", "run_retest"]:
+        monkeypatch.setattr(loop, name, recorder(name))
+    return calls
+
+
+def gate_argv(conf_file: Path, steps_file: Path, tmp_path: Path, command: str):
+    path = tmp_path / "continuation.txt"
+    path.write_text("")
+    argv = ["--config", str(conf_file), command, str(steps_file)]
+    return argv + (["g1", str(path)] if command != "run" else [])
+
+
+COMMANDS = ["run", "upheld", "retest"]
+
+
+def test_preflight_failed_has_its_own_exit_code() -> None:
+    assert PreflightFailed.exit_code == 9
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_preflight_finding_blocks_launch(
+    conf_file, steps_file, green_cfg, tmp_path, dispatched, capsys, command
+) -> None:
+    role_file(green_cfg, "docs/")
+    assert main(gate_argv(conf_file, steps_file, tmp_path, command)) == 9
+    err = capsys.readouterr().err
+    assert (
+        "foreman: s1 | scope | gauntlet/core/a.py outside core-builder's write scope"
+        " (docs/) | Foreman\n" in err
+    )
+    assert "--override-preflight" in err
+    assert dispatched == []
+    assert not green_cfg.worktree_root.exists()
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_override_flag_launches_despite_finding(
+    conf_file, steps_file, green_cfg, tmp_path, dispatched, capsys, command
+) -> None:
+    role_file(green_cfg, "docs/")
+    argv = gate_argv(conf_file, steps_file, tmp_path, command)
+    assert main([*argv, "--override-preflight"]) == 0
+    assert len(dispatched) == 1
+    err = capsys.readouterr().err
+    assert "warning" in err
+    assert "s1 | scope | gauntlet/core/a.py outside" in err
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_clean_preflight_launches(
+    conf_file, steps_file, tmp_path, dispatched, capsys, command
+) -> None:
+    assert main(gate_argv(conf_file, steps_file, tmp_path, command)) == 0
+    assert len(dispatched) == 1
+    assert capsys.readouterr().err == ""
+
+
+def test_section_preflight_skips_done_groups(
+    conf_file, steps_file, green_cfg, tmp_path, dispatched
+) -> None:
+    role_file(green_cfg, "docs/")
+    events.EventLog(green_cfg).emit("group_done", "g1", commit="abc")
+    assert main(gate_argv(conf_file, steps_file, tmp_path, "run")) == 0
+    assert dispatched == ["run_section"]
 
 
 # Exit alert. The ping is a stub under a temporary HOME; alert also fakes Popen
