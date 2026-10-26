@@ -118,7 +118,11 @@ text = "The sequence sends SIGTERM to the child's process group, waits up to TER
 source = "gauntlet/seams/process.py"
 
 [[steps.8.form.behaviors]]
-text = "Cleanup fails when any member of the group is still running after that second wait."
+text = "Cleanup fails when any member of the group has not exited after that second wait."
+source = "gauntlet/seams/process.py"
+
+[[steps.8.form.behaviors]]
+text = "A member that has exited but is not yet reaped, the child itself included, does not count as still running."
 source = "gauntlet/seams/process.py"
 
 [[steps.8.form.behaviors]]
