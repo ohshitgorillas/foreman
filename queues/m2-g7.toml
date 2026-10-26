@@ -13,7 +13,7 @@ shape = "stub"
 paths = ["gauntlet/seams/process.py"]
 
 [steps.4.form]
-step = """4 stub | seam-builder | gauntlet/seams/process.py | Complete process interfaces with readiness.Clock injection.
+step = """4 stub | seam-builder | gauntlet/seams/process.py | Complete process interfaces with readiness.Clock injection and GroupCheck injection: the GroupCheck type, group_running, and the group_check keyword on run and start.
 @dataclass(frozen=True)
 class Command:
     argv: tuple[str, ...]
@@ -48,8 +48,16 @@ class Child(Protocol):
 type Starter = Callable[[Command], Child]
 
 
-def run(command: Command, *, clock: Clock = SYSTEM) -> Completed: ...
-def start(command: Command, *, clock: Clock = SYSTEM) -> Child: ...
+TERMINATE_GRACE_SECONDS: float = 2.0
+GROUP_POLL_SECONDS: float = 0.1
+
+
+type GroupCheck = Callable[[int], bool]
+
+
+def group_running(group: int) -> bool: ...
+def run(command: Command, *, clock: Clock = SYSTEM, group_check: GroupCheck = group_running) -> Completed: ...
+def start(command: Command, *, clock: Clock = SYSTEM, group_check: GroupCheck = group_running) -> Child: ...
 def exec_command(argv: tuple[str, ...], env: Mapping[str, str]) -> NoReturn: ..."""
 
 [steps.5]
@@ -64,15 +72,15 @@ expect_code = 1
 origin = { design = "docs/superpowers/specs/m2-launcher-kinds-order-design.md", steps = ["5"] }
 
 [[steps.5.form.behaviors]]
-text = "FakeRunner returns its seeded Completed replies unchanged in call order, raises a seeded ProcessError in its turn, and records every Command it receives in commands."
+text = "Replies are seeded literals, returned unchanged in call order; each fake retains its typed call history."
 source = "gauntlet/seams/process.py"
 
 [[steps.5.form.behaviors]]
-text = "A FakeRunner called after its replies run out raises RepliesExhaustedError carrying back, verbatim, the collaborator identity the test handed it, and the attempted-call count."
+text = "The test hands each fake its collaborator identity as a required keyword; exhaustion raises RepliesExhaustedError carrying that identity verbatim and the attempted-call count."
 source = "gauntlet/seams/process.py"
 
 [[steps.5.form.behaviors]]
-text = "completed builds a Completed from literal status, stdout, stderr, timed_out and outputs, defaulting to status 0, empty streams, not timed out and no outputs."
+text = "No fake invents, derives or defaults an identity (`docs/testing.md:39`)."
 source = "gauntlet/seams/process.py"
 
 [steps.7]
