@@ -2,7 +2,7 @@ import json
 from dataclasses import asdict, replace
 
 import pytest
-from conftest import make_group, make_step
+from conftest import make_group, make_red, make_step
 
 from foreman import forms, git, loop
 from foreman.config import Config, Reviewer
@@ -2481,3 +2481,116 @@ def test_named_red_producer_uses_report_ids_with_existing_source_view(
         assert backend.agents == ["test-writer"]
     assert log.kept("g1-red-check") == summary
     assert (cfg.view_root / "g1/a.pyi").is_file()
+
+
+def _cut_red_run(cfg, log, fake_backend, texts, outputs, **limits):
+    cfg = replace(_viewing(cfg), **limits)
+    red = make_red("r1", texts, source="a.py")
+    g = make_group(red)
+    wt = git.make_worktree(cfg, g.id)
+    (wt / "a.py").write_text("stub")
+    backend = fake_backend([{"tests/test_a.py": "red"}] * len(outputs), outputs=outputs)
+    return red, g, wt, backend, lambda: loop._steps(cfg, g, wt, log, backend, 0)
+
+
+def test_red_over_the_page_limit_is_refused_before_any_dispatch(
+    green_cfg, log, fake_backend
+):
+    _, _, _, backend, run = _cut_red_run(
+        green_cfg, log, fake_backend, ("One.", "Two."), [], page_chars=1
+    )
+    with pytest.raises(RulingNeeded, match="OVERLOADED: page"):
+        run()
+    assert backend.briefs == []
+
+
+def test_red_over_the_behavior_limit_is_cut_into_parts_of_whole_behaviors(
+    green_cfg, log, fake_backend
+):
+    first, second = "tests/test_a.py::test_one", "tests/test_a.py::test_two"
+    outputs = [_red_report(first), _red_report(second)]
+    red, _, _, backend, run = _cut_red_run(
+        green_cfg,
+        log,
+        fake_backend,
+        ("One.", "Two.", "Three."),
+        outputs,
+        red_behaviors=2,
+    )
+    outputs[0] = _red_report(first, "tests/test_a.py::test_one_b", behavior=2)
+    backend.outputs[0] = outputs[0]
+    run()
+    assert len(backend.briefs) == 2
+    assert backend.briefs[0].count("behavior:") == 2
+    assert backend.briefs[1].count("behavior:") == 1
+    assert log.kept("g1-r1-parts") == "[2, 1]"
+    assert log.kept("g1-r1-brief").count("behavior:") == 3
+    assert log.kept("g1-r1-part-1-brief") == backend.briefs[0]
+    assert log.kept("g1-r1-part-2") == outputs[1] + "\n"
+    evidence = loop._red_evidence(red, "g1-r1", log)
+    assert [(e.test_id, e.behavior) for e in evidence] == [
+        (first, 2),
+        ("tests/test_a.py::test_one_b", 2),
+        (second, 3),
+    ]
+
+
+def test_red_in_one_part_keeps_its_name_and_a_single_count(
+    green_cfg, log, fake_backend
+):
+    report = _red_report("tests/test_a.py::test_one")
+    red, _, _, backend, run = _cut_red_run(
+        green_cfg, log, fake_backend, ("One.",), [report]
+    )
+    run()
+    assert len(backend.briefs) == 1
+    assert log.kept("g1-r1-parts") == "[1]"
+    assert log.kept("g1-r1") == report + "\n"
+    assert loop._parts("g1-r1", log, red) == [("g1-r1", 1)]
+
+
+def test_red_part_reporting_a_behavior_beyond_its_own_count_stops(
+    green_cfg, log, fake_backend
+):
+    outputs = [
+        _red_report("tests/test_a.py::test_one", behavior=3),
+        _red_report("tests/test_a.py::test_two"),
+    ]
+    _, _, _, _, run = _cut_red_run(
+        green_cfg,
+        log,
+        fake_backend,
+        ("One.", "Two.", "Three."),
+        outputs,
+        red_behaviors=2,
+    )
+    with pytest.raises(RulingNeeded, match="outside producer form"):
+        run()
+
+
+def test_missing_parts_read_as_one_report_of_all_behaviors(log):
+    red = make_red("r1", ("One.", "Two."))
+    assert loop._parts("g1-r1", log, red) == [("g1-r1", 2)]
+
+
+def test_wrong_test_in_first_part_judges_only_the_parts_that_ran(
+    green_cfg, log, fake_backend
+):
+    cfg = replace(_viewing(green_cfg), red_behaviors=1)
+    group = make_group(
+        make_red("r1", ("One.", "Two."), source="a.py"),
+        design="docs/superpowers/specs/approved.md",
+    )
+    wt = git.make_worktree(cfg, group.id)
+    (wt / "a.py").write_text("stub")
+    log.keep("g1-r1-part-2", "stale report of an earlier run")
+    output = "TEST WRONG 1:\n  tests/test_a.py::test_a | wrong | spec:1\n"
+    backend = fake_backend(
+        [{"tests/test_a.py": "red"}], [output, _undetermined("README.md:1")]
+    )
+    with pytest.raises(WrongTest):
+        loop._steps(cfg, group, wt, log, backend, 0)
+    assert backend.agents == ["test-writer", "juror"]
+    judgment = json.loads(log.kept("g1-r1-judgment"))
+    assert judgment["reports"] == [str(cfg.state_dir / "g1-r1-part-1.txt")]
+    assert log.kept("g1-r1-part-2") == ""

@@ -1,10 +1,21 @@
 """Runs groups: dispatch order, checks, reviews, commit and cleanup."""
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
-from foreman import backends, batches, brief, forms, git, reports, steps, verify, views
+from foreman import (
+    backends,
+    batches,
+    brief,
+    forms,
+    git,
+    overload,
+    reports,
+    steps,
+    verify,
+    views,
+)
 from foreman.backends import Backend
 from foreman.config import Config, Reviewer
 from foreman.errors import (
@@ -98,17 +109,53 @@ def _producer_identity(step: Step) -> str:
     )
 
 
-def _red_evidence(step: Step, text: str) -> tuple[reports.RedEvidence, ...]:
-    evidence = reports.red(text)
+def _parts(name: str, log: EventLog, step: Step) -> list[tuple[str, int]]:
+    """Each kept report name of a red step with its behavior count, in order.
+
+    A missing `<name>-parts` reads as the whole step in one report; `step` gives
+    its behavior count.
+    """
+    try:
+        raw = log.kept(f"{name}-parts")
+    except ConfigError:
+        assert isinstance(step.form, forms.Red)
+        return [(name, len(step.form.behaviors))]
+    try:
+        counts = json.loads(raw)
+    except ValueError as error:
+        raise ConfigError(f"{name}-parts is not JSON: {error}") from error
+    if (
+        not isinstance(counts, list)
+        or not counts
+        or any(type(n) is not int or n < 1 for n in counts)
+    ):
+        raise ConfigError(f"{name}-parts is not a list of behavior counts")
+    if len(counts) == 1:
+        return [(name, counts[0])]
+    return [(f"{name}-part-{k}", n) for k, n in enumerate(counts, 1)]
+
+
+def _red_evidence(
+    step: Step, name: str, log: EventLog
+) -> tuple[reports.RedEvidence, ...]:
+    """The red evidence of every part of a red step, in behavior order."""
     assert isinstance(step.form, forms.Red)
-    for item in evidence:
-        if not 1 <= item.behavior <= len(step.form.behaviors):
-            raise ConfigError(
-                f"red behavior index outside producer form: {item.behavior}"
-            )
-        if item.test_id.partition("::")[0] not in step.paths:
-            raise ConfigError(f"red test outside producer paths: {item.test_id}")
-    return evidence
+    parts = _parts(name, log, step)
+    if sum(n for _, n in parts) != len(step.form.behaviors):
+        raise ConfigError("red parts do not cover the producer form's behaviors")
+    evidence: list[reports.RedEvidence] = []
+    offset = 0
+    for part, count in parts:
+        for item in reports.red(log.kept(part)):
+            if not 1 <= item.behavior <= count:
+                raise ConfigError(
+                    f"red behavior index outside producer form: {item.behavior}"
+                )
+            if item.test_id.partition("::")[0] not in step.paths:
+                raise ConfigError(f"red test outside producer paths: {item.test_id}")
+            evidence.append(replace(item, behavior=item.behavior + offset))
+        offset += count
+    return tuple(evidence)
 
 
 def _current_red_evidence(
@@ -117,7 +164,7 @@ def _current_red_evidence(
     """Resolve one successful generation, including any preserved repair baseline."""
     if log.kept(f"{name}-evidence") != _producer_identity(step):
         raise ConfigError("red producer has no current successful evidence")
-    evidence = _red_evidence(step, log.kept(name))
+    evidence = _red_evidence(step, name, log)
     preserved = log.kept(f"{name}-repair-evidence")
     if preserved:
         ids = tuple(item.test_id for item in evidence)
@@ -239,21 +286,53 @@ def _step(
     step = group.steps[index]
     view_paths = _view_paths(cfg, group, step, wt, log, f"{group.id}-{step.id}")
     red_ids = _red_ids(group, index, wt, log)
+    name = f"{group.id}-{step.id}"
+    cut = None
+    if isinstance(step.form, forms.Red):
+        cut = overload.cut_red(
+            step.form, step.paths, view_paths, cfg.page_chars, cfg.red_behaviors
+        )
+        if cut.refused:
+            lines = "; ".join(o.line() for o in cut.refused)
+            raise _rule(log, group, wt, "none", f"step {step.id} refused: {lines}")
     before = git.snapshot(wt)
     try:
-        log.kept(f"{group.id}-{step.id}-before")
+        log.kept(f"{name}-before")
     except ConfigError:
-        log.keep(f"{group.id}-{step.id}-before", before)
-    text = brief.render(
-        step.form,
-        paths=step.paths,
-        view_paths=view_paths,
-        red_ids=red_ids,
-        juror_reasons=juror_reasons,
-    )
-    report = _dispatch(
-        group, wt, log, backend, f"{group.id}-{step.id}", text, step.role
-    )
+        log.keep(f"{name}-before", before)
+
+    def render(form: forms.Form) -> str:
+        return brief.render(
+            form,
+            paths=step.paths,
+            view_paths=view_paths,
+            red_ids=red_ids,
+            juror_reasons=juror_reasons,
+        )
+
+    if cut is None:
+        report = _dispatch(group, wt, log, backend, name, render(step.form), step.role)
+    else:
+        assert isinstance(step.form, forms.Red)
+        counts = [len(part.behaviors) for part in cut.parts]
+        if len(cut.parts) > 1:
+            log.keep(f"{name}-brief", render(step.form))
+        log.keep(f"{name}-parts", json.dumps(counts))
+        for k, part in enumerate(cut.parts, 1):
+            report = _dispatch(
+                group,
+                wt,
+                log,
+                backend,
+                name if len(cut.parts) == 1 else f"{name}-part-{k}",
+                render(part),
+                step.role,
+            )
+            if report.test_wrong:
+                # Parts that never run leave no report, not an earlier run's.
+                for later in range(k + 1, len(cut.parts) + 1):
+                    log.keep(f"{name}-part-{later}", "")
+                break
     if isinstance(step.form, forms.Red):
         outside = [
             p
@@ -265,7 +344,7 @@ def _step(
                 log,
                 group,
                 wt,
-                f"{group.id}-{step.id}.txt",
+                f"{name}.txt",
                 f"step {step.id} red output outside declared paths: {', '.join(outside)}",
             )
     if report.test_wrong:
@@ -275,9 +354,8 @@ def _step(
     if not _check_step(cfg, group, index, wt, log, backend):
         return
     if isinstance(step.form, forms.Red):
-        name = f"{group.id}-{step.id}"
         try:
-            _red_evidence(step, log.kept(name))
+            _red_evidence(step, name, log)
         except ConfigError as error:
             raise _rule(log, group, wt, f"{name}.txt", str(error)) from error
         log.keep(f"{name}-evidence", _producer_identity(step))
@@ -344,7 +422,20 @@ def _judgment(
                 else log.kept(f"{key}-brief")
             )
             blocks.append(block)
-            paths.append(str(log.keep(key, log.kept(key))))
+            names = (
+                [n for n, _ in _parts(key, log, candidate)]
+                if isinstance(candidate.form, forms.Red)
+                else [key]
+            )
+            for n in names:
+                try:
+                    text = log.kept(n)
+                except ConfigError:
+                    if n == key:
+                        raise
+                    text = ""
+                if text or n == key:
+                    paths.append(str(log.keep(n, text)))
         if failure is not None:
             paths.append(failure)
         judgment = forms.Judgment(
@@ -634,7 +725,7 @@ def _repair(
     try:
         if log.kept(f"{name}-evidence") != _producer_identity(producer):
             raise ConfigError("repair producer has no current successful evidence")
-        ids = tuple(item.test_id for item in _red_evidence(producer, log.kept(name)))
+        ids = tuple(item.test_id for item in _red_evidence(producer, name, log))
         if not completed:
             assert stopped is not None
             build = group.steps[stopped]
