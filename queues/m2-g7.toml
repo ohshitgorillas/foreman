@@ -175,7 +175,7 @@ text = "The sequence sends SIGTERM to the child's process group, then waits thro
 source = "gauntlet/seams/process.py"
 
 [[steps."8d.1".form.behaviors]]
-text = "The first wait ends at the first check that finds no member running, at most GROUP_POLL_SECONDS after the group empties."
+text = "The first wait ends at the first check that finds no member running"
 source = "gauntlet/seams/process.py"
 
 [steps."8d.2"]
