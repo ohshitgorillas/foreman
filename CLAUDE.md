@@ -19,7 +19,7 @@ Designs live in `docs/superpowers/specs/<topic>-design.md`. The plan is
 
 ## Roster
 
-Agents live in `.claude/agents/`, one per craft, each confined to the paths in *Writes*.
+Agents live in `/Users/atom/.claude/agents/`, shared by every repository on this Mac; this repository keeps no `.claude/agents/` of its own, since a copy there would override the shared file. One agent per craft, each confined to the paths in *Writes*.
 
 | Agent | Writes | Red test |
 |---|---|---|
