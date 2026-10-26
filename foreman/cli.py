@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from foreman import backends, config, events, loop, preflight, steps
-from foreman.errors import EXIT_OK, ConfigError, ForemanError, PreflightFailed
+from foreman.errors import EXIT_OK, ConfigError, ForemanError
 from foreman.events import EventLog, fail, say
 from foreman.steps import Group
 
@@ -46,12 +46,6 @@ def _parser() -> argparse.ArgumentParser:
         metavar="STEP_ID",
         help="the step to rerun from; earlier steps keep their state",
     )
-    for command in (r, u, t, s):
-        command.add_argument(
-            "--override-preflight",
-            action="store_true",
-            help="dispatch despite pre-flight findings, printing them as a warning",
-        )
     sub.add_parser("status", help="print the one-line status")
     return p
 
@@ -83,21 +77,12 @@ def _read(path: Path) -> str:
         raise ConfigError(f"cannot read {path}: {e}") from e
 
 
-def _preflight(groups: list[Group], cfg: config.Config, override: bool) -> None:
-    """Run pre-flight's default checks over `groups`; refuse on any finding unless overridden."""
-    findings = preflight.preflight(groups, cfg, None, preflight.CHECKS)
-    if not findings:
-        return
-    if override:
-        for f in findings:
-            fail(f"warning: pre-flight finding overridden: {f.line()}")
-        return
-    for f in findings:
-        fail(f.line())
-    raise PreflightFailed(
-        f"pre-flight reported {len(findings)} finding(s); nothing dispatched"
-        " (pass --override-preflight to run anyway)"
-    )
+def _preflight(groups: list[Group], cfg: config.Config, log: EventLog) -> None:
+    """Run pre-flight's default checks over `groups`; warn and log each finding."""
+    owner = {step.id: g.id for g in groups for step in g.steps}
+    for f in preflight.preflight(groups, cfg, None, preflight.CHECKS):
+        fail(f"warning: pre-flight finding: {f.line()}")
+        log.mismatched(owner.get(f.step), f.step, "preflight", f.line())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -118,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             text = _read(args.findings)
         elif args.command == "retest":
             text = _read(args.verdict)
-        _preflight(pending, cfg, args.override_preflight)
+        _preflight(pending, cfg, log)
         if args.command == "upheld":
             say(loop.run_upheld(cfg, pending[0], text, log))
         elif args.command == "retest":

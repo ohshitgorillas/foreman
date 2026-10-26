@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import subprocess
@@ -8,10 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from foreman import backends, cli, config, events, loop, preflight
+from foreman import backends, cli, config, errors, events, loop, preflight
 from foreman.cli import main
 from foreman.config import Config
-from foreman.errors import ConfigError, PreflightFailed, WrongTest
+from foreman.errors import ConfigError, WrongTest
 from foreman.run import run_ok
 
 GROUP_FILE = (
@@ -303,7 +304,8 @@ def test_resume_without_kept_worktree_exits_2(
     assert not green_cfg.worktree_root.exists()
 
 
-# Pre-flight gate: run, upheld, retest and resume refuse on a finding unless overridden.
+# Pre-flight: run, upheld, retest and resume print findings as warnings, log them
+# as mismatches and dispatch anyway.
 
 
 @pytest.fixture
@@ -335,37 +337,80 @@ def gate_argv(conf_file: Path, steps_file: Path, tmp_path: Path, command: str):
 COMMANDS = ["run", "upheld", "retest", "resume"]
 
 
-def test_preflight_failed_has_its_own_exit_code() -> None:
-    assert PreflightFailed.exit_code == 9
+def _all_error_classes(cls: type) -> list[type]:
+    found = [cls]
+    for sub in cls.__subclasses__():
+        found.extend(_all_error_classes(sub))
+    return found
+
+
+def test_preflight_failed_and_exit_code_9_are_removed() -> None:
+    assert not hasattr(errors, "PreflightFailed")
+    codes = {c.exit_code for c in _all_error_classes(errors.ForemanError)}
+    assert 9 not in codes
+
+
+SCOPE_FINDING = (
+    "s1 | scope | gauntlet/core/a.py outside core-builder's write scope (docs/)"
+)
 
 
 @pytest.mark.parametrize("command", COMMANDS)
-def test_preflight_finding_blocks_launch(
+def test_preflight_finding_warns_and_dispatches(
     conf_file, steps_file, green_cfg, tmp_path, dispatched, capsys, command
 ) -> None:
     role_file(green_cfg, "docs/")
-    assert main(gate_argv(conf_file, steps_file, tmp_path, command)) == 9
-    err = capsys.readouterr().err
-    assert (
-        "foreman: s1 | scope | gauntlet/core/a.py outside core-builder's write scope"
-        " (docs/) | Foreman\n" in err
-    )
-    assert "--override-preflight" in err
-    assert dispatched == []
-    assert not green_cfg.worktree_root.exists()
-
-
-@pytest.mark.parametrize("command", COMMANDS)
-def test_override_flag_launches_despite_finding(
-    conf_file, steps_file, green_cfg, tmp_path, dispatched, capsys, command
-) -> None:
-    role_file(green_cfg, "docs/")
-    argv = gate_argv(conf_file, steps_file, tmp_path, command)
-    assert main([*argv, "--override-preflight"]) == 0
+    assert main(gate_argv(conf_file, steps_file, tmp_path, command)) == 0
     assert len(dispatched) == 1
     err = capsys.readouterr().err
-    assert "warning" in err
-    assert "s1 | scope | gauntlet/core/a.py outside" in err
+    warned = [x for x in err.splitlines() if SCOPE_FINDING in x]
+    assert len(warned) == 1
+    assert "warning" in warned[0].lower()
+    assert "--override-preflight" not in err
+
+
+def _mismatches(cfg: Config) -> list[dict]:
+    path = cfg.state_dir / "events.jsonl"
+    if not path.exists():
+        return []
+    rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x]
+    return [r for r in rows if r["kind"] == "mismatch"]
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_preflight_findings_are_each_logged_once_as_mismatches(
+    conf_file, steps_file, green_cfg, tmp_path, dispatched, command
+) -> None:
+    role_file(green_cfg, "docs/")
+    cfg = config.load(conf_file)
+    findings = preflight.preflight(
+        cli._load(steps_file, cfg), cfg, None, preflight.CHECKS
+    )
+    assert findings
+    assert main(gate_argv(conf_file, steps_file, tmp_path, command)) == 0
+    rows = _mismatches(green_cfg)
+    assert [r["mismatch_kind"] for r in rows] == ["preflight"] * len(findings)
+    assert sum(SCOPE_FINDING in r["text"] for r in rows) == 1
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_clean_preflight_logs_no_mismatch(
+    conf_file, steps_file, green_cfg, tmp_path, dispatched, command
+) -> None:
+    assert main(gate_argv(conf_file, steps_file, tmp_path, command)) == 0
+    assert _mismatches(green_cfg) == []
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_override_preflight_flag_is_removed(
+    conf_file, steps_file, tmp_path, dispatched, capsys, command
+) -> None:
+    argv = gate_argv(conf_file, steps_file, tmp_path, command)
+    with pytest.raises(SystemExit) as exc:
+        main([*argv, "--override-preflight"])
+    assert exc.value.code == 2
+    assert "--override-preflight" in capsys.readouterr().err
+    assert dispatched == []
 
 
 @pytest.mark.parametrize("command", COMMANDS)

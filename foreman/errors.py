@@ -41,10 +41,4 @@ class WrongTest(ForemanError):
     exit_code = 8
 
 
-class PreflightFailed(ForemanError):
-    """Pre-flight reported findings; nothing dispatched unless the owner overrides."""
-
-    exit_code = 9
-
-
 EXIT_OK = 0
