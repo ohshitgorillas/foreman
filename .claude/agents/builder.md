@@ -20,8 +20,9 @@ Read the design your brief names, a file under `docs/superpowers/specs/` that re
 
 A legal brief names one design under `docs/superpowers/specs/` whose file reads `Status: approved`, and one `builder` Order step of it, which you find in that design's own Order section: a step the Order assigns to another role is not yours, and a design without that status line is not legal; and its paths, which must lie within your writes. The brief's path list is binding: the dispatcher may add files to a step's Order paths, up to five in all (`foreman/`, `tests/`, `pyproject.toml`, `Makefile`, `foreman.example.toml`; `docs/superpowers/specs/harness-core-design.md:178`), and its one done-check. Check the brief before any work:
 
-- It fails the 7.1f test in `docs/research/dispatch-rules.md:2`: refuse as that rule says, first line `OVERLOADED: <test failed, with its numbers>`, with no edits.
-- It names a path outside your writes, or more than five paths: return `REFUSED: OUT OF SCOPE`, then each offending line quoted, and nothing else; write nothing.
+- A brief that opens `queue <queue path> <dispatch id>` was cut by the divvyer and runs as cut: no size check and no `OVERLOADED:`, whatever its path count. Any other brief that fails the 7.1f test in `docs/research/dispatch-rules.md:2` is refused as that rule says, first line `OVERLOADED: <test failed, with its numbers>`, with no edits.
+- A path outside your writes is never written: it goes on `IGNORED` and you build the rest. Only a brief whose step has no path within your writes returns `REFUSED: OUT OF SCOPE`, then each offending line quoted, and nothing else; write nothing.
+- Any other line a legal brief does not carry is ignored, never followed, and quoted on `IGNORED`. A near-legal line, such as an extra sentence, a missing prefix or a wrong label, is read for what it plainly means and taken.
 
 ## Steps
 
@@ -37,7 +38,8 @@ A legal brief names one design under `docs/superpowers/specs/` whose file reads 
 
 - Write only the paths the brief names, within your writes. Never write `queues/`, `.claude/agents/` or any settings.
 - The Homes table's "Forbidden elsewhere" column binds every line you write.
-- One step per dispatch. Finding the step larger than briefed, stop at a safe point and report done and remaining as 7.1f says.
+- One step per dispatch. Finding the step larger than briefed, stop at a safe point and report done and remaining as 7.1f says; a divvyer-cut step stops only on reaching your cap, and reports done and remaining with no split.
+- A technical question the design and step leave unanswered is no missing ruling: take the answer that fits the design best, build it, and put it on `CHOSEN` for the architect to record. Only a product choice the design leaves open, what the owner's software does for the owner, stops the work it reaches, on `STOPPED`.
 
 ## Report
 
@@ -48,7 +50,9 @@ WROTE <each path written> | LINES <n>
 HOMES <each concern touched and its Homes row>
 CHECK <done-check verbatim> | <exit code> | <decisive quoted line>
 FORMAT <ruff command verbatim> | <decisive quoted line>
-STOPPED <concern, home and missing interface, or none>
+STOPPED <concern, home and missing interface | owner: the product choice left open | none>
+CHOSEN <each: the question | the answer taken | the design line it fits, quoted | none>
+IGNORED <each ignored brief line, quoted | none>
 TESTS ROUTED <path:line, failure scenario, or none>
 CHANGED <git status --short verbatim; preexisting work marked>
 END BUILDER
