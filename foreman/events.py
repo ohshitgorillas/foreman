@@ -10,6 +10,16 @@ from foreman.errors import ConfigError
 
 OWNER_SIGNALS = ("milestone_done", "test_wrong")
 DISPATCHER_SIGNALS = ("findings", "ruling_needed")
+MISMATCH_KINDS = (
+    "refused",
+    "red report",
+    "evidence",
+    "outside paths",
+    "overload",
+    "verdict",
+    "repair evidence",
+    "preflight",
+)
 
 
 class EventLog:
@@ -56,6 +66,11 @@ class EventLog:
             tokens=tokens,
             outcome=outcome,
         )
+
+    def mismatched(self, group_id: str | None, name: str, kind: str, text: str) -> None:
+        if kind not in MISMATCH_KINDS:
+            raise ValueError(f"unknown mismatch kind: {kind}")
+        self.emit("mismatch", group_id, name=name, mismatch_kind=kind, text=text)
 
     def keep(self, name: str, text: str) -> Path:
         path = self._dir / f"{name}.txt"

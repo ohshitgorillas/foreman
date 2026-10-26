@@ -173,3 +173,46 @@ def test_dispatched_records_one_event_with_measurements(
     }
     assert capsys.readouterr() == ("", "")
     assert log.done() == set()
+
+
+SPEC_MISMATCH_KINDS = (
+    "refused",
+    "red report",
+    "evidence",
+    "outside paths",
+    "overload",
+    "verdict",
+    "repair evidence",
+    "preflight",
+)
+
+
+def test_mismatch_kinds_are_the_spec_table_kinds() -> None:
+    assert events.MISMATCH_KINDS == SPEC_MISMATCH_KINDS
+
+
+@pytest.mark.parametrize("kind", SPEC_MISMATCH_KINDS)
+@pytest.mark.parametrize("group_id", ["g1", None])
+def test_mismatched_writes_one_mismatch_event(
+    cfg: Config, kind: str, group_id: str | None
+) -> None:
+    log = EventLog(cfg)
+    log.mismatched(group_id, "g1-red-1-reply", kind, "report outside its grammar")
+    lines = (cfg.state_dir / "events.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["kind"] == "mismatch"
+    assert row["step_id"] == group_id
+    assert row["name"] == "g1-red-1-reply"
+    assert row["text"] == "report outside its grammar"
+    assert kind in row.values()
+    assert log.done() == set()
+
+
+@pytest.mark.parametrize(
+    "kind", ["bogus", "", "Refused", "red_report", "mismatch", "findings"]
+)
+def test_mismatched_rejects_kind_outside_mismatch_kinds(cfg: Config, kind: str) -> None:
+    with pytest.raises(ValueError):
+        EventLog(cfg).mismatched("g1", "g1-red-1-reply", kind, "x")
+    assert not (cfg.state_dir / "events.jsonl").exists()
