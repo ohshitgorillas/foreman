@@ -178,6 +178,26 @@ def make_step(
     return replace(base, **fields)  # type: ignore[arg-type]
 
 
+def make_red(
+    sid: str = "r1",
+    texts: tuple[str, ...] = ("A behavior.",),
+    paths: list[str] | None = None,
+    source: str = "gauntlet/core/a.py",
+    **fields: object,
+) -> Step:
+    """A test-writer red Step, one Behavior per text; fields override any default."""
+    base = Step(
+        sid,
+        "test-writer",
+        forms.Red(tuple(forms.Behavior(t, source) for t in texts)),
+        ["tests/test_a.py"] if paths is None else paths,
+        [],
+        0,
+        [source],
+    )
+    return replace(base, **fields)  # type: ignore[arg-type]
+
+
 def make_group(*steps: Step, gid: str = "g1", **fields: object) -> Group:
     """A Group of typed steps; fields override design, after or reviews."""
     return replace(Group(gid, list(steps), "design.md", []), **fields)  # type: ignore[arg-type]
