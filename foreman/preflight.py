@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from foreman import backends, config, forms, git, reports, steps
+from foreman import backends, config, forms, git, overload, reports, steps, views
 from foreman.config import Config
 from foreman.errors import ConfigError, ForemanError
 from foreman.steps import Group, Step
@@ -34,7 +34,8 @@ class Finding:
     step: str  # step id
     check: str  # the check's name, e.g. "verbatim"
     problem: str  # one line
-    fixer: str  # who fixes it: "architect", "role author", "Foreman", "hook"
+    # who fixes it: "architect", "role author", "Foreman", "hook", "dispatcher"
+    fixer: str
 
     def line(self) -> str:
         return f"{self.step} | {self.check} | {self.problem} | {self.fixer}"
@@ -642,8 +643,20 @@ def check_examples(step: Step, group: Group, cfg: Config) -> list[Finding]:
     return findings
 
 
+def check_overload(step: Step, group: Group, cfg: Config) -> list[Finding]:
+    """Check 7: a red step's brief passes Foreman's 7.1f check, whole or cut."""
+    if not isinstance(step.form, forms.Red):
+        return []
+    view_paths = {s: str(views.path(cfg, group.id, s)) for s in step.views}
+    cut = overload.cut_red(
+        step.form, step.paths, view_paths, cfg.page_chars, cfg.red_behaviors
+    )
+    return [Finding(step.id, "overload", o.line(), "dispatcher") for o in cut.refused]
+
+
 CHECKS: tuple[Check, ...] = (
     check_verbatim,
+    check_overload,
     check_scope,
     check_hooks,
     check_installed,

@@ -12,6 +12,7 @@ from foreman.preflight import (
     Finding,
     check_examples,
     check_installed,
+    check_overload,
     check_scope,
     check_verbatim,
     dispatched_roles,
@@ -605,6 +606,53 @@ def test_codex_examples_are_read_from_developer_instructions(
 
 def test_examples_is_a_default_check():
     assert check_examples in preflight.CHECKS
+
+
+# check_overload
+
+
+def test_overload_is_a_default_check_after_verbatim():
+    checks = preflight.CHECKS
+    assert checks.index(check_overload) == checks.index(check_verbatim) + 1
+
+
+def test_red_step_within_limits_has_no_overload_finding(cfg: Config):
+    step = make_red("r1", ("One.", "Two."))
+    assert check_overload(step, group(step), cfg) == []
+
+
+def test_non_red_step_is_not_checked_for_overload(cfg: Config):
+    step = stub("s1", "core-builder", [f"f{i}.py" for i in range(9)])
+    assert check_overload(step, group(step), cfg) == []
+
+
+def test_six_paths_is_a_finding_for_the_dispatcher(cfg: Config):
+    step = make_red("r1", ("One.",), [f"tests/t{i}.py" for i in range(6)])
+    assert check_overload(step, group(step), cfg) == [
+        Finding("r1", "overload", "OVERLOADED: files 6, more than 5", "dispatcher")
+    ]
+
+
+def test_cuttable_red_step_has_no_finding(cfg: Config):
+    cfg = replace(cfg, red_behaviors=2)
+    step = make_red("r1", tuple(f"B{i}." for i in range(5)))
+    assert check_overload(step, group(step), cfg) == []
+
+
+def test_behavior_longer_than_a_page_is_a_page_finding(cfg: Config):
+    cfg = replace(cfg, page_chars=100)
+    step = make_red("r1", ("One.", "x " * 500))
+    found = check_overload(step, group(step), cfg)
+    assert [(f.check, f.fixer) for f in found] == [("overload", "dispatcher")]
+    assert found[0].problem.startswith("OVERLOADED: page ")
+    assert found[0].problem.endswith(", more than 100")
+
+
+def test_each_failing_test_is_its_own_finding(cfg: Config):
+    cfg = replace(cfg, page_chars=100)
+    step = make_red("r1", ("x " * 500,), [f"tests/t{i}.py" for i in range(6)])
+    found = check_overload(step, group(step), cfg)
+    assert [f.problem.split()[1] for f in found] == ["files", "page"]
 
 
 # the command
