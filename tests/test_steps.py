@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from conftest import make_group, make_step
 
 from foreman import forms, overload, steps
 from foreman.errors import ConfigError
@@ -9,19 +10,16 @@ from foreman.steps import Group, Step, lint, load, next_ready, owner
 
 
 def mk(id: str, **kw: object) -> Step:
-    base = Step(
-        id,
-        "core-builder",
-        forms.Stub("core-builder", "Approved step"),
-        ["gauntlet/core/a.py"],
-        ["make", "check"],
-    )
-    return replace(base, **kw)
+    fields: dict[str, object] = {
+        "form": forms.Stub("core-builder", "Approved step"),
+        "check": ["make", "check"],
+    }
+    return make_step(id, **(fields | kw))
 
 
 def grp(id: str, steps: list[Step] | None = None, **kw: object) -> Group:
-    return replace(
-        Group(id, steps if steps is not None else [mk(id + "-s")], "", []), **kw
+    return make_group(
+        *(steps if steps is not None else [mk(id + "-s")]), gid=id, design="", **kw
     )
 
 

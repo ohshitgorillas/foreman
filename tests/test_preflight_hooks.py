@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import make_group, make_red, make_step
 
 from foreman import forms, git, preflight
 from foreman.config import Config
@@ -81,8 +82,12 @@ def user(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
 
 
 def step(check: list[str], role: str = "builder", paths: list[str] | None = None):
-    return Step(
-        "7", role, forms.Stub(role, "Approved stub"), paths or ["a/b.py"], check
+    return make_step(
+        "7",
+        paths or ["a/b.py"],
+        role=role,
+        form=forms.Stub(role, "Approved stub"),
+        check=check,
     )
 
 
@@ -105,7 +110,7 @@ def fed(log: Path) -> list[str]:
 
 
 def group(s: Step) -> Group:
-    return Group("g1", [s], "", [])
+    return make_group(s, design="")
 
 
 def ran(log: Path) -> list[dict]:
@@ -315,33 +320,34 @@ def test_a_red_test_placeholder_takes_the_red_test_paths(
         "Run `pytest -rA <each red test path>`, then `git add <files>`.",
         role="seam-builder",
     )
-    red = Step(
+    red = make_red(
         "8",
-        "test-writer",
-        forms.Red((forms.Behavior("It works.", "src/x.py"),)),
+        ("It works.",),
         ["tests/test_x.py", "tests/test_y.py"],
-        [],
+        source="src/x.py",
+        views=[],
     )
-    build = Step(
+    build = make_step(
         "9",
-        "seam-builder",
-        forms.Build("seam-builder", "Build x", (forms.RedSelection("8"),)),
         ["src/x.py"],
-        [],
+        role="seam-builder",
+        form=forms.Build("seam-builder", "Build x", (forms.RedSelection("8"),)),
     )
-    picked = Step(
+    picked = make_step(
         "10",
-        "seam-builder",
-        forms.Build(
+        ["src/y.py"],
+        role="seam-builder",
+        form=forms.Build(
             "seam-builder", "Build y", (forms.RedSelection("8", ("tests/test_y.py",)),)
         ),
-        ["src/y.py"],
-        [],
     )
-    stub = Step(
-        "11", "seam-builder", forms.Stub("seam-builder", "Stub z"), ["src/z.py"], []
+    stub = make_step(
+        "11",
+        ["src/z.py"],
+        role="seam-builder",
+        form=forms.Stub("seam-builder", "Stub z"),
     )
-    g = Group("g1", [red, build, picked, stub], "", [])
+    g = make_group(red, build, picked, stub, design="")
     for s in (build, picked, stub):
         assert check_hooks(s, g, cfg) == []
     assert fed(log) == [
