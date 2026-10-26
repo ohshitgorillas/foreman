@@ -4,7 +4,7 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
-from foreman import forms, reports, steps
+from foreman import forms, overload, reports, steps
 from foreman.steps import Group
 
 
@@ -74,7 +74,7 @@ def cut(
         for measured, findings in units.items():
             if pending and (
                 load + measured.weight > budget
-                or len(paths | {measured.path}) > steps.MAX_PATHS
+                or len(paths | {measured.path}) > overload.MAX_FILES
             ):
                 batches.append(
                     Batch(

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from foreman import forms
+from foreman import forms, overload, steps
 from foreman.errors import ConfigError
 from foreman.steps import Group, Step, lint, load, next_ready, owner
 
@@ -397,3 +397,10 @@ def test_test_step_holds_the_test_files_its_check_runs(tmp_path: Path) -> None:
     )
     assert "files: tests/test_support_process.py" in text.splitlines()
     assert stub.paths == ["gauntlet/core/a.py"]
+
+
+def test_path_limit_is_the_overload_home() -> None:
+    assert not hasattr(steps, "MAX_PATHS")
+    n = overload.MAX_FILES + 1
+    out = lint([grp("g", [mk("s", paths=[f"gauntlet/core/{i}.py" for i in range(n)])])])
+    assert out == [f"s: {n} paths, more than {overload.MAX_FILES}"]

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from conftest import make_group, make_step
 
-from foreman import batches, forms
+from foreman import batches, forms, overload, steps
 from foreman.batches import Batch, Unit
 
 
@@ -189,3 +189,15 @@ def test_empty_findings_produce_no_batches(tmp_path: Path) -> None:
         [],
         [],
     )
+
+
+def test_batch_file_limit_is_the_overload_home(tmp_path: Path) -> None:
+    assert not hasattr(steps, "MAX_PATHS")
+    n = overload.MAX_FILES + 1
+    paths = [f"a{i}.py" for i in range(n)]
+    for path in paths:
+        (tmp_path / path).write_text("def f():\n    pass\n")
+    group = make_group(*(make_step(str(i), [path]) for i, path in enumerate(paths)))
+    lines = [f"{path}:1: f" for path in paths]
+    packed, _ = batches.cut(lines, forms.GateSource("check"), group, tmp_path, 1000)
+    assert [len(b.lines) for b in packed] == [overload.MAX_FILES, 1]

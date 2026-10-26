@@ -5,10 +5,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from foreman import forms
+from foreman import forms, overload
 from foreman.errors import ConfigError
-
-MAX_PATHS = 5
 
 
 @dataclass(frozen=True)
@@ -186,8 +184,8 @@ def lint(groups: list[Group]) -> list[str]:
         for s in g.steps:
             if not s.paths:
                 problems.append(f"{s.id}: no paths")
-            elif len(s.paths) > MAX_PATHS:
-                problems.append(f"{s.id}: {len(s.paths)} paths, more than {MAX_PATHS}")
+            elif over := overload.files(s.paths):
+                problems.append(f"{s.id}: {over.found} paths, more than {over.limit}")
             if s.role != getattr(s.form, "role", None):
                 problems.append(f"steps.{s.id}.role: does not match form role")
             problems.extend(
