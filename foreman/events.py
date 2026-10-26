@@ -22,6 +22,10 @@ MISMATCH_KINDS = (
 )
 
 
+def _mean(xs: list[float]) -> str:
+    return f"{sum(xs) / len(xs):.1f}" if xs else "-"
+
+
 class EventLog:
     def __init__(self, cfg: Config) -> None:
         self._dir = cfg.state_dir
@@ -106,6 +110,34 @@ class EventLog:
         return (
             f"{len(lines)} events; last: {last['kind']} step {last['step_id'] or '-'}"
         )
+
+    def stats(self) -> str:
+        """Per role: mean tokens and seconds per finished dispatch, with counts."""
+        if not self._path.exists():
+            return "no dispatches"
+        rows = [
+            json.loads(x)
+            for x in self._path.read_text(encoding="utf-8").splitlines()
+            if x
+        ]
+        roles: dict[str, list[dict]] = {}
+        for r in rows:
+            if r["kind"] == "dispatch":
+                roles.setdefault(r["role"], []).append(r)
+        if not roles:
+            return "no dispatches"
+        out = []
+        for role, rs in sorted(roles.items()):
+            fin = [r for r in rs if r["outcome"] in ("done", "refused")]
+            toks = [r["tokens"] for r in fin if r["tokens"] is not None]
+            secs = [r["seconds"] for r in fin]
+            over = sum(r["outcome"] == "overran" for r in rs)
+            refused = sum(r["outcome"] == "refused" for r in rs)
+            out.append(
+                f"{role}: tokens: {_mean(toks)} seconds: {_mean(secs)} "
+                f"overruns: {over} refusals: {refused}"
+            )
+        return "\n".join(out)
 
 
 # The last line said or failed, for the exit alert.

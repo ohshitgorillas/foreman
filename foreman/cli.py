@@ -47,6 +47,7 @@ def _parser() -> argparse.ArgumentParser:
         help="the step to rerun from; earlier steps keep their state",
     )
     sub.add_parser("status", help="print the one-line status")
+    sub.add_parser("stats", help="print per-role dispatch means and counts")
     return p
 
 
@@ -92,6 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         log = EventLog(cfg)
         if args.command == "status":
             say(log.status())
+            return EXIT_OK
+        if args.command == "stats":
+            say(log.stats())
             return EXIT_OK
         groups = _load(args.step_file, cfg)
         if args.command == "run" and not args.group_id:
@@ -144,7 +148,7 @@ def _arm_alert() -> tuple[str, str] | None:
             args = _parser().parse_args()
     except SystemExit:
         return None
-    if args.command == "status":
+    if args.command in ("status", "stats"):
         return None
     label = f"Foreman {args.command} {args.step_file.stem}"
     fd, status = tempfile.mkstemp(prefix="foreman-alert-")
