@@ -453,11 +453,9 @@ def stub_ping(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 @pytest.fixture
 def alert(monkeypatch: pytest.MonkeyPatch, stub_ping):
-    popens: list[tuple[list[str], dict]] = []
+    popens: list[list[str]] = []
     handlers: dict[int, object] = {}
-    monkeypatch.setattr(
-        cli.subprocess, "Popen", lambda cmd, **kw: popens.append((cmd, kw))
-    )
+    monkeypatch.setattr(cli.run, "spawn_detached", lambda cmd: popens.append(cmd))
     monkeypatch.setattr(
         cli.signal, "signal", lambda sig, fn: handlers.__setitem__(sig, fn)
     )
@@ -510,7 +508,7 @@ def test_arm_alert_starts_detached_watcher(alert, monkeypatch, args) -> None:
     label, status = cli._arm_alert()
     assert label == f"Foreman {args[0]} m2"
     assert Path(status).parent == alert.tmp and Path(status).read_text() == ""
-    [(cmd, kw)] = alert.popens
+    [cmd] = alert.popens
     assert cmd[:3] == ["/bin/sh", "-c", cli._WATCH]
     assert cmd[3:] == [
         "sh",
@@ -520,8 +518,6 @@ def test_arm_alert_starts_detached_watcher(alert, monkeypatch, args) -> None:
         label,
         str(alert.ping),
     ]
-    assert kw["start_new_session"] is True
-    assert {kw[k] for k in ("stdin", "stdout", "stderr")} == {subprocess.DEVNULL}
     assert set(alert.handlers) == {signal.SIGTERM, signal.SIGHUP}
     with pytest.raises(SystemExit) as e:
         alert.handlers[signal.SIGTERM](signal.SIGTERM, None)
@@ -533,7 +529,7 @@ def armed_entry(alert, monkeypatch, fake_main) -> tuple[pytest.ExceptionInfo, st
     monkeypatch.setattr(cli, "main", fake_main)
     with pytest.raises(BaseException) as e:
         cli.entry()
-    [(cmd, _)] = alert.popens
+    [cmd] = alert.popens
     return e, Path(cmd[5]).read_text(encoding="utf-8")
 
 
@@ -768,3 +764,70 @@ def test_stats_without_foreman_toml_reads_the_default_history(
     assert out.strip() == (
         "spec-scout: tokens: 500.0 seconds: 100.0 overruns: 0 refusals: 0"
     )
+
+
+def _stops(cfg: Config) -> list[dict]:
+    path = cfg.state_dir / "events.jsonl"
+    rows = [json.loads(x) for x in path.read_text().splitlines() if x]
+    return [r for r in rows if r["kind"] == "stop"]
+
+
+def test_stop_writes_one_stop_event_with_its_kind(
+    conf_file, steps_file, origin, fake_backend, monkeypatch, green_cfg
+) -> None:
+    monkeypatch.setattr(
+        backends, "get", lambda cfg: fake_backend(outputs=["REJECTED: no"])
+    )
+    assert main(["--config", str(conf_file), "run", str(steps_file)]) == 6
+    [stop] = _stops(green_cfg)
+    assert stop["stop_kind"] == errors.RulingNeeded.kind
+    assert stop["exit_code"] == 6
+
+
+def test_success_writes_no_stop_event(
+    conf_file, steps_file, origin, fake_backend, monkeypatch, green_cfg
+) -> None:
+    monkeypatch.setattr(
+        backends, "get", lambda cfg: fake_backend([{"gauntlet/core/a.py": "1"}])
+    )
+    assert main(["--config", str(conf_file), "run", str(steps_file)]) == 0
+    assert _stops(green_cfg) == []
+
+
+def test_sigterm_exit_writes_killed_stop(
+    conf_file, steps_file, monkeypatch, green_cfg
+) -> None:
+    def killed(*_a, **_k):
+        raise SystemExit(128 + signal.SIGTERM)
+
+    monkeypatch.setattr(loop, "run_section", killed)
+    with pytest.raises(SystemExit):
+        main(["--config", str(conf_file), "run", str(steps_file)])
+    [stop] = _stops(green_cfg)
+    assert stop["stop_kind"] == "killed" and stop["exit_code"] == 143
+
+
+def test_other_exception_writes_crashed_stop(
+    conf_file, steps_file, monkeypatch, green_cfg
+) -> None:
+    def crash(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(loop, "run_section", crash)
+    with pytest.raises(RuntimeError):
+        main(["--config", str(conf_file), "run", str(steps_file)])
+    [stop] = _stops(green_cfg)
+    assert stop["stop_kind"] == "crashed" and "boom" in stop["text"]
+
+
+def test_keyboard_interrupt_writes_crashed_stop(
+    conf_file, steps_file, monkeypatch, green_cfg
+) -> None:
+    def interrupted(*_a, **_k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(loop, "run_section", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        main(["--config", str(conf_file), "run", str(steps_file)])
+    [stop] = _stops(green_cfg)
+    assert stop["stop_kind"] == "crashed" and "KeyboardInterrupt" in stop["text"]

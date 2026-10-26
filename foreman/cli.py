@@ -5,13 +5,21 @@ import contextlib
 import io
 import os
 import signal
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import NoReturn
 
-from foreman import backends, config, events, loop, preflight, steps, transcripts
+from foreman import (
+    backends,
+    config,
+    events,
+    loop,
+    preflight,
+    run,
+    steps,
+    transcripts,
+)
 from foreman.errors import EXIT_OK, ConfigError, ForemanError
 from foreman.events import EventLog, fail, say
 from foreman.steps import Group
@@ -94,6 +102,8 @@ def _preflight(groups: list[Group], cfg: config.Config, log: EventLog) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    log: EventLog | None = None
+    group_id: str | None = None
     try:
         if args.command == "stats" and not args.config.exists():
             # No foreman.toml: there is no state_dir, so read the history
@@ -114,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
             pending = [g for g in groups if g.id not in done]
         else:
             pending = [_find(groups, args.group_id)]
+        if args.command != "run" or args.group_id:
+            group_id = pending[0].id
         if args.command == "upheld":
             text = _read(args.findings)
         elif args.command == "retest":
@@ -133,7 +145,18 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
     except ForemanError as e:
         fail(str(e))
+        if log is not None:
+            log.stopped(group_id, e.kind, e.exit_code, str(e))
         return e.exit_code
+    except SystemExit as e:
+        if log is not None and e.code not in (None, EXIT_OK):
+            code = e.code if isinstance(e.code, int) else 1
+            log.stopped(group_id, "killed", code, f"exit {e.code}")
+        raise
+    except BaseException as e:
+        if log is not None:
+            log.stopped(group_id, "crashed", 1, f"{type(e).__name__}: {e}"[:200])
+        raise
 
 
 # Waits for Foreman's pid to go, then pings once: the status file if Foreman
@@ -165,12 +188,8 @@ def _arm_alert() -> tuple[str, str] | None:
     fd, status = tempfile.mkstemp(prefix="foreman-alert-")
     os.close(fd)
     tag = f"foreman:{args.step_file.stem}"
-    subprocess.Popen(
-        ["/bin/sh", "-c", _WATCH, "sh", str(os.getpid()), status, tag, label, ping],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+    run.spawn_detached(
+        ["/bin/sh", "-c", _WATCH, "sh", str(os.getpid()), status, tag, label, ping]
     )
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda n, _f: sys.exit(128 + n))
