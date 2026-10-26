@@ -73,6 +73,17 @@ def step(check: list[str], role: str = "builder", paths: list[str] | None = None
     )
 
 
+def role_file(cfg: Config, text: str, role: str = "builder") -> None:
+    """Write fixture role file `role` into the target repo."""
+    path = cfg.target_repo / f".claude/agents/{role}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {role}\n---\n\n{text}\n")
+
+
+def fed(log: Path) -> list[str]:
+    return [r["input"]["tool_input"]["command"] for r in ran(log)]
+
+
 def group(s: Step) -> Group:
     return Group("g1", [s], "", [])
 
@@ -87,11 +98,12 @@ def test_check_hooks_is_a_preflight_check():
     assert check_hooks in preflight.CHECKS
 
 
-def test_a_hook_exiting_2_on_the_steps_check_is_one_finding(
+def test_a_hook_exiting_2_on_a_role_command_is_one_finding(
     cfg: Config, user, tmp_path: Path, log: Path
 ):
     settings(user[0], entry(hook(tmp_path, log, "guard.py")))
-    s = step(["make", "EXIT2", "two words"])
+    role_file(cfg, "Run `make EXIT2 'two words'`.")
+    s = step([])
     found = check_hooks(s, group(s), cfg)
     command = "make EXIT2 'two words'"
     assert [(f.step, f.check, f.fixer) for f in found] == [("7", "hooks", "hook")]
@@ -109,7 +121,8 @@ def test_a_hook_exiting_2_on_the_steps_check_is_one_finding(
 
 def test_a_json_deny_is_a_block(cfg: Config, user, tmp_path: Path, log: Path):
     settings(user[1], entry(hook(tmp_path, log, "policy.py")))
-    s = step(["git", "DENY"])
+    role_file(cfg, "Run `git DENY`.")
+    s = step([])
     found = check_hooks(s, group(s), cfg)
     assert len(found) == 1
     assert "git DENY" in found[0].problem and "policy.py" in found[0].problem
@@ -119,7 +132,8 @@ def test_an_allowing_hook_gives_no_finding(
     cfg: Config, user, tmp_path: Path, log: Path
 ):
     settings(user[0], entry(hook(tmp_path, log, "guard.py")))
-    s = step(["make", "check"])
+    role_file(cfg, "Run `make check`.")
+    s = step([])
     assert check_hooks(s, group(s), cfg) == []
     assert len(ran(log)) == 1
 
@@ -133,7 +147,8 @@ def test_every_settings_file_contributes_its_bash_hooks(
         cfg.target_repo / ".claude/settings.json",
         entry(hook(tmp_path, log, "three.py"), matcher="*"),
     )
-    s = step(["make", "EXIT2"])
+    role_file(cfg, "Run `make EXIT2`.")
+    s = step([])
     found = check_hooks(s, group(s), cfg)
     assert len(found) == 3
     assert sorted(r["name"] for r in ran(log)) == ["one.py", "three.py", "two.py"]
@@ -148,7 +163,8 @@ def test_hooks_without_a_bash_matcher_are_skipped(
         entry(hook(tmp_path, log, "empty.py"), matcher=""),
         entry(hook(tmp_path, log, "edit.py"), matcher="Write|Edit"),
     )
-    s = step(["make", "EXIT2"])
+    role_file(cfg, "Run `make EXIT2`.")
+    s = step([])
     assert check_hooks(s, group(s), cfg) == []
     assert ran(log) == []
 
@@ -156,17 +172,15 @@ def test_hooks_without_a_bash_matcher_are_skipped(
 def test_role_file_commands_are_fed_with_placeholders_filled(
     cfg: Config, user, tmp_path: Path, log: Path
 ):
-    role = cfg.target_repo / ".claude/agents/builder.md"
-    role.parent.mkdir(parents=True)
-    role.write_text(
-        "---\nname: builder\n---\n\n"
+    role_file(
+        cfg,
         "Run `PYTHONDONTWRITEBYTECODE=1 uv run pytest <files>` and `git diff`.\n"
-        "Then `make check`; never `ls -la` or `pythonic <x>`.\n"
+        "Then `make check`; never `ls -la` or `pythonic <x>`.",
     )
     settings(user[0], entry(hook(tmp_path, log, "guard.py")))
     s = step([], paths=["tests/a.py", "tests/b.py"])
     assert check_hooks(s, group(s), cfg) == []
-    assert [r["input"]["tool_input"]["command"] for r in ran(log)] == [
+    assert fed(log) == [
         "PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/a.py tests/b.py",
         "git diff",
         "make check",
@@ -175,7 +189,7 @@ def test_role_file_commands_are_fed_with_placeholders_filled(
 
 def test_role_commands_keep_only_the_named_tools():
     text = "`A=1 B=2 python -m x <p>` `uvx tool` `pytest` `echo git` `make`"
-    assert role_commands(text, ["p1", "p2"]) == [
+    assert role_commands(text, ["p1", "p2"], []) == [
         "A=1 B=2 python -m x p1 p2",
         "pytest",
         "make",
@@ -187,7 +201,8 @@ def test_hooks_run_from_a_temporary_directory(
 ):
     monkeypatch.chdir(cfg.target_repo)
     settings(user[0], entry(hook(tmp_path, log, "guard.py")))
-    s = step(["make", "check"])
+    role_file(cfg, "Run `make check`.")
+    s = step([])
     check_hooks(s, group(s), cfg)
     cwd = Path(ran(log)[0]["cwd"]).resolve()
     assert cwd != cfg.target_repo.resolve()
@@ -212,8 +227,82 @@ def test_a_hook_that_times_out_is_a_finding(
 ):
     monkeypatch.setattr(preflight, "HOOK_SECONDS", 1)
     settings(user[0], entry(hook(tmp_path, log, "slow.py")))
-    s = step(["make", "SLEEP"])
+    role_file(cfg, "Run `make SLEEP`.")
+    s = step([])
     found = check_hooks(s, group(s), cfg)
     assert len(found) == 1
     assert "slow.py" in found[0].problem and "timed out" in found[0].problem
     assert "make SLEEP" in found[0].problem
+
+
+def test_the_steps_own_check_is_not_fed(cfg: Config, user, tmp_path: Path, log: Path):
+    settings(user[0], entry(hook(tmp_path, log, "guard.py")))
+    role_file(cfg, "Run `git status`.")
+    s = step(["make", "EXIT2"])
+    assert check_hooks(s, group(s), cfg) == []
+    assert fed(log) == ["git status"]
+
+
+def test_commands_named_only_to_forbid_or_as_anothers_are_not_fed(
+    cfg: Config, user, tmp_path: Path, log: Path
+):
+    settings(user[0], entry(hook(tmp_path, log, "guard.py")))
+    role_file(
+        cfg,
+        "You fix the code, then `make EXIT2 all`. Run `git status`.\n"
+        "- Never `ls`, no `git EXIT2 log` or `git EXIT2 show`.\n"
+        "- Bash runs `uv run gate -- make all`; never `make EXIT2 tests`."
+        " `make EXIT2 all` is written behind the gate, never bare.\n"
+        "The lead reads the diff and runs `make EXIT2 lead` before committing.\n"
+        "A finding brief carries every finding one `make EXIT2 gate` run printed.",
+    )
+    s = step([])
+    assert check_hooks(s, group(s), cfg) == []
+    assert fed(log) == ["git status", "uv run gate -- make all"]
+
+
+def test_a_red_test_placeholder_takes_the_red_test_paths(
+    cfg: Config, user, tmp_path: Path, log: Path
+):
+    settings(user[0], entry(hook(tmp_path, log, "guard.py")))
+    role_file(
+        cfg,
+        "Run `pytest -rA <each red test path>`, then `git add <files>`.",
+        role="seam-builder",
+    )
+    red = Step(
+        "8",
+        "test-writer",
+        forms.Red((forms.Behavior("It works.", "src/x.py"),)),
+        ["tests/test_x.py", "tests/test_y.py"],
+        [],
+    )
+    build = Step(
+        "9",
+        "seam-builder",
+        forms.Build("seam-builder", "Build x", (forms.RedSelection("8"),)),
+        ["src/x.py"],
+        [],
+    )
+    picked = Step(
+        "10",
+        "seam-builder",
+        forms.Build(
+            "seam-builder", "Build y", (forms.RedSelection("8", ("tests/test_y.py",)),)
+        ),
+        ["src/y.py"],
+        [],
+    )
+    stub = Step(
+        "11", "seam-builder", forms.Stub("seam-builder", "Stub z"), ["src/z.py"], []
+    )
+    g = Group("g1", [red, build, picked, stub], "", [])
+    for s in (build, picked, stub):
+        assert check_hooks(s, g, cfg) == []
+    assert fed(log) == [
+        "pytest -rA tests/test_x.py tests/test_y.py",
+        "git add src/x.py",
+        "pytest -rA tests/test_y.py",
+        "git add src/y.py",
+        "git add src/z.py",
+    ]

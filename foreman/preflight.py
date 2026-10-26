@@ -151,22 +151,95 @@ HOOK_SECONDS = 10
 _COMMANDS = ("uv", "make", "pytest", "python", "git")
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PLACEHOLDER = re.compile(r"<[^<>]+>")
+_RED_PLACEHOLDER = re.compile(r"<[^<>]*\bred test", re.IGNORECASE)
+_SPAN = re.compile(r"`([^`\n]+)`")
+# Read over text with every backticked span masked, so a span's own
+# punctuation never ends a sentence or clause.
+_SENTENCE_END = re.compile(r"[.!?](?=\s)|\n")
+_LIST_MARK = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+")
+# A clause break; a comma before another span joins a list instead.
+_CLAUSE_BREAK = re.compile(r"[;:()]|,(?!\s*`)")
+_NEGATION = re.compile(r"\b(?:never|no|not|nor)\b", re.IGNORECASE)
+_NEVER_BARE = re.compile(r"\b(?:never|not)\s+bare\b", re.IGNORECASE)
+# A sentence about a third party, e.g. "The lead certifies ...".
+_OTHER_ACTOR = re.compile(r"^The\s+[\w-]+\s+\w+s\b")
+_RUN_NOUN = re.compile(r"^\s+runs?\b")
 
 
-def role_commands(text: str, paths: list[str]) -> list[str]:
-    """Backticked commands in a role file, placeholders filled with `paths`.
+def red_paths(step: Step, group: Group) -> list[str]:
+    """The red tests `step` works from: its own paths for a red step, the
+    selected red producers' files for a build step, else none."""
+    if isinstance(step.form, forms.Red):
+        return list(step.paths)
+    if not isinstance(step.form, forms.Build):
+        return []
+    by_id = {s.id: s for s in group.steps}
+    found: list[str] = []
+    for selection in step.form.red:
+        producer = by_id.get(selection.step)
+        if producer is not None:
+            found += selection.files if selection.files is not None else producer.paths
+    return list(dict.fromkeys(found))
+
+
+def _mentions(text: str) -> Iterator[tuple[str, bool, bool]]:
+    """Each backticked span with whether it forbids it and whether it orders it.
+
+    A span is forbidden when a never, no, not or nor opens its clause (a list
+    of spans shares one clause) or its sentence goes on to say "never bare".
+    A span is not an order when its sentence is about a third party ("The
+    lead runs ...") or it names a run ("one `make check` run printed").
+    """
+    masked = _SPAN.sub(lambda m: "`" + "x" * (len(m.group(0)) - 2) + "`", text)
+    for m in _SPAN.finditer(text):
+        start = max(
+            (e.end() for e in _SENTENCE_END.finditer(masked, 0, m.start())), default=0
+        )
+        end_match = _SENTENCE_END.search(masked, m.end())
+        end = end_match.start() if end_match else len(masked)
+        lead = masked[start : m.start()]
+        clause = _CLAUSE_BREAK.split(lead)[-1]
+        forbidden = bool(
+            _NEGATION.search(clause) or _NEVER_BARE.search(masked[m.end() : end])
+        )
+        sentence = _LIST_MARK.sub("", lead).lstrip()
+        ordered = not (
+            _OTHER_ACTOR.match(sentence) or _RUN_NOUN.match(masked[m.end() : end])
+        )
+        yield m.group(1), forbidden, ordered
+
+
+def role_commands(text: str, paths: list[str], red: list[str]) -> list[str]:
+    """Backticked commands a role file has its role run, placeholders filled.
 
     A span counts when its first word after any leading VAR=value
-    assignments is one of _COMMANDS.
+    assignments is one of _COMMANDS, some mention of it is an order to the
+    role, and no mention forbids it (see _mentions). A placeholder naming red
+    tests, e.g. `<each red test path>`, is filled with `red`, and the
+    command dropped when `red` is empty; any other is filled with `paths`.
     """
-    joined = " ".join(paths)
-    found = []
-    for span in re.findall(r"`([^`\n]+)`", text):
+    forbidden: set[str] = set()
+    ordered: list[str] = []
+    for span, forbids, orders in _mentions(text):
         words = span.split()
         while words and _ASSIGNMENT.match(words[0]):
             words.pop(0)
-        if words and words[0] in _COMMANDS:
-            found.append(_PLACEHOLDER.sub(lambda _: joined, span))
+        if not words or words[0] not in _COMMANDS:
+            continue
+        if forbids:
+            forbidden.add(span)
+        elif orders:
+            ordered.append(span)
+    found = []
+    for span in dict.fromkeys(ordered):
+        if span in forbidden:
+            continue
+        if _RED_PLACEHOLDER.search(span):
+            if not red:
+                continue
+            found.append(_PLACEHOLDER.sub(lambda _: " ".join(red), span))
+        else:
+            found.append(_PLACEHOLDER.sub(lambda _: " ".join(paths), span))
     return found
 
 
@@ -269,16 +342,19 @@ def run_hook(hook: str, command: str, cwd: Path) -> HookResult:
 
 
 def check_hooks(step: Step, group: Group, cfg: Config) -> list[Finding]:
-    """Check 4: no Bash hook blocks a command the step's role must run."""
+    """Check 4: no Bash hook blocks a command the step's role itself runs."""
 
     def found(problem: str) -> Finding:
         return Finding(step.id, "hooks", problem, "hook")
 
     findings = []
-    commands = [shlex.join(step.check)] if step.check else []
+    # The step's own check is not fed: Foreman runs it in foreman/verify.py,
+    # outside any agent session, so no hook sees it.
+    commands: list[str] = []
     rel = f".claude/agents/{step.role}.md"
     try:
-        commands += role_commands((cfg.target_repo / rel).read_text(), step.paths)
+        text = (cfg.target_repo / rel).read_text()
+        commands = role_commands(text, step.paths, red_paths(step, group))
     except OSError:
         pass  # check 3 reports an unreadable role file
     hooks: list[str] = []
