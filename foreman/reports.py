@@ -16,20 +16,6 @@ _PATH_LINE = re.compile(r"((?:/|\./)?[\w.-]+(?:/[\w.-]+)*):([1-9][0-9]*)(?=[:\s]
 
 
 @dataclass(frozen=True)
-class RedRun:
-    outcome: str
-    summary: str
-
-
-@dataclass(frozen=True)
-class RedEvidence:
-    test_id: str
-    behavior: int
-    red: RedRun
-    rerun: RedRun
-
-
-@dataclass(frozen=True)
 class Verdict:
     kind: str
     action: str
@@ -39,6 +25,11 @@ class Verdict:
     failures: tuple[str, ...]
 
 
+def _read(lines: list[str]) -> list[str]:
+    """Drop the IGNORED and CHOSEN lines, which no parser reads."""
+    return [ln for ln in lines if ln.partition(" ")[0] not in {"IGNORED", "CHOSEN"}]
+
+
 def verdict(text: str) -> Verdict:
     """Decode the shared juror/owner envelope; context checks belong to loop."""
     where = "verdict"
@@ -46,7 +37,7 @@ def verdict(text: str) -> Verdict:
         text.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ConfigError(f"{where}: requires UTF-8 text") from exc
-    records = text.removesuffix("\n").split("\n")
+    records = _read(text.removesuffix("\n").split("\n"))
     for record in records:
         forms._line(record, where)
     index = 0
@@ -113,53 +104,23 @@ def _envelope(lines: list[str]) -> list[str]:
     return out
 
 
-# Each red label must be read from the reason its quoted summary line prints.
-_RED_REASONS = {
-    "assertion": re.compile(r"AssertionError(?:: .*)?"),
-    "not-implemented": re.compile(r"NotImplementedError(?:: .*)?"),
-    "not-raised": re.compile(r"Failed: DID NOT RAISE \S.*"),
-}
+@dataclass(frozen=True)
+class RedClaims:
+    ids: tuple[tuple[int, str], ...]  # (behavior number, test id), report order
+    notes: tuple[str, ...]  # LEFT, UNTESTABLE and CONTRADICTS lines, verbatim
 
 
-def _red_reason(phase: str, test_id: str, run: RedRun) -> None:
-    prefix = f"FAILED {test_id} - "
-    if not run.summary.startswith(prefix) or not _RED_REASONS[run.outcome].fullmatch(
-        run.summary[len(prefix) :]
-    ):
-        raise ConfigError(
-            f"red report: RUN {phase} {test_id} is {run.outcome} but its line"
-            f" does not print that reason: {run.summary!r}"
-        )
+_BEHAVIOR = re.compile(
+    r"BEHAVIOR ([1-9][0-9]*) \| (.+?) \| docs: (.+?) \| breaks when: (.+)"
+)
+_NOTES = {"LEFT", "UNTESTABLE", "CONTRADICTS"}
 
 
-_RUN = re.compile(r'RUN (red|rerun|before|after) \| (.+?) \|(?: ([\w-]*))? \| "(.+)"')
-_OUTCOMES = {
-    "assertion",
-    "not-implemented",
-    "not-raised",
-    "collection",
-    "test-error",
-    "passed",
-    "no-run",
-}
+def red(text: str) -> RedClaims:
+    """Read a red report's claims: each BEHAVIOR id and number, and each note.
 
-
-def _refuse(line: str, rule: str) -> ConfigError:
-    return ConfigError(f"red report: {rule}; record: {line}")
-
-
-def _check_id(test_id: str, line: str) -> None:
-    try:
-        forms._test_id(test_id, "red report")
-    except ConfigError as exc:
-        raise _refuse(line, f"invalid test id ({exc})") from exc
-
-
-def red(text: str) -> tuple[RedEvidence, ...]:
-    """Read complete red evidence in BEHAVIOR order; fail closed on ambiguity.
-
-    ConfigError describes malformed producer evidence. The dispatch loop owns
-    turning that error into a stop naming the kept report.
+    ConfigError only for no SHAPE red .. END TESTS block, a malformed BEHAVIOR
+    line, an invalid or duplicate test id, or a refusal marker in the block.
     """
     lines = text.splitlines()
     starts = [i for i, line in enumerate(lines) if line == "SHAPE red"]
@@ -168,97 +129,36 @@ def red(text: str) -> tuple[RedEvidence, ...]:
         raise ConfigError(
             "red report: requires exactly one SHAPE red .. END TESTS block"
         )
-    # Prose or a code fence around the block is ignored.
-    raw = lines[starts[0] : ends[0] + 1]
-    envelope = _envelope(raw)
-    for key in ("SHAPE", "VIEWS", "BLOCKED", "GATE", "CHANGED", "STATUS"):
-        records = [line for line in envelope if line.partition(" ")[0] == key]
-        # STATUS is `git status --short` verbatim: one record per changed path.
-        # VIEWS is printed once per view read.
-        if key in ("VIEWS", "STATUS"):
-            if not records or any(
-                not record.startswith(key + " ") or not record[len(key) + 1 :].strip()
-                for record in records
-            ):
-                raise ConfigError(f"red report: requires one or more {key} records")
-        elif len(records) != 1 or not records[0].startswith(key + " "):
-            raise ConfigError(f"red report: requires exactly one {key} record")
-    # These delimiters must exist in order, even though their payload is opaque.
-    keys = [line.partition(" ")[0] for line in raw]
-    if (
-        "BRIEF" not in keys
-        or "DIFF" not in keys
-        or "COMMANDS" not in keys
-        or not keys.index("BRIEF")
-        < keys.index("VIEWS")
-        < keys.index("DIFF")
-        < keys.index("COMMANDS")
-    ):
-        raise ConfigError("red report: incomplete report envelope")
-    if "BLOCKED none" not in envelope or any(
-        line.partition(" ")[0]
-        in {"LEFT", "UNTESTABLE", "CONTRADICTS", "REJECTED:", "OVERLOADED:"}
-        for line in envelope
-    ):
-        raise ConfigError("red report: blocked or incomplete red behaviors")
-    if not any(re.fullmatch(r"CHANGED [0-9]+", line) for line in envelope):
-        raise ConfigError("red report: invalid CHANGED count")
-
-    behaviors: dict[str, int] = {}
-    runs: dict[tuple[str, str], RedRun] = {}
+    envelope = _read(_envelope(lines[starts[0] : ends[0] + 1]))
+    for line in envelope:
+        if line.startswith((_REJECTED, _OVERLOADED)):
+            raise ConfigError(f"red report: refusal marker in the block: {line}")
+    ids: dict[str, int] = {}
+    notes = []
     for line in envelope:
         key = line.partition(" ")[0]
         if key == "BEHAVIOR":
-            match = re.fullmatch(
-                r"BEHAVIOR ([1-9][0-9]*) \| (.+?) \| docs: (.+?) \| breaks when: (.+)",
-                line,
-            )
+            match = _BEHAVIOR.fullmatch(line)
             if not match:
-                raise _refuse(
-                    line,
-                    "malformed BEHAVIOR; needs BEHAVIOR <n> | <test id> |"
-                    " docs: <docs> | breaks when: <why>",
+                raise ConfigError(
+                    "red report: malformed BEHAVIOR; needs BEHAVIOR <n> | <test id>"
+                    f" | docs: <docs> | breaks when: <why>; record: {line}"
                 )
-            number, test_id, _, _ = match.groups()
-            _check_id(test_id, line)
-            if test_id in behaviors:
-                raise _refuse(line, f"duplicate BEHAVIOR {test_id}")
-            behaviors[test_id] = int(number)
-        elif key == "RUN":
-            match = _RUN.fullmatch(line)
-            if not match:
-                raise _refuse(
-                    line,
-                    "malformed RUN; needs RUN <red|rerun|before|after> |"
-                    ' <test id> | <outcome, may be empty> | "<summary>"',
+            number, test_id = match.group(1), match.group(2)
+            try:
+                forms._test_id(test_id, "red report")
+            except ConfigError as exc:
+                raise ConfigError(
+                    f"red report: invalid test id ({exc}); record: {line}"
+                ) from exc
+            if test_id in ids:
+                raise ConfigError(
+                    f"red report: duplicate BEHAVIOR {test_id}; record: {line}"
                 )
-            phase, test_id, outcome, summary = match.groups()
-            outcome = outcome or ""
-            _check_id(test_id, line)
-            if outcome and outcome not in _OUTCOMES:
-                raise _refuse(line, f"unknown RUN outcome {outcome!r}")
-            if (phase, test_id) in runs:
-                raise _refuse(line, f"duplicate RUN {phase} {test_id}")
-            runs[phase, test_id] = RedRun(outcome, summary)
-    if not behaviors:
-        raise ConfigError("red report: no new test evidence")
-    evidence = []
-    for test_id, number in behaviors.items():
-        first, second = runs.get(("red", test_id)), runs.get(("rerun", test_id))
-        if (
-            first is None
-            or second is None
-            or first.outcome not in _RED_REASONS
-            or second.outcome not in _RED_REASONS
-            or first.summary != second.summary
-        ):
-            raise ConfigError(
-                f"red report: missing or unstable red evidence for {test_id}"
-            )
-        for phase, run in (("red", first), ("rerun", second)):
-            _red_reason(phase, test_id, run)
-        evidence.append(RedEvidence(test_id, number, first, second))
-    return tuple(evidence)
+            ids[test_id] = int(number)
+        elif key in _NOTES:
+            notes.append(line)
+    return RedClaims(tuple((n, i) for i, n in ids.items()), tuple(notes))
 
 
 @dataclass(frozen=True)
@@ -284,7 +184,7 @@ def _block(lines: list[str], header: str) -> list[str]:
 
 
 def parse(text: str) -> Report:
-    lines = _envelope(text.splitlines())
+    lines = _read(_envelope(text.splitlines()))
     if any(ln.startswith(_REJECTED) for ln in lines):
         kind = "rejected"
     elif any(ln.startswith(_OVERLOADED) for ln in lines):

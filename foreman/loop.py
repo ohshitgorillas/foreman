@@ -1,7 +1,8 @@
 """Runs groups: dispatch order, checks, reviews, commit and cleanup."""
 
 import json
-from dataclasses import asdict, replace
+import re
+from dataclasses import asdict
 from pathlib import Path
 
 from foreman import (
@@ -203,39 +204,81 @@ def _parts(name: str, log: EventLog, step: Step) -> list[tuple[str, int]]:
     return [(f"{name}-part-{k}", n) for k, n in enumerate(counts, 1)]
 
 
-def _red_evidence(
-    step: Step, name: str, log: EventLog
-) -> tuple[reports.RedEvidence, ...]:
-    """The red evidence of every part of a red step, in behavior order."""
+_RED_OUTCOMES = {"assertion", "not-implemented", "not-raised"}
+_NOTE_NUMBER = re.compile(r"(?:LEFT|UNTESTABLE|CONTRADICTS) ([1-9][0-9]*)\b")
+
+
+def _red_claims(step: Step, name: str, log: EventLog) -> tuple[tuple[int, str], ...]:
+    """The (behavior, test id) of every claimed id of a red step, in report order.
+
+    The claims come from reports.red over every part, and every behavior needs an id
+    or a numbered note. The notes are kept as `<name>-notes`. Nothing runs here: a
+    later build makes these tests pass, so only `_red_evidence` runs verify.red.
+    """
     assert isinstance(step.form, forms.Red)
     parts = _parts(name, log, step)
     if sum(n for _, n in parts) != len(step.form.behaviors):
         raise ConfigError("red parts do not cover the producer form's behaviors")
-    evidence: list[reports.RedEvidence] = []
+    claimed: list[tuple[int, str]] = []
+    notes: list[str] = []
     offset = 0
     for part, count in parts:
-        for item in reports.red(log.kept(part)):
-            if not 1 <= item.behavior <= count:
-                raise ConfigError(
-                    f"red behavior index outside producer form: {item.behavior}"
-                )
-            if item.test_id.partition("::")[0] not in step.paths:
-                raise ConfigError(f"red test outside producer paths: {item.test_id}")
-            evidence.append(replace(item, behavior=item.behavior + offset))
+        claims = reports.red(log.kept(part))
+        covered = {number for number, _ in claims.ids}
+        for note in claims.notes:
+            match = _NOTE_NUMBER.match(note)
+            if match:
+                covered.add(int(match.group(1)))
+        for number, test_id in claims.ids:
+            if not 1 <= number <= count:
+                raise ConfigError(f"red behavior index outside producer form: {number}")
+            if test_id.partition("::")[0] not in step.paths:
+                raise ConfigError(f"red test outside producer paths: {test_id}")
+            claimed.append((number + offset, test_id))
+        missing = [n for n in range(1, count + 1) if n not in covered]
+        if missing:
+            raise ConfigError(
+                f"red report: behavior {missing[0] + offset} has neither a test id"
+                " nor a LEFT, UNTESTABLE or CONTRADICTS note"
+            )
+        notes.extend(claims.notes)
         offset += count
-    return tuple(evidence)
+    ids = [test_id for _, test_id in claimed]
+    if len(set(ids)) != len(ids):
+        raise ConfigError("red report: a test id is claimed twice across parts")
+    log.keep(f"{name}-notes", "\n".join(notes))
+    return tuple(claimed)
+
+
+def _red_evidence(
+    cfg: Config, step: Step, name: str, wt: Path, log: EventLog
+) -> tuple[tuple[int, str], ...]:
+    """The claims of a red step, each id checked red by verify.red.
+
+    Only the step that accepts the red report calls this, before any build runs.
+    """
+    claimed = _red_claims(step, name, log)
+    ids = [test_id for _, test_id in claimed]
+    if ids:
+        for result in verify.red(cfg, wt, tuple(ids)):
+            if result.outcome not in _RED_OUTCOMES:
+                raise ConfigError(
+                    f"red report: {result.test_id} is not red:"
+                    f" {result.outcome} {result.summary!r}"
+                )
+    return claimed
 
 
 def _current_red_evidence(
     cfg: Config, step: Step, name: str, wt: Path, log: EventLog
-) -> tuple[reports.RedEvidence, ...]:
+) -> tuple[tuple[int, str], ...]:
     """Resolve one successful generation, including any preserved repair baseline."""
     if log.kept(f"{name}-evidence") != _producer_identity(step):
         raise ConfigError("red producer has no current successful evidence")
-    evidence = _red_evidence(step, name, log)
+    evidence = _red_claims(step, name, log)
     preserved = log.kept(f"{name}-repair-evidence")
     if preserved:
-        ids = tuple(item.test_id for item in evidence)
+        ids = tuple(test_id for _, test_id in evidence)
         current = verify.capture_repair(cfg, wt, ids)
         if json.dumps(asdict(current), sort_keys=True) != preserved:
             raise RulingNeeded("repair differs from preserved producer evidence")
@@ -305,10 +348,10 @@ def _red_ids(
         try:
             evidence = _current_red_evidence(cfg, producer, name, wt, log)
             selected = [
-                item.test_id
-                for item in evidence
+                test_id
+                for _, test_id in evidence
                 if selection.files is None
-                or item.test_id.partition("::")[0] in selection.files
+                or test_id.partition("::")[0] in selection.files
             ]
             if not selected:
                 raise ConfigError("red selection contains no new ids")
@@ -341,7 +384,7 @@ def _group_red_ids(
             except (ConfigError, RulingNeeded) as error:
                 found.setdefault(name, str(error))
                 continue
-            produced[name] = [item.test_id for item in evidence]
+            produced[name] = [test_id for _, test_id in evidence]
     for index in range(len(group.steps)):
         _red_ids(cfg, group, index, wt, log, unresolved=found)
     _settle(group, wt, log, found, unresolved)
@@ -518,7 +561,7 @@ def _step(
         return
     if isinstance(step.form, forms.Red):
         try:
-            _red_evidence(step, name, log)
+            _red_evidence(cfg, step, name, wt, log)
         except ConfigError as error:
             # Keep the rejection itself: a cut step has no single report to name.
             kept = str(log.keep(f"{name}-red-report", str(error)))
@@ -936,7 +979,7 @@ def _repair(
     try:
         if log.kept(f"{name}-evidence") != _producer_identity(producer):
             raise ConfigError("repair producer has no current successful evidence")
-        ids = tuple(item.test_id for item in _red_evidence(producer, name, log))
+        ids = tuple(test_id for _, test_id in _red_claims(producer, name, log))
         if not completed:
             assert stopped is not None
             build = group.steps[stopped]

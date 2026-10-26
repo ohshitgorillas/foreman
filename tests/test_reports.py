@@ -106,266 +106,101 @@ def test_upheld_unknown_line_raises() -> None:
         reports.upheld("nope", {"r": Report("done", ["yes"])})
 
 
-RED_REPORT = """SHAPE red
-BRIEF red
-behavior: Preserves safe data.
-view: /scratch/errors.pyi
-VIEWS /scratch/errors.pyi
-BEHAVIOR 2 | tests/test_errors.py::TestErrors::test_safe[two words] | docs: docs/design.md §1 | breaks when: data leaks
-BEHAVIOR 1 | tests/test_errors.py::test_hierarchy | docs: docs/design.md §2 | breaks when: base changes
-RUN red | tests/test_errors.py::test_old | passed | "PASSED tests/test_errors.py::test_old"
-RUN red | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"
-RUN red | tests/test_errors.py::TestErrors::test_safe[two words] | assertion | "FAILED tests/test_errors.py::TestErrors::test_safe[two words] - AssertionError: expected safe | got unsafe"
-RUN rerun | tests/test_errors.py::TestErrors::test_safe[two words] | assertion | "FAILED tests/test_errors.py::TestErrors::test_safe[two words] - AssertionError: expected safe | got unsafe"
-RUN rerun | tests/test_errors.py::test_old | passed | "PASSED tests/test_errors.py::test_old"
-RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"
-BLOCKED none
-GATE uv run gate | "ok" | not mine: none
-CHANGED 23
-STATUS M tests/test_errors.py
-DIFF none
-COMMANDS Bash pytest
-END TESTS"""
-
-
-def test_red_new_ids_only_in_behavior_order_with_exact_selectors() -> None:
-    evidence = reports.red(RED_REPORT)
-    assert [(e.test_id, e.behavior) for e in evidence] == [
-        ("tests/test_errors.py::TestErrors::test_safe[two words]", 2),
-        ("tests/test_errors.py::test_hierarchy", 1),
-    ]
-    assert evidence[0].red == reports.RedRun(
-        "assertion",
-        "FAILED tests/test_errors.py::TestErrors::test_safe[two words] - AssertionError: expected safe | got unsafe",
+def _report(*behaviors: str, extra: str = "") -> str:
+    return "\n".join(
+        ["prose", "SHAPE red", "BRIEF red", "behavior: quoted", "VIEWS none"]
+        + list(behaviors)
+        + [extra] * bool(extra)
+        + ["DIFF none", "COMMANDS none", "END TESTS"]
     )
-    assert evidence[0].rerun == evidence[0].red
-    assert evidence[1].red.outcome == "not-implemented"
 
 
-@pytest.mark.parametrize(
-    ("old", "new"),
-    [
-        ("SHAPE red", "SHAPE repair"),
-        ("END TESTS", ""),
-        ("BLOCKED none", "BLOCKED after not green"),
-        ("BLOCKED none", "BLOCKED none\nBLOCKED none"),
-        ("BLOCKED none", "LEFT 3 | unfinished\nBLOCKED none"),
-        ("BLOCKED none", "UNTESTABLE behavior | no docs\nBLOCKED none"),
-        ("BLOCKED none", 'CONTRADICTS docs:1 | "conflict"\nBLOCKED none'),
-        ("SHAPE red", "SHAPE red\nSHAPE red"),
-        ("CHANGED 23", "CHANGED unknown"),
-        ("VIEWS /scratch/errors.pyi\n", ""),
-        ("BRIEF red\n", ""),
-        ('GATE uv run gate | "ok" | not mine: none\n', ""),
-        ("STATUS M tests/test_errors.py\n", ""),
-        ("DIFF none\n", ""),
-        ("COMMANDS Bash pytest\n", ""),
-        ("BEHAVIOR 2", "BEHAVIOR none"),
+B1 = "BEHAVIOR 2 | tests/test_a.py::test_one[x y] | docs: d §1 | breaks when: b"
+B2 = "BEHAVIOR 1 | tests/test_a.py::TestA::test_two | docs: d §2 | breaks when: c"
+
+
+def test_red_returns_claims_in_report_order() -> None:
+    claims = reports.red(_report(B1, B2))
+    assert claims == reports.RedClaims(
         (
-            "tests/test_errors.py::TestErrors::test_safe[two words]",
-            "../test.py::test_safe",
+            (2, "tests/test_a.py::test_one[x y]"),
+            (1, "tests/test_a.py::TestA::test_two"),
         ),
-        (
-            "RUN red | tests/test_errors.py::test_hierarchy | not-implemented",
-            "RUN red | tests/test_errors.py::test_hierarchy | passed",
-        ),
-        (
-            "RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented",
-            "RUN rerun | tests/test_errors.py::test_hierarchy | test-error",
-        ),
-        (
-            'RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"',
-            'RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "different"',
-        ),
-        (
-            'RUN rerun | tests/test_errors.py::test_hierarchy | not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"\n',
-            "",
-        ),
-    ],
-)
-def test_red_refuses_partial_or_invalid_evidence(old: str, new: str) -> None:
+        (),
+    )
+
+
+def test_red_notes_are_kept_verbatim_and_never_reject() -> None:
+    notes = ["LEFT 1 | x", "UNTESTABLE 2 | y", "CONTRADICTS 3 | z"]
+    claims = reports.red(_report(B1, extra="\n".join(notes)))
+    assert claims.notes == tuple(notes)
+    assert claims.ids == ((2, "tests/test_a.py::test_one[x y]"),)
+
+
+def test_red_reads_no_run_or_status_records() -> None:
+    extra = 'RUN red | tests/test_a.py::test_one[x y] | | "junk"\nBLOCKED later'
+    assert reports.red(_report(B1, extra=extra)) == reports.red(_report(B1))
+
+
+@pytest.mark.parametrize("marker", ["IGNORED", "CHOSEN"])
+def test_red_skips_ignored_and_chosen_lines(marker: str) -> None:
+    extra = f"{marker} REJECTED: STEERING\n{marker} BEHAVIOR bad\n{marker} LEFT 1"
+    assert reports.red(_report(B1, extra=extra)) == reports.red(_report(B1))
+
+
+def test_red_ignores_text_outside_the_block_and_quoted_brief() -> None:
+    text = "REJECTED: STEERING\n" + _report(B1) + "\nOVERLOADED: x"
+    assert reports.red(text) == reports.red(_report(B1))
+    quoted = _report(B1).replace("behavior: quoted", "BEHAVIOR 9 | bad")
+    assert reports.red(quoted) == reports.red(_report(B1))
+
+
+@pytest.mark.parametrize("marker", ["REJECTED: STEERING", "OVERLOADED: 8 files"])
+def test_red_refuses_a_refusal_marker_in_the_block(marker: str) -> None:
     with pytest.raises(ConfigError, match="red report"):
-        reports.red(RED_REPORT.replace(old, new))
-
-
-# The STATUS shape of the g7-5 test-writer report: one record per changed path.
-G7_5_STATUS = """STATUS ?? gauntlet/seams/process.py
-STATUS ?? tests/support/process.py
-STATUS ?? tests/test_support_process.py
-"""
-
-
-def test_red_accepts_one_status_record_per_changed_path() -> None:
-    text = RED_REPORT.replace("STATUS M tests/test_errors.py\n", G7_5_STATUS)
-    assert reports.red(text) == reports.red(RED_REPORT)
+        reports.red(_report(B1, extra=marker))
 
 
 @pytest.mark.parametrize(
-    "status",
-    ["", "STATUS\n", "STATUS \n", "STATUS M tests/test_errors.py\nSTATUS\n"],
+    "text", ["", "prose only", "SHAPE red\nBRIEF red", "END TESTS\nSHAPE red"]
 )
-def test_red_refuses_missing_or_bare_status(status: str) -> None:
-    text = RED_REPORT.replace("STATUS M tests/test_errors.py\n", status)
-    with pytest.raises(ConfigError, match="STATUS"):
+def test_red_refuses_no_block(text: str) -> None:
+    with pytest.raises(ConfigError, match="red report"):
         reports.red(text)
 
 
-def test_red_accepts_one_views_record_per_view_read() -> None:
-    text = RED_REPORT.replace(
-        "VIEWS /scratch/errors.pyi", "VIEWS /scratch/errors.pyi\nVIEWS /scratch/b.pyi"
-    )
-    assert reports.red(text) == reports.red(RED_REPORT)
+def test_red_refuses_two_blocks() -> None:
+    with pytest.raises(ConfigError, match="red report"):
+        reports.red(_report(B1) + "\n" + _report(B2))
 
 
 @pytest.mark.parametrize(
-    "views",
-    ["VIEWS \n", "VIEWS\n", "VIEWS /scratch/errors.pyi\nVIEWS \n"],
-)
-def test_red_refuses_bare_views(views: str) -> None:
-    text = RED_REPORT.replace("VIEWS /scratch/errors.pyi\n", views)
-    with pytest.raises(ConfigError, match="VIEWS"):
-        reports.red(text)
-
-
-@pytest.mark.parametrize(
-    ("old", "new"),
+    "record",
     [
-        ("SHAPE red", "SHAPE red\nSHAPE red"),
-        ("BLOCKED none", "BLOCKED none\nBLOCKED none"),
-        ('GATE uv run gate | "ok" | not mine: none', 'GATE a | "ok"\nGATE b | "ok"'),
-        ("CHANGED 23", "CHANGED 23\nCHANGED 24"),
+        "BEHAVIOR 3 | tests/test_x.py::test_x | docs: d",
+        "BEHAVIOR 0 | tests/test_x.py::test_x | docs: d | breaks when: b",
+        "BEHAVIOR 3 | not-a-test | docs: d | breaks when: b",
     ],
 )
-def test_red_keeps_other_envelope_records_exactly_one(old: str, new: str) -> None:
-    text = RED_REPORT.replace("STATUS M tests/test_errors.py\n", G7_5_STATUS).replace(
-        old, new
-    )
-    with pytest.raises(ConfigError, match="exactly one"):
-        reports.red(text)
+def test_red_refuses_malformed_behavior_naming_it(record: str) -> None:
+    with pytest.raises(ConfigError, match="red report") as info:
+        reports.red(_report(record))
+    assert record in str(info.value)
 
 
-NOT_RAISED_ID = "tests/test_core_proxy.py::test_x[/v1/messages?beta=%]"
-NOT_RAISED_LINE = f"FAILED {NOT_RAISED_ID} - Failed: DID NOT RAISE LaunchError"
+def test_red_refuses_a_duplicate_test_id() -> None:
+    again = B1.replace("BEHAVIOR 2", "BEHAVIOR 5")
+    with pytest.raises(ConfigError, match="duplicate") as info:
+        reports.red(_report(B1, again))
+    assert again in str(info.value)
 
 
-def _not_raised_report(line: str) -> str:
-    return RED_REPORT.replace(
-        "BLOCKED none",
-        f"BEHAVIOR 3 | {NOT_RAISED_ID} | docs: docs/design.md §3 | breaks when: x\n"
-        f'RUN red | {NOT_RAISED_ID} | not-raised | "{line}"\n'
-        f'RUN rerun | {NOT_RAISED_ID} | not-raised | "{line}"\n'
-        "BLOCKED none",
-    )
-
-
-def test_red_accepts_not_raised_evidence() -> None:
-    evidence = reports.red(_not_raised_report(NOT_RAISED_LINE))
-    assert [(e.test_id, e.behavior) for e in evidence][-1] == (NOT_RAISED_ID, 3)
-    assert evidence[-1].red == reports.RedRun("not-raised", NOT_RAISED_LINE)
-    assert evidence[-1].rerun == evidence[-1].red
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        f"FAILED {NOT_RAISED_ID} - AssertionError",
-        f"FAILED {NOT_RAISED_ID} - Failed: Timeout",
-        f"FAILED {NOT_RAISED_ID} - Failed: DID NOT RAISE",
-        f"FAILED {NOT_RAISED_ID}",
-        "FAILED tests/test_core_proxy.py::test_y - Failed: DID NOT RAISE LaunchError",
-    ],
-)
-def test_red_refuses_not_raised_without_its_reason(line: str) -> None:
-    with pytest.raises(ConfigError, match="does not print that reason"):
-        reports.red(_not_raised_report(line))
-
-
-@pytest.mark.parametrize(
-    ("label", "line"),
-    [
-        ("not-implemented", "FAILED tests/test_errors.py::test_hierarchy - KeyError"),
-        ("not-implemented", "FAILED tests/test_errors.py::test_hierarchy"),
-        (
-            "not-implemented",
-            "FAILED tests/test_errors.py::test_hierarchy - NotImplementedErrorX",
-        ),
-        (
-            "not-implemented",
-            "FAILED tests/test_errors.py::test_other - NotImplementedError",
-        ),
-        ("assertion", "FAILED tests/test_errors.py::test_hierarchy - TypeError: x"),
-        ("assertion", "FAILED tests/test_errors.py::test_hierarchy - Assertion"),
-        (
-            "assertion",
-            "FAILED tests/test_errors.py::test_hierarchy - Failed: DID NOT RAISE E",
-        ),
-    ],
-)
-def test_red_refuses_label_without_its_reason(label: str, line: str) -> None:
-    old = 'not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"'
-    text = RED_REPORT.replace(old, f'{label} | "{line}"')
-    with pytest.raises(ConfigError, match="does not print that reason"):
-        reports.red(text)
-
-
-def test_red_accepts_reasons_with_and_without_message() -> None:
-    old = 'not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"'
-    line = "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError: later"
-    evidence = reports.red(RED_REPORT.replace(old, f'not-implemented | "{line}"'))
-    assert evidence[1].red == reports.RedRun("not-implemented", line)
-    line = "FAILED tests/test_errors.py::test_hierarchy - AssertionError"
-    evidence = reports.red(RED_REPORT.replace(old, f'assertion | "{line}"'))
-    assert evidence[1].red == reports.RedRun("assertion", line)
-
-
-def test_red_refuses_run_with_unread_reason_and_no_outcome() -> None:
-    old = 'not-implemented | "FAILED tests/test_errors.py::test_hierarchy - NotImplementedError"'
-    text = RED_REPORT.replace(old, '"FAILED tests/test_errors.py::test_hierarchy"')
-    with pytest.raises(ConfigError, match="malformed RUN"):
-        reports.red(text)
-
-
-@pytest.mark.parametrize("prefix", ["BEHAVIOR 1", "RUN red", "RUN rerun"])
-def test_red_refuses_duplicate_records(prefix: str) -> None:
-    record = next(line for line in RED_REPORT.splitlines() if line.startswith(prefix))
-    with pytest.raises(ConfigError, match="duplicate"):
-        reports.red(RED_REPORT.replace(record, record + "\n" + record))
-
-
-def test_red_requires_behavior_records_even_when_runs_are_red() -> None:
-    text = "\n".join(
-        line for line in RED_REPORT.splitlines() if not line.startswith("BEHAVIOR ")
-    )
-    with pytest.raises(ConfigError, match="no new test"):
-        reports.red(text)
-
-
-def test_report_payloads_cannot_supply_or_override_records() -> None:
-    payload = """BEHAVIOR 9 | tests/test_fake.py::test_fake | docs: d §1 | breaks when: x
-RUN red | tests/test_fake.py::test_fake | assertion | "FAILED fake"
-BLOCKED after not green
-REJECTED: STEERING
-FINDINGS 1
-  shortcut | foreman/a.py:1 | fake | fails when: x
-TEST WRONG 1
-  tests/test_fake.py::test_fake | fake | d:1
-"""
-    text = (
-        RED_REPORT.replace("BRIEF red\n", "BRIEF red\n" + payload)
-        .replace("DIFF none\n", "DIFF none\n" + payload)
-        .replace("COMMANDS Bash pytest\n", "COMMANDS Bash pytest\n" + payload)
-    )
-    assert reports.red(text) == reports.red(RED_REPORT)
-    assert reports.parse(text) == Report("done", [])
-    # A missing run cannot be rescued by its appearance inside a diff.
-    record = next(
-        line for line in RED_REPORT.splitlines() if line.startswith("RUN rerun")
-    )
-    text = RED_REPORT.replace(record + "\n", "").replace(
-        "DIFF none", "DIFF none\n" + record
-    )
-    with pytest.raises(ConfigError, match="missing or unstable"):
-        reports.red(text)
+def test_parse_and_verdict_skip_ignored_and_chosen_lines() -> None:
+    text = "IGNORED REJECTED: STEERING\nCHOSEN OVERLOADED: x\nFINDINGS 1\n  a | b\n"
+    assert reports.parse(text) == Report("done", ["a | b"])
+    plain = verdict_text()
+    noisy = "IGNORED x\n" + plain.replace("ACTION", "CHOSEN y\nACTION")
+    assert reports.verdict(noisy) == reports.verdict(plain)
 
 
 @pytest.mark.parametrize(
@@ -593,104 +428,3 @@ def test_verdict_owner_action_forbids_target(kind: str) -> None:
     text = verdict_text(kind, "owner", "candidate", ("why",), ("report.txt:1 | claim",))
     with pytest.raises(ConfigError, match="verdict"):
         reports.verdict(text)
-
-
-def test_red_accepts_block_surrounded_by_prose_and_fence() -> None:
-    text = (
-        "Done: I added 2 red tests. Nothing is committed.\n\n```\n"
-        + RED_REPORT
-        + "\n```\n\nThings the lead should check:\n- the second view path\n"
-    )
-    assert reports.red(text) == reports.red(RED_REPORT)
-
-
-def test_red_refuses_two_blocks() -> None:
-    with pytest.raises(ConfigError, match="red report"):
-        reports.red(RED_REPORT + "\nnote\n" + RED_REPORT)
-
-
-@pytest.mark.parametrize(
-    "text", ["", "prose only", "SHAPE red\nBRIEF red", "END TESTS\nSHAPE red"]
-)
-def test_red_refuses_no_block(text: str) -> None:
-    with pytest.raises(ConfigError, match="red report"):
-        reports.red(text)
-
-
-HIER = "tests/test_errors.py::test_hierarchy"
-HIER_LINE = f"FAILED {HIER} - NotImplementedError"
-HIER_RED = f'RUN red | {HIER} | not-implemented | "{HIER_LINE}"'
-
-
-@pytest.mark.parametrize("phase", ["before", "after"])
-@pytest.mark.parametrize("outcome", ["passed", "assertion", "collection", ""])
-def test_red_accepts_before_and_after_records_without_counting_them(
-    phase: str, outcome: str
-) -> None:
-    extra = f'RUN {phase} | {HIER} | {outcome} | "{HIER_LINE}"'
-    text = RED_REPORT.replace("BLOCKED none", extra + "\nBLOCKED none")
-    assert reports.red(text) == reports.red(RED_REPORT)
-
-
-@pytest.mark.parametrize("phase", ["red", "rerun"])
-@pytest.mark.parametrize("gap", [" ", "  "])
-def test_red_accepts_left_out_outcome_but_never_as_evidence(
-    phase: str, gap: str
-) -> None:
-    old = next(
-        line
-        for line in RED_REPORT.splitlines()
-        if line.startswith(f"RUN {phase} | " + HIER)
-    )
-    left_out = f'RUN {phase} | {HIER} |{gap}| "{HIER_LINE}"'
-    with pytest.raises(ConfigError, match="missing or unstable") as info:
-        reports.red(RED_REPORT.replace(old, left_out))
-    assert HIER in str(info.value)
-
-
-def test_red_before_record_cannot_stand_in_for_red_evidence() -> None:
-    text = RED_REPORT.replace(f"RUN red | {HIER}", f"RUN before | {HIER}")
-    with pytest.raises(ConfigError, match="missing or unstable"):
-        reports.red(text)
-
-
-def test_red_refuses_other_phases() -> None:
-    record = f'RUN during | {HIER} | not-implemented | "{HIER_LINE}"'
-    text = RED_REPORT.replace("BLOCKED none", record + "\nBLOCKED none")
-    with pytest.raises(ConfigError, match="malformed RUN") as info:
-        reports.red(text)
-    assert record in str(info.value)
-
-
-@pytest.mark.parametrize(
-    ("record", "rule"),
-    [
-        ("BEHAVIOR 3 | tests/test_x.py::test_x | docs: d", "malformed BEHAVIOR"),
-        (
-            "BEHAVIOR 0 | tests/test_x.py::test_x | docs: d | breaks when: b",
-            "malformed BEHAVIOR",
-        ),
-        ("BEHAVIOR 3 | not-a-test | docs: d | breaks when: b", "test id"),
-        (f'RUN red | {HIER} | "{HIER_LINE}"', "malformed RUN"),
-        (f'RUN red | {HIER} | exploded | "{HIER_LINE}"', "unknown RUN outcome"),
-        (f'RUN before | {HIER} | exploded | "{HIER_LINE}"', "unknown RUN outcome"),
-        ('RUN red | not-a-test | assertion | "x"', "test id"),
-        (f"RUN red | {HIER} | assertion | unquoted", "malformed RUN"),
-    ],
-)
-def test_red_rejections_name_the_record_and_the_rule(record: str, rule: str) -> None:
-    text = RED_REPORT.replace("BLOCKED none", record + "\nBLOCKED none")
-    with pytest.raises(ConfigError, match=rule) as info:
-        reports.red(text)
-    assert record in str(info.value)
-
-
-@pytest.mark.parametrize("prefix", ["BEHAVIOR 1", "RUN red", "RUN rerun", "RUN before"])
-def test_red_duplicate_rejection_names_the_record(prefix: str) -> None:
-    base = RED_REPORT.replace(
-        "BLOCKED none", f'RUN before | {HIER} | passed | "PASSED {HIER}"\nBLOCKED none'
-    )
-    record = next(line for line in base.splitlines() if line.startswith(prefix))
-    with pytest.raises(ConfigError, match="duplicate") as info:
-        reports.red(base.replace(record, record + "\n" + record))
-    assert record in str(info.value)

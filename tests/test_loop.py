@@ -16,6 +16,7 @@ from foreman.errors import (
 )
 from foreman.events import EventLog
 from foreman.run import TIMEOUT_CODE, run_ok
+from foreman.verify import RedRun
 
 RED_UNTIL_FIXED = [
     "sh",
@@ -32,6 +33,18 @@ def _undetermined(anchor="a.py:1"):
         ("Need owner evidence",),
         (f"{anchor} | observed failure needs clarification",),
     )
+
+
+@pytest.fixture(autouse=True)
+def red_outcomes(monkeypatch) -> dict[str, str]:
+    """verify.red outcome per test id; an id not listed is red by assertion."""
+    outcomes: dict[str, str] = {}
+
+    def fake(cfg, wt, ids):
+        return tuple(RedRun(i, outcomes.get(i, "assertion"), "") for i in ids)
+
+    monkeypatch.setattr(loop.verify, "red", fake)
+    return outcomes
 
 
 @pytest.fixture
@@ -1010,7 +1023,9 @@ def test_build_resolves_filtered_multiple_producers_after_log_reload(
         "excluded-invalid",
     ],
 )
-def test_invalid_red_evidence_stops_before_builder(green_cfg, log, fake_backend, case):
+def test_invalid_red_evidence_stops_before_builder(
+    green_cfg, log, fake_backend, red_outcomes, case
+):
     green_cfg = _viewing(green_cfg)
     red = make_step(
         "red",
@@ -1030,10 +1045,8 @@ def test_invalid_red_evidence_stops_before_builder(green_cfg, log, fake_backend,
     elif case == "duplicate":
         report = red_report((1, test_id), (1, test_id))
     elif case == "excluded-invalid":
-        report = red_report((1, test_id), (1, "tests/test_b.py::test_bad")).replace(
-            "RUN rerun | tests/test_b.py::test_bad | assertion",
-            "RUN rerun | tests/test_b.py::test_bad | passed",
-        )
+        report = red_report((1, test_id), (1, "tests/test_b.py::test_bad"))
+        red_outcomes["tests/test_b.py::test_bad"] = "passed"
     build = make_step(
         "build",
         form=forms.Build(
@@ -2669,6 +2682,7 @@ def test_red_brief_the_cut_refuses_is_logged_and_dispatched_whole(
     green_cfg, log, fake_backend, test
 ):
     test_id = "tests/test_a.py::test_one"
+    report = red_report((1, test_id), (2, "tests/test_a.py::test_two"))
     cfg = replace(_viewing(green_cfg), page_chars=1 if test == "page" else 3000)
     paths = ["tests/test_a.py"]
     if test == "files":
@@ -2679,13 +2693,13 @@ def test_red_brief_the_cut_refuses_is_logged_and_dispatched_whole(
     (wt / "a.py").write_text("stub")
     backend = fake_backend(
         [{"tests/test_a.py": "red"}, {"b.py": "built"}],
-        outputs=[red_report((1, test_id)), ""],
+        outputs=[report, ""],
     )
     loop._steps(cfg, g, wt, log, backend, 0)
     assert len(backend.briefs) == 2
     assert backend.briefs[0].count("behavior:") == 2
     assert log.kept("g1-r1-brief") == backend.briefs[0]
-    assert log.kept("g1-r1") == red_report((1, test_id)) + "\n"
+    assert log.kept("g1-r1") == report + "\n"
     assert (wt / "b.py").read_text() == "built"
     mismatches = [r for r in _rows(cfg) if r["kind"] == "mismatch"]
     assert [r["mismatch_kind"] for r in mismatches] == ["overload"]
@@ -2698,7 +2712,7 @@ def test_red_over_the_behavior_limit_is_cut_into_parts_of_whole_behaviors(
 ):
     first, second = "tests/test_a.py::test_one", "tests/test_a.py::test_two"
     outputs = [red_report((1, first)), red_report((1, second))]
-    red, _, _, backend, run = _cut_red_run(
+    red, _, wt, backend, run = _cut_red_run(
         green_cfg,
         log,
         fake_backend,
@@ -2706,7 +2720,9 @@ def test_red_over_the_behavior_limit_is_cut_into_parts_of_whole_behaviors(
         outputs,
         red_behaviors=2,
     )
-    outputs[0] = red_report((2, first), (2, "tests/test_a.py::test_one_b"))
+    outputs[0] = red_report(
+        (2, first), (2, "tests/test_a.py::test_one_b"), notes=("LEFT 1 | later",)
+    )
     backend.outputs[0] = outputs[0]
     run()
     assert len(backend.briefs) == 2
@@ -2716,12 +2732,13 @@ def test_red_over_the_behavior_limit_is_cut_into_parts_of_whole_behaviors(
     assert log.kept("g1-r1-brief").count("behavior:") == 3
     assert log.kept("g1-r1-part-1-brief") == backend.briefs[0]
     assert log.kept("g1-r1-part-2") == outputs[1] + "\n"
-    evidence = loop._red_evidence(red, "g1-r1", log)
-    assert [(e.test_id, e.behavior) for e in evidence] == [
-        (first, 2),
-        ("tests/test_a.py::test_one_b", 2),
-        (second, 3),
-    ]
+    evidence = loop._red_evidence(green_cfg, red, "g1-r1", wt, log)
+    assert evidence == (
+        (2, first),
+        (2, "tests/test_a.py::test_one_b"),
+        (3, second),
+    )
+    assert log.kept("g1-r1-notes") == "LEFT 1 | later"
 
 
 def test_red_in_one_part_keeps_its_name_and_a_single_count(
@@ -3369,3 +3386,73 @@ def test_refused_review_after_upheld_fixes_is_dispatched_again_then_lands(
     assert run_ok(["git", "rev-parse", "foreman/g1"], origin).out.strip() == commit
     assert log.done() == {"g1"}
     assert _mismatch_kinds(cfg) == ["refused"]
+
+
+def test_red_evidence_needs_every_behavior_claimed_or_noted(
+    green_cfg, log, fake_backend
+):
+    one = "tests/test_a.py::test_one"
+    red, _, wt, _, _ = _cut_red_run(
+        green_cfg, log, fake_backend, ("One.", "Two."), [red_report((1, one))]
+    )
+    log.keep("g1-r1", red_report((1, one)))
+    with pytest.raises(ConfigError, match="behavior 2 has neither"):
+        loop._red_evidence(green_cfg, red, "g1-r1", wt, log)
+    log.keep("g1-r1", red_report((1, one), notes=("UNTESTABLE 2 | no seam",)))
+    assert loop._red_evidence(green_cfg, red, "g1-r1", wt, log) == ((1, one),)
+    assert log.kept("g1-r1-notes") == "UNTESTABLE 2 | no seam"
+
+
+def test_red_evidence_stops_on_a_claimed_id_that_is_not_red(
+    green_cfg, log, fake_backend, red_outcomes
+):
+    one = "tests/test_a.py::test_one"
+    red, _, wt, _, _ = _cut_red_run(green_cfg, log, fake_backend, ("One.",), [])
+    log.keep("g1-r1", red_report((1, one)))
+    red_outcomes[one] = "error"
+    with pytest.raises(ConfigError, match=f"{one} is not red: error"):
+        loop._red_evidence(green_cfg, red, "g1-r1", wt, log)
+
+
+def test_a_red_step_a_build_turns_green_still_lands_its_group(
+    green_cfg, origin, log, fake_backend, monkeypatch
+):
+    cfg = _viewing(green_cfg)
+    test_id = "tests/test_a.py::test_new"
+    calls: list[tuple[str, ...]] = []
+
+    def fake(cfg, wt, ids):
+        # Red when the red report is accepted, passed once the build has run.
+        calls.append(ids)
+        outcome = "assertion" if len(calls) == 1 else "passed"
+        return tuple(RedRun(i, outcome, "") for i in ids)
+
+    monkeypatch.setattr(loop.verify, "red", fake)
+    red = make_step(
+        "red",
+        ["tests/test_a.py"],
+        role="test-writer",
+        form=forms.Red((forms.Behavior("Approved behavior", "a.py"),)),
+        views=["a.py"],
+    )
+    build = make_step(
+        "build",
+        ["a.py"],
+        form=forms.Build(
+            "core-builder", "Approved build", (forms.RedSelection("red"),)
+        ),
+    )
+    group = make_group(
+        make_step("stub", ["a.py"]),
+        red,
+        build,
+        design="docs/superpowers/specs/approved.md",
+    )
+    backend = fake_backend(
+        [{"a.py": "stub"}, {"tests/test_a.py": "red"}, {"a.py": "built"}],
+        ["", red_report((1, test_id)), ""],
+    )
+    commit = loop.run_group(cfg, group, log, backend)
+    assert calls == [(test_id,)]
+    assert log.done() == {"g1"}
+    assert run_ok(["git", "rev-parse", "foreman/g1"], origin).out.strip() == commit
