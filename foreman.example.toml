@@ -18,6 +18,11 @@ answer_rounds = 2 # optional
 page_chars = 3000 # optional
 # Behaviors per red brief (7.1f dispatch cap): an unmeasured starting value.
 red_behaviors = 6 # optional
+# Seconds for every command that is not an agent (check, format, views, hooks,
+# collection, red run): an unmeasured starting value.
+check_seconds = 600 # optional
+# Optional: the target repo's interpreter, used to run its tests for the red check.
+python_cmd = ["uv", "run", "python"] # the default
 # Optional: the folder holding approved specs. Spec paths in a step file
 # (red and port origins, test-reviewer specs) must lie under it.
 spec_dir = "docs/superpowers/specs/" # the default

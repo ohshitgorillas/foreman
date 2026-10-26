@@ -33,6 +33,11 @@ class Config:
     )
     page_chars: int = 3000  # 7.1f "about a page": characters of a rendered brief
     red_behaviors: int = 6  # 7.1f dispatch cap: behaviors per red brief
+    # seconds for every command that is not an agent: step check, group check,
+    # format, views, hooks, collection, red run; unmeasured starting value
+    check_seconds: int = 600
+    # the target repo's interpreter, for verify.red
+    python_cmd: list[str] = field(default_factory=lambda: ["uv", "run", "python"])
     # builder role -> folders (ending "/") and single files it may write
     builders: dict[str, tuple[str, ...]] = field(
         default_factory=lambda: dict(forms.GAUNTLET_BUILDERS)
@@ -43,7 +48,13 @@ class Config:
 _PATHS = ("target_repo", "worktree_root", "state_dir", "view_root")
 _LISTS = ("check_cmd", "format_cmd", "view_cmd")
 _REQUIRED_INTS = ("batch_budget", "dispatch_seconds")
-_OPTIONAL_INTS = ("juror_rounds", "answer_rounds", "page_chars", "red_behaviors")
+_OPTIONAL_INTS = (
+    "juror_rounds",
+    "answer_rounds",
+    "page_chars",
+    "red_behaviors",
+    "check_seconds",
+)
 _DEFAULTS = {f.name: f.default for f in fields(Config) if f.name in _OPTIONAL_INTS}
 _REVIEWER_ROLES = ("diff-reviewer", "test-reviewer")
 
@@ -127,7 +138,7 @@ def load(path: Path) -> Config:
     missing = [k for k in required if k not in data]
     if missing:
         raise ConfigError(f"{path}: missing keys: {', '.join(missing)}")
-    optional = {"reviewers", "builders", "spec_dir", *_OPTIONAL_INTS}
+    optional = {"reviewers", "builders", "spec_dir", "python_cmd", *_OPTIONAL_INTS}
     unknown = sorted(set(data) - set(required) - optional)
     if unknown:
         raise ConfigError(f"{path}: unknown keys: {', '.join(unknown)}")
@@ -144,6 +155,8 @@ def load(path: Path) -> Config:
         if type(value) is not int or value < 1:
             raise ConfigError(f"{path}: {key} must be an integer >= 1")
         values[key] = value
+    if "python_cmd" in data:
+        values["python_cmd"] = _str_list("python_cmd", data["python_cmd"])
     if not isinstance(data["backend"], str):
         raise ConfigError("backend must be a string")
     values["backend"] = data["backend"]

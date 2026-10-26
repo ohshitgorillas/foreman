@@ -24,6 +24,7 @@ LIMITS = [
     "juror_rounds",
     "page_chars",
     "red_behaviors",
+    "check_seconds",
 ]
 
 
@@ -50,6 +51,7 @@ def test_load_good(tmp_path: Path) -> None:
         juror_rounds=2,
         page_chars=3000,
         red_behaviors=6,
+        check_seconds=600,
     )
 
 
@@ -125,6 +127,7 @@ def test_example_file_loads() -> None:
     assert c.juror_rounds == 2
     assert c.page_chars == 3000
     assert c.red_behaviors == 6
+    assert c.check_seconds == 600
     assert c.reviewers == [
         Reviewer("diff-reviewer", ["foreman/", "tests/"]),
         Reviewer("test-reviewer", ["tests/"]),
@@ -296,3 +299,18 @@ def test_conf_file_serializes_answer_rounds(conf_file: Path, green_cfg: Config) 
     c = load(conf_file)
     assert c.answer_rounds == green_cfg.answer_rounds == 2
     assert type(c.answer_rounds) is int
+
+
+def test_python_cmd_defaults_to_uv_run_python(tmp_path: Path) -> None:
+    assert load(_write(tmp_path, GOOD)).python_cmd == ["uv", "run", "python"]
+
+
+def test_python_cmd_loads_from_toml(tmp_path: Path) -> None:
+    text = GOOD + 'python_cmd = ["python3", "-I"]\n'
+    assert load(_write(tmp_path, text)).python_cmd == ["python3", "-I"]
+
+
+@pytest.mark.parametrize("bad", ['"python3"', "[1, 2]"])
+def test_python_cmd_must_be_a_list_of_strings(tmp_path: Path, bad: str) -> None:
+    with pytest.raises(ConfigError, match="python_cmd"):
+        load(_write(tmp_path, GOOD + f"python_cmd = {bad}\n"))
