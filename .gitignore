@@ -5,3 +5,5 @@ __pycache__/
 uv.lock
 foreman.toml
 state/
+state-*/
+state-*.log
