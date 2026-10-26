@@ -3,6 +3,7 @@
 import json
 import sys
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from foreman.config import Config
@@ -111,19 +112,23 @@ class EventLog:
             f"{len(lines)} events; last: {last['kind']} step {last['step_id'] or '-'}"
         )
 
-    def stats(self) -> str:
-        """Per role: mean tokens and seconds per finished dispatch, with counts."""
-        if not self._path.exists():
-            return "no dispatches"
-        rows = [
-            json.loads(x)
-            for x in self._path.read_text(encoding="utf-8").splitlines()
-            if x
-        ]
+    def stats(self, extra: Iterable[dict] = ()) -> str:
+        """Per role: mean tokens and seconds per finished dispatch, with counts.
+
+        `extra` holds dispatch rows from elsewhere (role, tokens, seconds,
+        outcome), counted beside the ones in events.jsonl."""
+        rows = (
+            [
+                json.loads(x)
+                for x in self._path.read_text(encoding="utf-8").splitlines()
+                if x
+            ]
+            if self._path.exists()
+            else []
+        )
         roles: dict[str, list[dict]] = {}
-        for r in rows:
-            if r["kind"] == "dispatch":
-                roles.setdefault(r["role"], []).append(r)
+        for r in [r for r in rows if r["kind"] == "dispatch"] + list(extra):
+            roles.setdefault(r["role"], []).append(r)
         if not roles:
             return "no dispatches"
         out = []

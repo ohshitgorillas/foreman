@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import NoReturn
 
-from foreman import backends, config, events, loop, preflight, steps
+from foreman import backends, config, events, loop, preflight, steps, transcripts
 from foreman.errors import EXIT_OK, ConfigError, ForemanError
 from foreman.events import EventLog, fail, say
 from foreman.steps import Group
@@ -47,7 +47,13 @@ def _parser() -> argparse.ArgumentParser:
         help="the step to rerun from; earlier steps keep their state",
     )
     sub.add_parser("status", help="print the one-line status")
-    sub.add_parser("stats", help="print per-role dispatch means and counts")
+    st = sub.add_parser("stats", help="print per-role dispatch means and counts")
+    st.add_argument(
+        "--history",
+        type=Path,
+        default=transcripts.DEFAULT_ROOT,
+        help="Claude Code projects root holding */*/subagents/agent-*.jsonl",
+    )
     return p
 
 
@@ -95,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
             say(log.status())
             return EXIT_OK
         if args.command == "stats":
-            say(log.stats())
+            say(log.stats(transcripts.dispatches(args.history)))
             return EXIT_OK
         groups = _load(args.step_file, cfg)
         if args.command == "run" and not args.group_id:

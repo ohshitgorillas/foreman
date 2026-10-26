@@ -1,6 +1,8 @@
 """`foreman stats`: per role, tokens and seconds per finished dispatch, with
-overrun and refusal counts, read from Foreman's existing event log."""
+overrun and refusal counts, read from Foreman's existing event log and from
+Claude Code's subagent history."""
 
+import json
 import re
 from pathlib import Path
 
@@ -13,10 +15,16 @@ from foreman.events import EventLog
 NUMBER = r"\d+(?:\.\d+)?"
 
 
+def history(conf_file: Path) -> Path:
+    """The fixture history root beside conf_file, never the real home."""
+    return conf_file.parent / "history"
+
+
 def stats(conf_file: Path, capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
     """Run `foreman stats` against conf_file; return its exit code and stdout."""
+    argv = ["--config", str(conf_file), "stats", "--history", str(history(conf_file))]
     try:
-        code = main(["--config", str(conf_file), "stats"])
+        code = main(argv)
     except SystemExit as e:
         pytest.fail(f"foreman stats exited {e.code}: {capsys.readouterr().err.strip()}")
     return code, capsys.readouterr().out
@@ -132,3 +140,109 @@ def test_stats_keeps_roles_apart(conf_file: Path, log: EventLog, capsys) -> None
     assert figure(juror, "refus") == 0
     assert figure(juror, "token") == 9000
     assert figure(juror, "sec") == 90
+
+
+def transcript(
+    root: Path, name: str, role: str, usages: list[dict], start: str, end: str
+) -> None:
+    """One subagent transcript under root with its sibling meta file."""
+    folder = root / "-some-project" / "session-1" / "subagents"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"agent-{name}.meta.json").write_text(
+        json.dumps({"agentType": role, "description": "x", "finished": True})
+    )
+    lines = [{"type": "user", "timestamp": start, "message": {"role": "user"}}]
+    for i, usage in enumerate(usages):
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": start,
+                "message": {
+                    "id": f"msg_{name}_{i}",
+                    "role": "assistant",
+                    "usage": usage,
+                },
+            }
+        )
+    lines.append({"type": "user", "timestamp": end, "message": {"role": "user"}})
+    (folder / f"agent-{name}.jsonl").write_text(
+        "".join(json.dumps(x) + "\n" for x in lines)
+    )
+
+
+def usage(inp: int, out: int, created: int = 0, read: int = 0) -> dict:
+    return {
+        "input_tokens": inp,
+        "output_tokens": out,
+        "cache_creation_input_tokens": created,
+        "cache_read_input_tokens": read,
+    }
+
+
+def test_stats_reads_subagent_history(conf_file: Path, capsys) -> None:
+    root = history(conf_file)
+    transcript(
+        root,
+        "a1",
+        "spec-scout",
+        [usage(100, 100, 200, 100), usage(200, 100, 0, 200)],
+        "2026-10-18T23:13:08.000Z",
+        "2026-10-18T23:14:48.000Z",
+    )
+    transcript(
+        root,
+        "a2",
+        "spec-scout",
+        [usage(1000, 2000)],
+        "2026-10-18T23:00:00.000Z",
+        "2026-10-18T23:05:00.000Z",
+    )
+    code, out = stats(conf_file, capsys)
+    assert code == 0
+    line = role_line(out, "spec-scout")
+    assert figure(line, "token") == 2000
+    assert figure(line, "sec") == 200
+    assert figure(line, "overr") == 0
+    assert figure(line, "refus") == 0
+
+
+def test_stats_prints_history_roles_beside_event_roles(
+    conf_file: Path, log: EventLog, capsys
+) -> None:
+    dispatch(log, "core-builder", 1000, 10.0, "done")
+    transcript(
+        history(conf_file),
+        "b1",
+        "general-purpose",
+        [usage(4000, 1000)],
+        "2026-10-18T10:00:00Z",
+        "2026-10-18T10:00:30Z",
+    )
+    code, out = stats(conf_file, capsys)
+    assert code == 0
+    builder = role_line(out, "core-builder")
+    assert figure(builder, "token") == 1000
+    general = role_line(out, "general-purpose")
+    assert figure(general, "token") == 5000
+    assert figure(general, "sec") == 30
+
+
+def test_stats_merges_a_role_found_in_both_sources(
+    conf_file: Path, log: EventLog, capsys
+) -> None:
+    dispatch(log, "juror", 1000, 10.0, "done")
+    dispatch(log, "juror", 1000, 600.0, "overran")
+    transcript(
+        history(conf_file),
+        "c1",
+        "juror",
+        [usage(2000, 1000)],
+        "2026-10-18T10:00:00Z",
+        "2026-10-18T10:00:50Z",
+    )
+    code, out = stats(conf_file, capsys)
+    assert code == 0
+    line = role_line(out, "juror")
+    assert figure(line, "token") == 2000
+    assert figure(line, "sec") == 30
+    assert figure(line, "overr") == 1
