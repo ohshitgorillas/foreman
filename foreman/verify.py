@@ -20,6 +20,82 @@ class Verdict:
     result: Result
 
 
+@dataclass(frozen=True)
+class RedRun:
+    test_id: str
+    outcome: str  # assertion, not-implemented, not-raised, passed, error, missing
+    summary: str  # pytest's one-line longrepr summary, verbatim
+
+
+# Runs inside the target repo's interpreter. Outcomes come from
+# pytest_runtest_logreport and pytest_collectreport, never from terminal text.
+_RED_SCRIPT = """import json, sys
+import pytest
+from pathlib import Path
+wanted = set(sys.argv[1:])
+seen = {}
+collect_errors = {}
+class Plugin:
+    def pytest_collectreport(self, report):
+        if report.failed:
+            collect_errors[report.nodeid] = report.longrepr.reprcrash.message if getattr(report.longrepr, 'reprcrash', None) else str(report.longrepr).strip().splitlines()[-1]
+    def pytest_collection_modifyitems(self, items):
+        items[:] = [i for i in items if i.nodeid in wanted]
+    def pytest_runtest_logreport(self, report):
+        if report.when == 'call' or (report.when == 'setup' and report.outcome != 'passed'):
+            if report.outcome == 'passed':
+                seen[report.nodeid] = ('passed', '')
+                return
+            if report.outcome == 'skipped':
+                seen[report.nodeid] = ('error', 'skipped')
+                return
+            crash = getattr(report.longrepr, 'reprcrash', None)
+            msg = crash.message if crash else str(report.longrepr)
+            if report.when != 'call':
+                kind = 'error'
+            elif msg.startswith('Failed: DID NOT RAISE'):
+                kind = 'not-raised'
+            elif msg.startswith('NotImplementedError'):
+                kind = 'not-implemented'
+            elif msg.startswith(('assert', 'AssertionError')):
+                kind = 'assertion'
+            else:
+                kind = 'error'
+            seen[report.nodeid] = (kind, msg)
+files = sorted({w.partition('::')[0] for w in wanted if Path(w.partition('::')[0]).is_file()})
+if files:
+    pytest.main(['-q', '-p', 'no:cacheprovider', '-o', 'addopts=', '--', *files], plugins=[Plugin()])
+print(json.dumps({'seen': seen, 'collect_errors': collect_errors}))
+"""
+
+
+def red(cfg: Config, wt: Path, ids: tuple[str, ...]) -> tuple[RedRun, ...]:
+    """Run exactly ids with a pytest plugin and report each one's outcome."""
+    result = run.run(
+        [*cfg.python_cmd, "-c", _RED_SCRIPT, *ids], wt, timeout=cfg.check_seconds
+    )
+    if result.code == run.TIMEOUT_CODE:
+        return tuple(RedRun(i, "error", "timed out") for i in ids)
+    try:
+        payload = json.loads(result.out.strip().splitlines()[-1])
+        seen = payload["seen"]
+        collect_errors = payload["collect_errors"]
+    except (IndexError, ValueError, KeyError):
+        summary = (result.err.strip().splitlines() or ["no structured output"])[-1]
+        return tuple(RedRun(i, "error", summary) for i in ids)
+    runs = []
+    for i in ids:
+        if i in seen:
+            runs.append(RedRun(i, seen[i][0], seen[i][1]))
+            continue
+        broken = collect_errors.get(i.partition("::")[0])
+        if broken is not None:
+            runs.append(RedRun(i, "error", broken))
+        else:
+            runs.append(RedRun(i, "missing", ""))
+    return tuple(runs)
+
+
 def verify(cfg: Config, wt: Path) -> Verdict:
     """Run format_cmd, then check_cmd, in wt. A failed format is red and final."""
     formatted = run.run(cfg.format_cmd, wt)

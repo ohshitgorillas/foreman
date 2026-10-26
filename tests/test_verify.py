@@ -1,3 +1,4 @@
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -196,3 +197,88 @@ def test_repair_preserves_assertion_api_calls(
     path.write_text(path.read_text().replace(assertion, changed))
     with pytest.raises(RulingNeeded, match="assertion"):
         verify.validate_repair(original, tmp_path)
+
+
+_RED_SOURCE = """
+import pytest
+
+
+def test_assertion():
+    assert 1 == 2
+
+
+def test_stub():
+    raise NotImplementedError
+
+
+def test_not_raised():
+    with pytest.raises(ValueError):
+        pass
+
+
+def test_passes():
+    assert True
+
+
+def test_error():
+    raise KeyError("boom")
+
+
+@pytest.mark.parametrize("n", [1])
+def test_param(n):
+    assert n == 2
+"""
+
+
+def _red_cfg(green_cfg: Config) -> Config:
+    return replace(green_cfg, python_cmd=[sys.executable])
+
+
+def test_red_reports_each_outcome_from_pytest(
+    green_cfg: Config, tmp_path: Path
+) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(_RED_SOURCE)
+    names = (
+        "test_assertion",
+        "test_stub",
+        "test_not_raised",
+        "test_passes",
+        "test_error",
+        "test_param[1]",
+        "test_gone",
+    )
+    ids = tuple(f"tests/test_x.py::{n}" for n in names) + ("tests/nofile.py::test_a",)
+    runs = verify.red(_red_cfg(green_cfg), tmp_path, ids)
+    assert [r.test_id for r in runs] == list(ids)
+    assert [r.outcome for r in runs] == [
+        "assertion",
+        "not-implemented",
+        "not-raised",
+        "passed",
+        "error",
+        "assertion",
+        "missing",
+        "missing",
+    ]
+    assert "1 == 2" in runs[0].summary
+    assert "DID NOT RAISE" in runs[2].summary
+    assert "KeyError" in runs[4].summary
+
+
+def test_red_collection_error_is_error(green_cfg: Config, tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_bad.py").write_text("def broken(:\n")
+    ids = ("tests/test_bad.py::test_a",)
+    runs = verify.red(_red_cfg(green_cfg), tmp_path, ids)
+    assert [r.outcome for r in runs] == ["error"]
+
+
+def test_red_timeout_is_error(green_cfg: Config, tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_slow.py").write_text(
+        "import time\n\n\ndef test_a():\n    time.sleep(30)\n"
+    )
+    cfg = replace(_red_cfg(green_cfg), check_seconds=2)
+    runs = verify.red(cfg, tmp_path, ("tests/test_slow.py::test_a",))
+    assert [r.outcome for r in runs] == ["error"]
