@@ -151,12 +151,13 @@ def red(text: str) -> tuple[RedEvidence, ...]:
     for key in ("SHAPE", "VIEWS", "BLOCKED", "GATE", "CHANGED", "STATUS"):
         records = [line for line in envelope if line.partition(" ")[0] == key]
         # STATUS is `git status --short` verbatim: one record per changed path.
-        if key == "STATUS":
+        # VIEWS is printed once per view read.
+        if key in ("VIEWS", "STATUS"):
             if not records or any(
-                not record.startswith("STATUS ") or not record[7:].strip()
+                not record.startswith(key + " ") or not record[len(key) + 1 :].strip()
                 for record in records
             ):
-                raise ConfigError("red report: requires one or more STATUS records")
+                raise ConfigError(f"red report: requires one or more {key} records")
         elif len(records) != 1 or not records[0].startswith(key + " "):
             raise ConfigError(f"red report: requires exactly one {key} record")
     # These delimiters must exist in order, even though their payload is opaque.

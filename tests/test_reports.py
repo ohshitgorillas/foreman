@@ -210,11 +210,27 @@ def test_red_refuses_missing_or_bare_status(status: str) -> None:
         reports.red(text)
 
 
+def test_red_accepts_one_views_record_per_view_read() -> None:
+    text = RED_REPORT.replace(
+        "VIEWS /scratch/errors.pyi", "VIEWS /scratch/errors.pyi\nVIEWS /scratch/b.pyi"
+    )
+    assert reports.red(text) == reports.red(RED_REPORT)
+
+
+@pytest.mark.parametrize(
+    "views",
+    ["VIEWS \n", "VIEWS\n", "VIEWS /scratch/errors.pyi\nVIEWS \n"],
+)
+def test_red_refuses_bare_views(views: str) -> None:
+    text = RED_REPORT.replace("VIEWS /scratch/errors.pyi\n", views)
+    with pytest.raises(ConfigError, match="VIEWS"):
+        reports.red(text)
+
+
 @pytest.mark.parametrize(
     ("old", "new"),
     [
         ("SHAPE red", "SHAPE red\nSHAPE red"),
-        ("VIEWS /scratch/errors.pyi", "VIEWS /a.pyi\nVIEWS /b.pyi"),
         ("BLOCKED none", "BLOCKED none\nBLOCKED none"),
         ('GATE uv run gate | "ok" | not mine: none', 'GATE a | "ok"\nGATE b | "ok"'),
         ("CHANGED 23", "CHANGED 23\nCHANGED 24"),
