@@ -65,14 +65,42 @@ def check_verbatim(step: Step, group: Group, cfg: Config) -> list[Finding]:
         return [found(f"group {group.id} names no design file", "Foreman")]
     path = cfg.target_repo / group.design
     try:
-        design = _collapse(path.read_text())
+        text = path.read_text()
     except OSError as e:
         return [found(f"cannot read design {group.design}: {e.strerror}", "Foreman")]
+    designs = {group.design: _collapse(text)}
+    for rel, cited in _cited(text, path, cfg.target_repo):
+        designs.setdefault(rel, cited)
+    searched = ", ".join(designs)
     return [
-        found(f"behavior not in {group.design}: {b.text}", "architect")
+        found(f"behavior not in {searched}: {b.text}", "architect")
         for b in step.form.behaviors
-        if not _quotes(design, b.text)
+        if not any(_quotes(d, b.text) for d in designs.values())
     ]
+
+
+_CITATION = re.compile(r"`([^`\s]+\.md)`")
+
+
+def _cited(text: str, design: Path, repo: Path) -> Iterator[tuple[str, str]]:
+    """Each design `text` cites by a backticked `.md` name, as (repo path, collapsed text).
+
+    A name resolves first against `design`'s folder, then the repo root; one
+    that resolves to no readable file inside `repo` is skipped. Citations in
+    the cited designs are not followed.
+    """
+    root = repo.resolve()
+    for name in dict.fromkeys(_CITATION.findall(text)):
+        for base in (design.parent, repo):
+            path = (base / name).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                continue
+            try:
+                cited = path.read_text()
+            except OSError:
+                continue
+            yield str(path.relative_to(root)), _collapse(cited)
+            break
 
 
 _DESCRIPTION = re.compile(r"^description:[ \t]*(.*)$", re.MULTILINE)

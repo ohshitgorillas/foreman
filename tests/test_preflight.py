@@ -175,6 +175,40 @@ def test_missing_design_is_one_finding_for_foreman(
     assert [(f.check, f.fixer) for f in found] == [("verbatim", "Foreman")]
 
 
+CITED = "docs/superpowers/specs/cited.md"
+
+
+@pytest.fixture
+def citing(cfg: Config, repo: Path) -> Path:
+    """A group design that cites `cited.md` by bare name, which quotes one behavior."""
+    write(repo, DESIGN, "Why and Modules: `cited.md`.\n\n- Own line.\n")
+    write(repo, CITED, "# Cited\n\n- A behavior only the cited\n  design quotes.\n")
+    return repo
+
+
+def test_behavior_only_in_a_cited_design_passes(cfg: Config, citing: Path):
+    step = red("5", "A behavior only the cited design quotes.", "Own line.")
+    assert check_verbatim(step, group(step), cfg) == []
+
+
+def test_behavior_in_neither_design_is_one_finding_naming_both(
+    cfg: Config, citing: Path
+):
+    step = red("5", "Gone.")
+    found = check_verbatim(step, group(step), cfg)
+    assert [(f.check, f.fixer) for f in found] == [("verbatim", "architect")]
+    assert DESIGN in found[0].problem and CITED in found[0].problem
+
+
+def test_citation_resolving_to_no_file_is_ignored(cfg: Config, repo: Path):
+    write(repo, DESIGN, "See `absent.md` and `docs/none.md`.\n\n- Own line.\n")
+    step = red("5", "Own line.", "Gone.")
+    found = check_verbatim(step, group(step), cfg)
+    assert [(f.check, f.fixer) for f in found] == [("verbatim", "architect")]
+    assert "absent.md" not in found[0].problem
+    assert "none.md" not in found[0].problem
+
+
 # check 3: scope
 
 
