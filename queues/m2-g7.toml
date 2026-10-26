@@ -122,7 +122,7 @@ text = "Cleanup fails when any member of the group is still running after that s
 source = "gauntlet/seams/process.py"
 
 [[steps.8.form.behaviors]]
-text = "run runs the sequence on an exception or interrupt."
+text = "Any exception raised while run waits on its child, KeyboardInterrupt and every other BaseException included, makes run run the sequence and then re-raise that same exception object; run raises ProcessError in its place only when the sequence itself fails, raised `from` that exception so it stays on `__cause__` and in the traceback."
 source = "gauntlet/seams/process.py"
 
 [[steps.8.form.behaviors]]
