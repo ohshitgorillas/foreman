@@ -1,7 +1,7 @@
 """Loads foreman.toml once into a frozen value."""
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 from foreman.errors import ConfigError
@@ -27,11 +27,15 @@ class Config:
     batch_budget: int  # enclosing-unit lines per finding batch
     dispatch_seconds: int  # backend run timeout
     juror_rounds: int = 2  # attempts per failing step or group-check context
+    page_chars: int = 3000  # 7.1f "about a page": characters of a rendered brief
+    red_behaviors: int = 6  # 7.1f dispatch cap: behaviors per red brief
 
 
 _PATHS = ("target_repo", "worktree_root", "state_dir", "view_root")
 _LISTS = ("check_cmd", "format_cmd", "view_cmd")
 _REQUIRED_INTS = ("batch_budget", "dispatch_seconds")
+_OPTIONAL_INTS = ("juror_rounds", "page_chars", "red_behaviors")
+_DEFAULTS = {f.name: f.default for f in fields(Config) if f.name in _OPTIONAL_INTS}
 _REVIEWER_ROLES = ("diff-reviewer", "test-reviewer")
 
 
@@ -87,7 +91,7 @@ def load(path: Path) -> Config:
     missing = [k for k in required if k not in data]
     if missing:
         raise ConfigError(f"{path}: missing keys: {', '.join(missing)}")
-    unknown = sorted(set(data) - set(required) - {"reviewers", "juror_rounds"})
+    unknown = sorted(set(data) - set(required) - {"reviewers", *_OPTIONAL_INTS})
     if unknown:
         raise ConfigError(f"{path}: unknown keys: {', '.join(unknown)}")
 
@@ -98,8 +102,8 @@ def load(path: Path) -> Config:
         values[key] = Path(data[key]).expanduser()
     for key in _LISTS:
         values[key] = _str_list(key, data[key])
-    for key in (*_REQUIRED_INTS, "juror_rounds"):
-        value = data.get(key, 2) if key == "juror_rounds" else data[key]
+    for key in (*_REQUIRED_INTS, *_OPTIONAL_INTS):
+        value = data[key] if key in data else _DEFAULTS[key]
         if type(value) is not int or value < 1:
             raise ConfigError(f"{path}: {key} must be an integer >= 1")
         values[key] = value

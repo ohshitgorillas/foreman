@@ -12,6 +12,10 @@ view_root = "~/dev/foreman/views"
 batch_budget = 300
 dispatch_seconds = 600 # ten-minute agent cap
 juror_rounds = 2 # optional; attempts per failing step or group-check context
+# Characters of a rendered brief (7.1f "about a page"): an unmeasured starting value.
+page_chars = 3000 # optional
+# Behaviors per red brief (7.1f dispatch cap): an unmeasured starting value.
+red_behaviors = 6 # optional
 
 # Reviewers run in this order after the group check, when the group changed a
 # path equal to or under one of `paths`. Only diff-reviewer and test-reviewer

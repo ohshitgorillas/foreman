@@ -18,6 +18,14 @@ batch_budget = 300
 dispatch_seconds = 600
 """
 
+LIMITS = [
+    "batch_budget",
+    "dispatch_seconds",
+    "juror_rounds",
+    "page_chars",
+    "red_behaviors",
+]
+
 
 def _write(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "foreman.toml"
@@ -40,6 +48,8 @@ def test_load_good(tmp_path: Path) -> None:
         batch_budget=300,
         dispatch_seconds=600,
         juror_rounds=2,
+        page_chars=3000,
+        red_behaviors=6,
     )
 
 
@@ -113,6 +123,8 @@ def test_example_file_loads() -> None:
     assert c.batch_budget == 300
     assert c.dispatch_seconds == 600
     assert c.juror_rounds == 2
+    assert c.page_chars == 3000
+    assert c.red_behaviors == 6
     assert c.reviewers == [
         Reviewer("diff-reviewer", ["foreman/", "tests/"]),
         Reviewer("test-reviewer", ["tests/"]),
@@ -197,7 +209,7 @@ def test_limits_are_required(tmp_path: Path, key: str) -> None:
     assert str(exc.value) == f"{path}: missing keys: {key}"
 
 
-@pytest.mark.parametrize("key", ["batch_budget", "dispatch_seconds", "juror_rounds"])
+@pytest.mark.parametrize("key", LIMITS)
 @pytest.mark.parametrize(
     "value", ["true", "false", "1.0", '"2"', "[]", "{}", "0", "-1"]
 )
@@ -209,7 +221,7 @@ def test_limits_require_positive_integers(tmp_path: Path, key: str, value: str) 
     assert str(exc.value) == f"{path}: {key} must be an integer >= 1"
 
 
-@pytest.mark.parametrize("key", ["batch_budget", "dispatch_seconds", "juror_rounds"])
+@pytest.mark.parametrize("key", LIMITS)
 @pytest.mark.parametrize("value", [1, 37])
 def test_limits_accept_positive_integers(tmp_path: Path, key: str, value: int) -> None:
     text = "".join(ln + "\n" for ln in GOOD.splitlines() if not ln.startswith(key))
@@ -221,5 +233,5 @@ def test_limits_accept_positive_integers(tmp_path: Path, key: str, value: int) -
 def test_conf_file_round_trip(conf_file: Path, green_cfg: Config) -> None:
     c = load(conf_file)
     assert c == green_cfg
-    for key in ("batch_budget", "dispatch_seconds", "juror_rounds"):
+    for key in LIMITS:
         assert type(getattr(c, key)) is int
