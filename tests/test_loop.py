@@ -1807,7 +1807,7 @@ def test_juror_repair_preserves_producer_and_restores_builder(
         loop._follow_verdict(
             cfg,
             group,
-            loop._judgment(group, 1, wt, continued_log),
+            loop._judgment(cfg, group, 1, wt, continued_log),
             wt,
             continued_log,
             resumed,
@@ -1824,7 +1824,7 @@ def test_juror_repair_preserves_producer_and_restores_builder(
             loop._follow_verdict(
                 cfg,
                 group,
-                loop._judgment(group, 1, wt, continued_log),
+                loop._judgment(cfg, group, 1, wt, continued_log),
                 wt,
                 continued_log,
                 resumed,
@@ -1885,7 +1885,7 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
     snapshots = {
         name: log.kept(f"g1-{name}-before") for name in ("red", "first", "second")
     }
-    judgment = loop._judgment(group, 3, wt, log)
+    judgment = loop._judgment(cfg, group, 3, wt, log)
     verdict = loop.reports.verdict(
         verdict_text(
             "tests wrong",
@@ -1909,7 +1909,7 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
                     with pytest.raises(
                         RulingNeeded, match="no current successful evidence"
                     ):
-                        loop._red_ids(group, index, worktree, EventLog(cfg))
+                        loop._red_ids(cfg, group, index, worktree, EventLog(cfg))
             return super().start(text, worktree, agent)
 
     if outcome == "bad-check":
@@ -1938,7 +1938,7 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
             f"Approved second\na.py\nsecond.py\n{new_id}",
         ]
         assert (wt / "a.py").read_text() == "second fresh"
-        assert loop._red_ids(group, 4, wt, EventLog(cfg)) == [new_id]
+        assert loop._red_ids(cfg, group, 4, wt, EventLog(cfg)) == [new_id]
     else:
         with pytest.raises(WrongTest):
             loop._follow_verdict(cfg, group, judgment, wt, log, backend, verdict)
@@ -1956,7 +1956,7 @@ def test_redo_red_restores_original_snapshots_and_replaces_evidence(
         assert (wt / "a.py").read_text() == "original"
         for index in (1, 3, 4):
             with pytest.raises(RulingNeeded, match="no current successful evidence"):
-                loop._red_ids(group, index, wt, EventLog(cfg))
+                loop._red_ids(cfg, group, index, wt, EventLog(cfg))
     assert {name: log.kept(f"g1-{name}-before") for name in snapshots} == snapshots
     assert (wt / "keep.py").read_text() == "preserve"
 
@@ -2320,9 +2320,9 @@ def test_group_test_fix_resumes_affected_checks_only(
     checked = []
     original_check = loop.verify.check_step
 
-    def check(step, worktree):
+    def check(cfg, step, worktree):
         checked.append(step.id)
-        return original_check(step, worktree)
+        return original_check(cfg, step, worktree)
 
     monkeypatch.setattr(loop.verify, "check_step", check)
     commit = loop.run_group(cfg, group, log, backend)
@@ -3146,12 +3146,12 @@ def test_judgment_leaves_unresolved_producer_ids_out_and_keeps_its_report(
     log.keep("g1-red-b-evidence", "")
     group = make_group(red_a, red_b, build, design="docs/superpowers/specs/approved.md")
     judgment = loop._judgment(
+        cfg,
         group,
         2 if context == "step" else None,
         wt,
         EventLog(cfg),
         failure=failure,
-        spec_dir=cfg.spec_dir,
     )
     assert judgment.red_ids == ("tests/test_a.py::test_new",)
     assert str(cfg.state_dir / "g1-red-b.txt") in judgment.reports

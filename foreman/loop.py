@@ -152,7 +152,7 @@ def _answer(
     name = f"{group.id}-{step.id}"
     log.mismatched(group.id, name, kind, f"step {step.id} {kind}; kept {kept}")
     if _round(cfg, log, name) is None:
-        judgment = _judgment(group, index, wt, log, failure=kept, spec_dir=cfg.spec_dir)
+        judgment = _judgment(cfg, group, index, wt, log, failure=kept)
         _judge(cfg, group, step.id, judgment, wt, log, backend)
         return
     try:
@@ -227,7 +227,7 @@ def _red_evidence(
 
 
 def _current_red_evidence(
-    step: Step, name: str, wt: Path, log: EventLog
+    cfg: Config, step: Step, name: str, wt: Path, log: EventLog
 ) -> tuple[reports.RedEvidence, ...]:
     """Resolve one successful generation, including any preserved repair baseline."""
     if log.kept(f"{name}-evidence") != _producer_identity(step):
@@ -236,7 +236,7 @@ def _current_red_evidence(
     preserved = log.kept(f"{name}-repair-evidence")
     if preserved:
         ids = tuple(item.test_id for item in evidence)
-        current = verify.capture_repair(wt, ids)
+        current = verify.capture_repair(cfg, wt, ids)
         if json.dumps(asdict(current), sort_keys=True) != preserved:
             raise RulingNeeded("repair differs from preserved producer evidence")
     return evidence
@@ -259,6 +259,7 @@ def _settle(
 
 
 def _red_ids(
+    cfg: Config,
     group: Group,
     index: int,
     wt: Path,
@@ -302,7 +303,7 @@ def _red_ids(
         ):
             raise _rule(log, group, wt, f"{name}.txt", "invalid red file filter")
         try:
-            evidence = _current_red_evidence(producer, name, wt, log)
+            evidence = _current_red_evidence(cfg, producer, name, wt, log)
             selected = [
                 item.test_id
                 for item in evidence
@@ -322,6 +323,7 @@ def _red_ids(
 
 
 def _group_red_ids(
+    cfg: Config,
     group: Group,
     wt: Path,
     log: EventLog,
@@ -335,13 +337,13 @@ def _group_red_ids(
         if isinstance(candidate.form, forms.Red):
             name = f"{group.id}-{candidate.id}"
             try:
-                evidence = _current_red_evidence(candidate, name, wt, log)
+                evidence = _current_red_evidence(cfg, candidate, name, wt, log)
             except (ConfigError, RulingNeeded) as error:
                 found.setdefault(name, str(error))
                 continue
             produced[name] = [item.test_id for item in evidence]
     for index in range(len(group.steps)):
-        _red_ids(group, index, wt, log, unresolved=found)
+        _red_ids(cfg, group, index, wt, log, unresolved=found)
     _settle(group, wt, log, found, unresolved)
     # A producer a build cannot resolve contributes none of its ids.
     ids: list[str] = []
@@ -433,7 +435,7 @@ def _step(
     except ConfigError:
         log.keep(f"{name}-before", before)
     unresolved: dict[str, str] = {}
-    red_ids = _red_ids(group, index, wt, log, unresolved=unresolved)
+    red_ids = _red_ids(cfg, group, index, wt, log, unresolved=unresolved)
     for producer, reason in unresolved.items():
         try:
             log.kept(f"{producer}-brief")
@@ -442,9 +444,7 @@ def _step(
             raise _rule(log, group, wt, f"{producer}.txt", reason) from None
     if unresolved:
         # The Mismatches table's `evidence` row: judge the build before it starts.
-        judgment = _judgment(
-            group, index, wt, log, spec_dir=cfg.spec_dir, dispatched=False
-        )
+        judgment = _judgment(cfg, group, index, wt, log, dispatched=False)
         _judge(cfg, group, step.id, judgment, wt, log, backend)
         return
     cut = None
@@ -511,7 +511,7 @@ def _step(
         )
         return
     if report.test_wrong:
-        judgment = _judgment(group, index, wt, log, spec_dir=cfg.spec_dir)
+        judgment = _judgment(cfg, group, index, wt, log)
         _judge(cfg, group, step.id, judgment, wt, log, backend)
         return
     if not _check_step(cfg, group, index, wt, log, backend):
@@ -540,28 +540,26 @@ def _check_step(
 ) -> bool:
     """Check a dispatched or repaired build through the same judgment path."""
     step = group.steps[index]
-    verdict = verify.check_step(step, wt)
+    verdict = verify.check_step(cfg, step, wt)
     if verdict is not None:
         path = log.keep(f"{group.id}-{step.id}-check", _text(verdict.result))
         if verdict.result.code == TIMEOUT_CODE:
             raise _rule(log, group, wt, str(path), f"step {step.id} check timed out")
         if not verdict.green:
-            judgment = _judgment(
-                group, index, wt, log, failure=str(path), spec_dir=cfg.spec_dir
-            )
+            judgment = _judgment(cfg, group, index, wt, log, failure=str(path))
             _judge(cfg, group, step.id, judgment, wt, log, backend, completed=completed)
             return False
     return True
 
 
 def _judgment(
+    cfg: Config,
     group: Group,
     index: int | None,
     wt: Path,
     log: EventLog,
     *,
     failure: str | None = None,
-    spec_dir: str = forms.GAUNTLET_SPEC_DIR,
     dispatched: bool = True,
 ) -> forms.Judgment:
     """Resolve a failed step or completed group through the same evidence path.
@@ -574,11 +572,11 @@ def _judgment(
     if index is None:
         name = f"{group.id}-group-check"
         candidates = group.steps
-        red_ids = _group_red_ids(group, wt, log, unresolved=unresolved)
+        red_ids = _group_red_ids(cfg, group, wt, log, unresolved=unresolved)
     else:
         step = group.steps[index]
         name = f"{group.id}-{step.id}"
-        red_ids = _red_ids(group, index, wt, log, unresolved=unresolved)
+        red_ids = _red_ids(cfg, group, index, wt, log, unresolved=unresolved)
         selected = (
             {r.step for r in step.form.red}
             if isinstance(step.form, forms.Build)
@@ -628,7 +626,7 @@ def _judgment(
             tuple(red_ids),
             tuple(paths),
         )
-        problems = forms.validate_judgment(judgment, spec_dir=spec_dir)
+        problems = forms.validate_judgment(judgment, spec_dir=cfg.spec_dir)
         if problems:
             raise ConfigError("; ".join(problems))
     except (ConfigError, RulingNeeded) as error:
@@ -943,7 +941,7 @@ def _repair(
             assert stopped is not None
             build = group.steps[stopped]
             before_build = log.kept(f"{group.id}-{build.id}-before")
-        original = verify.capture_repair(wt, ids)
+        original = verify.capture_repair(cfg, wt, ids)
         fingerprint = json.dumps(asdict(original), sort_keys=True)
         try:
             preserved = log.kept(f"{name}-repair-evidence")
@@ -992,7 +990,7 @@ def _repair(
             group, wt, log, repair_name, before_repair, outside, f"{repair_name}.txt"
         )
     try:
-        verify.validate_repair(original, wt)
+        verify.validate_repair(cfg, original, wt)
     except RulingNeeded as error:
         _next_judgment(
             cfg,
@@ -1081,9 +1079,7 @@ def _gate(cfg: Config, group: Group, wt: Path, log: EventLog, backend: Backend) 
             raise _rule(log, group, wt, str(path), "combined-tree check timed out")
         if verdict.green:
             return
-        judgment = _judgment(
-            group, None, wt, log, failure=str(path), spec_dir=cfg.spec_dir
-        )
+        judgment = _judgment(cfg, group, None, wt, log, failure=str(path))
         _judge(cfg, group, "group-check", judgment, wt, log, backend)
 
 
@@ -1202,7 +1198,7 @@ def run_upheld(
         raise _rule(
             log, group, wt, f"{group.id}-review-queue.txt", str(error)
         ) from error
-    _group_red_ids(group, wt, log)
+    _group_red_ids(cfg, group, wt, log)
     kept: dict[str, reports.Report] = {}
     for reviewer in cfg.reviewers:
         try:
@@ -1312,10 +1308,10 @@ def run_retest(
         if pending.get("queue") != _queue_identity(group):
             raise ConfigError("owner judgment queue changed; rerun producer evidence")
         if context == "group-check":
-            current_ids = _group_red_ids(group, wt, log, unresolved={})
+            current_ids = _group_red_ids(cfg, group, wt, log, unresolved={})
         else:
             assert index is not None
-            current_ids = _red_ids(group, index, wt, log, unresolved={})
+            current_ids = _red_ids(cfg, group, index, wt, log, unresolved={})
         if tuple(current_ids) != judgment.red_ids:
             raise ConfigError("owner judgment red selectors changed; refresh judgment")
     except (ConfigError, RulingNeeded) as error:

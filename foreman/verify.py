@@ -98,18 +98,18 @@ def red(cfg: Config, wt: Path, ids: tuple[str, ...]) -> tuple[RedRun, ...]:
 
 def verify(cfg: Config, wt: Path) -> Verdict:
     """Run format_cmd, then check_cmd, in wt. A failed format is red and final."""
-    formatted = run.run(cfg.format_cmd, wt)
+    formatted = run.run(cfg.format_cmd, wt, timeout=cfg.check_seconds)
     if formatted.code != 0:
         return Verdict(False, formatted)
-    checked = run.run(cfg.check_cmd, wt)
+    checked = run.run(cfg.check_cmd, wt, timeout=cfg.check_seconds)
     return Verdict(checked.code == 0, checked)
 
 
-def check_step(step: Step, wt: Path) -> Verdict | None:
+def check_step(cfg: Config, step: Step, wt: Path) -> Verdict | None:
     """Run step.check in wt; None when it is empty, green when the code is expect_code."""
     if not step.check:
         return None
-    result = run.run(step.check, wt)
+    result = run.run(step.check, wt, timeout=cfg.check_seconds)
     return Verdict(result.code == step.expect_code, result)
 
 
@@ -194,7 +194,7 @@ def _assertions(path: Path) -> tuple:
     return tuple(signatures)
 
 
-def capture_repair(wt: Path, red_ids: tuple[str, ...]) -> RepairSnapshot:
+def capture_repair(cfg: Config, wt: Path, red_ids: tuple[str, ...]) -> RepairSnapshot:
     """Capture exact collection and lexical assertions without running the tests.
 
     File-wide membership and assertion preservation is conservative: unrelated
@@ -239,7 +239,7 @@ sys.exit(code)
 """
     command = [sys.executable, "-c", script, *files]
     try:
-        result = run.run(command, wt, timeout=60)
+        result = run.run(command, wt, timeout=cfg.check_seconds)
     except ForemanError as exc:
         raise RulingNeeded(f"cannot collect repair selectors: {exc}") from exc
     if result.code != 0:
@@ -261,9 +261,9 @@ sys.exit(code)
     return RepairSnapshot(red_ids, membership, assertions)
 
 
-def validate_repair(original: RepairSnapshot, wt: Path) -> None:
+def validate_repair(cfg: Config, original: RepairSnapshot, wt: Path) -> None:
     """Re-read original evidence; never derive a new red set from repair reports."""
-    current = capture_repair(wt, original.red_ids)
+    current = capture_repair(cfg, wt, original.red_ids)
     if current.membership != original.membership:
         raise RulingNeeded("repair changed original selector membership")
     if current.assertions != original.assertions:
