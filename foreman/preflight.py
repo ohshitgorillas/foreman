@@ -351,12 +351,14 @@ def check_hooks(step: Step, group: Group, cfg: Config) -> list[Finding]:
     # The step's own check is not fed: Foreman runs it in foreman/verify.py,
     # outside any agent session, so no hook sees it.
     commands: list[str] = []
-    rel = f".claude/agents/{step.role}.md"
-    try:
-        text = (cfg.target_repo / rel).read_text()
-        commands = role_commands(text, step.paths, red_paths(step, group))
-    except OSError:
-        pass  # check 3 reports an unreadable role file
+    # The role's text where cfg.backend finds it; checks 5 and 6 report a
+    # missing or unreadable role file.
+    role = role_lookup(group, cfg).find(step.role)
+    if role is not None:
+        try:
+            commands = role_commands(role.read(), step.paths, red_paths(step, group))
+        except _UNREADABLE:
+            pass
     hooks: list[str] = []
     for path in (*USER_SETTINGS, cfg.target_repo / ".claude/settings.json"):
         try:

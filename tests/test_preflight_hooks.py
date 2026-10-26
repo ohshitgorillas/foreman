@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from foreman import forms, preflight
+from foreman import forms, git, preflight
 from foreman.config import Config
 from foreman.preflight import check_hooks, role_commands
+from foreman.run import run_ok
 from foreman.steps import Group, Step
 
 # A fake hook: logs its stdin and cwd, then acts on the command it was fed.
@@ -31,6 +32,18 @@ if "SLEEP" in command:
     import time
     time.sleep(5)
 """
+
+
+@pytest.fixture(autouse=True)
+def user_agents(monkeypatch, tmp_path: Path) -> None:
+    """Point each backend's home agents folder at an empty temporary one."""
+    homes = {
+        "claude-local": tmp_path / "agents-home" / ".claude" / "agents",
+        "codex-local": tmp_path / "agents-home" / ".codex" / "agents",
+    }
+    for home in homes.values():
+        home.mkdir(parents=True)
+    monkeypatch.setattr(preflight, "USER_AGENTS", homes)
 
 
 @pytest.fixture
@@ -73,11 +86,18 @@ def step(check: list[str], role: str = "builder", paths: list[str] | None = None
     )
 
 
-def role_file(cfg: Config, text: str, role: str = "builder") -> None:
-    """Write fixture role file `role` into the target repo."""
-    path = cfg.target_repo / f".claude/agents/{role}.md"
+def write_role(root: Path, text: str, role: str = "builder") -> None:
+    """Write fixture role file `role` under `root`."""
+    path = root / f".claude/agents/{role}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"---\nname: {role}\n---\n\n{text}\n")
+
+
+def role_file(cfg: Config, text: str, role: str = "builder") -> None:
+    """Commit fixture role file `role` at HEAD of the target repo."""
+    write_role(cfg.target_repo, text, role)
+    run_ok(["git", "add", "--all"], cfg.target_repo)
+    run_ok(["git", "commit", "-q", "-m", f"role {role}"], cfg.target_repo)
 
 
 def fed(log: Path) -> list[str]:
@@ -185,6 +205,29 @@ def test_role_file_commands_are_fed_with_placeholders_filled(
         "git diff",
         "make check",
     ]
+
+
+def test_the_role_is_read_where_the_backend_finds_it(
+    cfg: Config, user, tmp_path: Path, log: Path
+):
+    settings(user[0], entry(hook(tmp_path, log, "guard.py")))
+    role_file(cfg, "Run `git status`.")
+    wt = git.make_worktree(cfg, "g1")
+    write_role(wt, "Run `git diff`.")
+    write_role(cfg.target_repo, "Run `make check`.")
+    s = step([])
+    assert check_hooks(s, group(s), cfg) == []
+    assert fed(log) == ["git diff"]
+
+
+def test_a_missing_role_feeds_no_command_and_is_no_finding(
+    cfg: Config, user, tmp_path: Path, log: Path
+):
+    settings(user[0], entry(hook(tmp_path, log, "guard.py")))
+    write_role(cfg.target_repo, "Run `make check`.")
+    s = step([])
+    assert check_hooks(s, group(s), cfg) == []
+    assert ran(log) == []
 
 
 def test_role_commands_keep_only_the_named_tools():
