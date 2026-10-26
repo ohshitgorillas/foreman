@@ -2,25 +2,20 @@ Status: approved.
 
 ## Why
 
-The g7 build stopped 28 times; 18 of the 22 that can be judged had no defect behind them, and 6 cannot be judged because nothing was kept (`docs/research/stops-g7.md:9`). Pre-flight stops (`docs/research/stops-g7.md:36-43`) already warn and go on (`foreman/cli.py:95-100`), and a BLOCKED red report is already read (`foreman/reports.py:198-203`). Seven stops sit in leads and role prompts, outside `foreman/` (`docs/research/stops-g7.md:31-46`, rows 12, 15, 19, 23, 25, 26, 28). What still jams inside Foreman, by cause:
+The g7 build stopped 28 times; 18 of the 22 that can be judged had no defect behind them, and 6 cannot be judged because nothing was kept (`docs/research/stops-g7.md:9`). Pre-flight stops (`docs/research/stops-g7.md:36-43`) warn and go on (`foreman/cli.py:95-100`). Seven stops sit in leads and role prompts, outside `foreman/` (`docs/research/stops-g7.md:31-46`, rows 12, 15, 19, 23, 25, 26, 28). The causes inside Foreman, and where each is answered:
 
-- **Red paperwork is the gate, not the tests.** A red step whose check failed as expected (`foreman/loop.py:517`) is still rejected when its report carries `LEFT`, `UNTESTABLE` or `CONTRADICTS` (`foreman/reports.py:198-203`), lacks the agent's own `RUN red`/`RUN rerun` lines or their exact summary text (`foreman/reports.py:246-259`, `foreman/reports.py:117-132`), or carries a malformed envelope record (`foreman/reports.py:174-197`). Stops 1, 6, 9 and 10 were tests red as intended (`docs/research/stops-g7.md:15`, `:20`, `:23`, `:24`). Two homes judge "red": the step check (`foreman/verify.py:108-113`) and the agent's RUN records (`foreman/reports.py:246-259`).
-- **A refusal is answered with the same brief.** `_answer` reruns the identical render (`foreman/loop.py:133-163`, `foreman/loop.py:499-512`); a steering or overload refusal of fixed text recurs, then a juror is asked, whose verdicts (`foreman/reports.py:77`) name no brief-form fault. Stops 3, 4, 14 and 28 (`docs/research/stops-g7.md:17-18`, `:33`, `:46`). A red brief the cut refuses is dispatched whole anyway (`foreman/loop.py:455-461`).
-- **Kept reports are overwritten.** `_dispatch` keeps each attempt under one name (`foreman/loop.py:78`), so a rerun (`foreman/loop.py:163`, `foreman/loop.py:1120`) erases the report it answers. Stops 5 and 8 (`docs/research/stops-g7.md:19`, `:22`).
-- **A refused finding batch stops outright** through `_refusal_stops` (`foreman/loop.py:98-111`, called at `foreman/loop.py:1263`), outside the one rerun counter `_round` (`foreman/loop.py:114-130`).
+- **Red paperwork, not the tests, gated a red step.** Stops 1, 6, 9 and 10 were tests red as intended (`docs/research/stops-g7.md:15`, `:20`, `:23`, `:24`). The step check (`foreman/verify.py:107-113`, called at `foreman/loop.py:668`) and `verify.red` (`foreman/verify.py:71-95`, called at `foreman/loop.py:340`) judge red; `reports.red` reads claims only (`foreman/reports.py:119-162`).
+- **A refusal was answered with the same brief.** Stops 3, 4, 14 and 28 (`docs/research/stops-g7.md:17-18`, `:33`, `:46`). `_refused` handles a step's refusal (`foreman/loop.py:125-189`); a red brief the cut refuses stops before dispatch (`foreman/loop.py:581-595`).
+- **Kept reports were overwritten.** Stops 5 and 8 (`docs/research/stops-g7.md:19`, `:22`). `keep_report` keeps every attempt (`foreman/events.py:102-109`), called from `_dispatch_kept` (`foreman/loop.py:105-106`).
+- **A refused finding batch stopped outright.** `run_upheld` answers it through `_round` (`foreman/loop.py:1448-1468`, `foreman/loop.py:192-208`).
 
-Copies of shared concerns, 9:
-
-- Stop recording, 3: `_rule` (`foreman/loop.py:34-38`), `_owner_stop` (`foreman/loop.py:640-647`) and `_refusal_stops` (`foreman/loop.py:98-111`) stop outside the one `stop` event the cli writes (`foreman/cli.py:146-159`); `_rule` takes no kind (`foreman/loop.py:34`).
-- Refusal markers, 2: `foreman/reports.py:13-14` and the literals at `foreman/reports.py:200`.
-- Target interpreter, 1: `capture_repair` collects through `sys.executable` (`foreman/verify.py:240`), Foreman's own interpreter, where `verify.red` runs `cfg.python_cmd` (`foreman/verify.py:75`).
-- Test helpers, 3 outside `tests/conftest.py:170-262`: red report text at `tests/test_reports.py:109` and `tests/test_preflight.py:87`; verdict text at `tests/test_cli.py:31-34`.
+Copies of shared concerns left in the tree, 3, all test helpers outside `tests/conftest.py:170-262`: red report text at `tests/test_reports.py:108-113` and `tests/test_preflight.py:87`; verdict text at `tests/test_cli.py:31-34`.
 
 ## Modules
 
 The modules and homes of `harness-core-design.md`, `group-run-design.md`, `test-wrong-design.md`, `brief-forms-design.md` and `red-overload-design.md` stand except where this file changes them. Only changed modules are listed.
 
-`foreman/run.py`: the one process runner. Every child starts in its own session; a timeout kills its whole process group and returns `TIMEOUT_CODE`. Replaces `foreman/preflight.py:365-382` and `foreman/cli.py:153-159`.
+`foreman/run.py`: the one process runner. Every child starts in its own session; a timeout kills its whole process group and returns `TIMEOUT_CODE`. Replaces every other process runner; its callers include `run_hook` (`foreman/preflight.py:362`) and the exit watcher (`foreman/cli.py:191`).
 
 ```python
 def run(cmd: list[str], cwd: Path, timeout: float | None = None,
@@ -44,7 +39,7 @@ class Config:
                                 # capture_repair's collection
 ```
 
-`foreman/verify.py`: the one judge of whether tests are red. Every command passes `cfg.check_seconds`. Replaces the RUN-record checks at `foreman/reports.py:117-132` and `foreman/reports.py:246-259`.
+`foreman/verify.py`: the one judge of whether tests are red. Every command passes `cfg.check_seconds`. Replaces reading `RUN` records from an agent's report; `reports.red` (`foreman/reports.py:119-162`) reads none.
 
 ```python
 @dataclass(frozen=True)
@@ -72,7 +67,8 @@ class RedClaims:
 
 def red(text: str) -> RedClaims: ...
     # ConfigError only for: no SHAPE red .. END TESTS block, a malformed BEHAVIOR line,
-    # an invalid or duplicate test id, or a refusal marker inside the block
+    # an invalid or duplicate test id, or any line in the block starting _REJECTED
+    # or _OVERLOADED; a block with no BEHAVIOR lines gives empty ids
 ```
 
 `foreman/events.py`: every stop is one `stop` event with a kind, and every dispatch attempt is kept.
@@ -85,7 +81,8 @@ def stopped(self, group_id: str | None, kind: str, exit_code: int, text: str) ->
     # EventLog method: one "stop" event; kind outside STOP_KINDS is ValueError
 def keep_report(self, name: str, text: str) -> Path: ...
     # EventLog method: writes <name>-attempt-<n>.txt, n from 1 counted from kept files,
-    # and <name>.txt as the latest; returns the attempt's path
+    # and <name>.txt as the latest; returns the attempt's path. An agent's stdout is
+    # kept as <name>, its stderr as <name>-stderr, each with attempt files
 ```
 
 `foreman/errors.py`: `Escalated` goes. Each `ForemanError` subclass names its stop kind.
@@ -105,30 +102,62 @@ class ForemanError(Exception):
 ```python
 def _rule(log: EventLog, group: Group, wt: Path, kept: str, why: str,
           kind: str) -> RulingNeeded: ...
-    # notify_dispatcher("ruling_needed", ...) as today; the cli writes the stop event
+    # ValueError for a kind outside STOP_KINDS; notify_dispatcher("ruling_needed", ...);
+    # the cli writes the stop event with the returned error's kind
+def _dispatch_kept(group: Group, wt: Path, log: EventLog, backend: Backend, name: str,
+                   brief_text: str, role: str, *,
+                   load: int | None = None) -> tuple[reports.Report, Path]: ...
+    # keeps stdout and stderr through log.keep_report; returns the report and the
+    # -attempt-<n>.txt path keep_report returned for stdout
 def _dispatch(...) -> reports.Report: ...
-    # unchanged signature; keeps the agent's output through log.keep_report
+    # unchanged signature; _dispatch_kept(...)[0]
+def _red_claims(step: Step, name: str,
+                log: EventLog) -> tuple[tuple[int, str], ...]: ...
+    # (behavior number, test id) over every part, behavior numbers offset by part;
+    # runs nothing. ConfigError when a behavior number has neither an id nor a note
+    # covering it, or a test id is claimed in two parts. Keeps the notes as
+    # <name>-notes on every call; they are added to the reports of any judgment on
+    # the step or its builds
 def _red_evidence(cfg: Config, step: Step, name: str, wt: Path,
-                  log: EventLog) -> tuple[reports.RedEvidence, ...]: ...
-    # reports.red over every part; verify.red over the claimed ids;
-    # accepted when every claimed id is red ("assertion", "not-implemented", "not-raised")
-    # and every behavior number has an id or a note; notes kept as <name>-notes
-    # and added to the reports of any judgment on the step or its builds
+                  log: EventLog) -> tuple[tuple[int, str], ...]: ...
+    # _red_claims, then verify.red over the claimed ids; ConfigError unless every id
+    # is red ("assertion", "not-implemented", "not-raised"). Called only when the
+    # step's red report is accepted, before any build runs
 def _refused(cfg: Config, group: Group, index: int, wt: Path, log: EventLog,
-             backend: Backend, report: reports.Report, kept: str) -> None: ...
-    # the one handler of a step's refused report; the Refusals table says what it does
+             backend: Backend, report: reports.Report, reported: str,
+             kept: str) -> None: ...
+    # the one handler of a step's refused report, per the Refusals table; `reported`
+    # is the dispatched name (<name> or <name>-part-<k>) and finds the refused part;
+    # returns only after a red recut, having rewritten <name>-parts; raises otherwise
 ```
 
-A claimed id that is not red, or a behavior with neither id nor note, goes to `_answer` as the `red report` row does today. `run_upheld` answers a refused batch through `_round` the way `_review` answers a reviewer (`foreman/loop.py:1118-1124`); `_refusal_stops` goes.
+A note covers behavior `n` when it starts `LEFT n`, `UNTESTABLE n` or `CONTRADICTS n`; a note with no number covers nothing. `_current_red_evidence` and `_repair` read claims through `_red_claims` and never run `verify.red`.
+
+A claimed id that is not red, or a behavior with neither id nor note, goes to `_answer` as the `red report` row does. `run_upheld` answers a refused batch through `_round` the way `_review` answers a reviewer (`foreman/loop.py:1280-1291`); past `answer_rounds` a batch stops as `overload` when its last report is overloaded, else as `steering`.
+
+`_step` dispatches a cut red step's parts from the counts in `<name>-parts`, re-reading them after each refused part: after a recut the sub-parts take the refused part's position, and the later parts follow them.
+
+#### Kind at each `_rule` call
+
+| Kind | Calls |
+|---|---|
+| `timeout` | a dispatch overrun (`foreman/loop.py:121`); a step check timeout (`foreman/loop.py:696`); a group check timeout (`foreman/loop.py:1244`) |
+| `evidence` | unresolved red-producer evidence (`foreman/loop.py:378`, `foreman/loop.py:575`) |
+| `reviewer refused` | the reviewer refusal loop past `answer_rounds` (`foreman/loop.py:1288`) |
+| `no change` | nothing changed under the group's paths (`foreman/loop.py:1304`) |
+| `infrastructure` | a kept-text read failure; a view failure; a judgment parse error |
+| `steering` | every other call, matching `RulingNeeded.kind` (`foreman/errors.py:25`) |
 
 #### Refusals
 
+Every refusal stop, of a step, a red part, a reviewer or an upheld batch, names the kept `<name>-attempt-<n>.txt` file `_dispatch_kept` returned, never `<name>.txt`.
+
 | Report or event | Handling |
 |---|---|
-| `REJECTED: STEERING` from any step | `_rule(..., kind="steering")`, naming the kept attempt and the quoted lines; no rerun, no juror; replaces the `refused` row of `brief-forms-design.md:223` |
-| `OVERLOADED:` from a red step | `overload.cut_red` again with `behavior_limit` set to half the refused part's behavior count, rounded down, at least 1; the parts dispatch as a cut red step does; a part of one behavior refused `OVERLOADED:` stops with `kind="overload"` |
+| `REJECTED: STEERING` from any step | `_rule(..., kind="steering")`, naming the kept attempt and quoting its non-blank lines, joined and capped at 500 characters; no rerun, no juror; replaces the `refused` row of `brief-forms-design.md:223` |
+| `OVERLOADED:` from a red step | `overload.cut_red` again with `behavior_limit` set to half the refused part's behavior count, rounded down, at least 1; `_refused` rewrites `<name>-parts` and returns, and `_step` dispatches the parts; a part of one behavior refused `OVERLOADED:`, or a recut that refuses, stops with `kind="overload"` |
 | `OVERLOADED:` from any other step | `_rule(..., kind="overload")` |
-| `cut_red` refuses before dispatch | `_rule(..., kind="overload")` naming every `Overload.line()` and the step; nothing is dispatched; replaces the whole-form dispatch at `foreman/loop.py:455-461` |
+| `cut_red` refuses before dispatch | `_step` stops with `_rule(..., kind="overload")` naming every `Overload.line()` and `<name>-brief.txt`; nothing is dispatched |
 
 ## Homes
 
@@ -138,13 +167,14 @@ A claimed id that is not red, or a behavior with neither id nor note, goes to `_
 | Command timeouts | `Config.dispatch_seconds` for agents, `Config.check_seconds` for check, format, view, hook, collection and red-run commands | a literal seconds value; one of those commands run with no timeout |
 | Whether tests are red | `verify.red` over claimed ids, and `verify.check_step` | reading red outcomes, summaries or `RUN` lines from an agent's report |
 | Target interpreter | `Config.python_cmd`, for every Python command run in the target repository | `sys.executable` in such a command |
-| Red report claims | `reports.red` returning `RedClaims` | rejecting a report for a note, or for an `IGNORED` or `CHOSEN` line; a second reader of `BEHAVIOR` lines |
+| Red report claims | `reports.red` returning `RedClaims`, read across parts only by `loop._red_claims` | rejecting a report for a note, or for an `IGNORED` or `CHOSEN` line; a second reader of `BEHAVIOR` lines; a second reader of a step's parts' claims |
+| Stop kind of a ruling | `loop._rule`'s `kind`, per the Kind at each `_rule` call table | setting `RulingNeeded.kind` anywhere else |
 | Refusal markers | `reports._REJECTED`, `reports._OVERLOADED` | the literal strings anywhere else in `foreman/` |
 | A step's refused report | `loop._refused`, per the Refusals table | rerunning an identical refused brief; a juror asked about a refusal |
 | Rerun counting | `loop._round` for steps, reviewers and finding batches | `_refusal_stops`; a second counter |
 | Stop recording | `EventLog.stopped`, called only from `cli` once `config.load` has returned, with `ForemanError.kind` or `killed`/`crashed`, and the group the command names or `None` | an exit after `config.load` returns with no `stop` event; a stop kind outside `STOP_KINDS`; a group the command did not name; the alert file as the only record |
-| Kept dispatch output | `EventLog.keep_report`, called only from `loop._dispatch` | `log.keep` of an agent's output; overwriting an earlier attempt |
-| Test helpers | `tests/conftest.py`: `make_step`, `make_red`, `make_group`, `red_report`, `verdict_text` | `Step(`, `Group(`, `SHAPE red` or `VERDICT ` text built in a test file |
+| Kept dispatch output | `EventLog.keep_report`, called only from `loop._dispatch_kept`, for an agent's stdout and stderr | `log.keep` of an agent's output; overwriting an earlier attempt |
+| Test helpers | `tests/conftest.py`: `make_step`, `make_red`, `make_group`, `red_report`, `verdict_text`; in `tests/test_loop.py`, an autouse fake of `verify.red` | `Step(`, `Group(`, `SHAPE red` or `VERDICT ` text built in a test file; a loop test that runs the real `verify.red` |
 
 ```python
 # tests/conftest.py
@@ -169,17 +199,17 @@ def verdict_text(kind: str = "build wrong", action: str = "retry", step: str | N
 | 6 | `foreman/preflight.py`, `foreman/judge.py`, `tests/test_preflight_hooks.py`, `tests/test_judge.py` | `builder` | `uv run pytest -q tests/test_preflight_hooks.py tests/test_judge.py` |
 | 7 | `foreman/events.py`, `foreman/errors.py`, `tests/test_events.py` | `builder` | `uv run pytest -q tests/test_events.py` |
 | 8 | `foreman/cli.py`, `tests/test_cli.py` | `builder` | `uv run pytest -q tests/test_cli.py` |
-| 9 | `foreman/reports.py`, `tests/test_reports.py` | `builder` | `uv run pytest -q tests/test_reports.py` |
-| 10 | `foreman/loop.py`, `tests/test_loop.py` | `builder` | `uv run pytest -q tests/test_loop.py` |
+| 9 | `foreman/reports.py`, `foreman/loop.py`, `tests/test_reports.py`, `tests/test_loop.py` | `builder` | `uv run pytest -q tests/test_reports.py tests/test_loop.py` |
+| 10 | `foreman/loop.py`, `tests/test_loop.py`, `tests/test_cli.py` | `builder` | `uv run pytest -q tests/test_loop.py tests/test_cli.py` |
 | 11 | `foreman/loop.py`, `tests/test_loop.py` | `builder` | `uv run pytest -q tests/test_loop.py` |
 | 12 | `foreman/verify.py`, `tests/test_verify.py` | `builder` | `uv run pytest -q tests/test_verify.py` |
 
 - Steps 1 and 2 move tests onto the conftest helpers and change no assertion.
 - Step 5 passes `cfg.check_seconds` from `verify` and `views.make`, changes `check_step` to take `cfg`, and adds `verify.red`.
 - Step 7 adds `STOP_KINDS`, `stopped`, `keep_report` and `ForemanError.kind`, and removes `Escalated`.
-- Step 9: `reports.red` returns `RedClaims`; every parser skips `IGNORED` and `CHOSEN` lines.
-- Step 10: `_rule` takes a kind at every call; `_dispatch` keeps through `keep_report`; `_red_evidence` reads claims and runs `verify.red`.
-- Step 11: `_refused` and the Refusals table; `run_upheld` through `_round`; `_refusal_stops` goes.
+- Step 9: `reports.red` returns `RedClaims`; every parser skips `IGNORED` and `CHOSEN` lines; `_red_claims` reads claims and notes across parts; `_red_evidence` runs `verify.red` at red acceptance; `_current_red_evidence` and `_repair` use `_red_claims`; `tests/test_loop.py` fakes `verify.red` autouse.
+- Step 10: `_rule` takes a kind at every call, per the Kind at each `_rule` call table, and raises `ValueError` outside `STOP_KINDS`; `_dispatch_kept` keeps stdout and stderr through `keep_report` and returns the attempt path; `tests/test_cli.py::test_stop_writes_one_stop_event_with_its_kind` expects `"no change"`.
+- Step 11: `_refused` and the Refusals table, with every refusal stop naming the kept attempt; `_step` dispatches recut parts from `<name>-parts`; `run_upheld` through `_round`; `_refusal_stops` goes.
 - Step 12: `capture_repair` collects through `cfg.python_cmd`.
 
 ## Decisions for the owner
